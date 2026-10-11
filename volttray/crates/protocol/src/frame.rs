@@ -31,7 +31,14 @@ pub struct Frame {
 }
 
 impl Frame {
-    fn new(report: u8, device_index: u8, feature_index: u8, function: u8, sw_id: u8, params: &[u8]) -> Self {
+    fn new(
+        report: u8,
+        device_index: u8,
+        feature_index: u8,
+        function: u8,
+        sw_id: u8,
+        params: &[u8],
+    ) -> Self {
         let mut buf = [0u8; MAX_PARAMS];
         buf[..params.len()].copy_from_slice(params);
         Frame {
@@ -45,12 +52,38 @@ impl Frame {
         }
     }
 
-    pub fn new_short(device_index: u8, feature_index: u8, function: u8, sw_id: u8, params: [u8; 3]) -> Self {
-        Frame::new(REPORT_SHORT, device_index, feature_index, function, sw_id, &params)
+    pub fn new_short(
+        device_index: u8,
+        feature_index: u8,
+        function: u8,
+        sw_id: u8,
+        params: [u8; 3],
+    ) -> Self {
+        Frame::new(
+            REPORT_SHORT,
+            device_index,
+            feature_index,
+            function,
+            sw_id,
+            &params,
+        )
     }
 
-    pub fn new_long(device_index: u8, feature_index: u8, function: u8, sw_id: u8, params: [u8; 16]) -> Self {
-        Frame::new(REPORT_LONG, device_index, feature_index, function, sw_id, &params)
+    pub fn new_long(
+        device_index: u8,
+        feature_index: u8,
+        function: u8,
+        sw_id: u8,
+        params: [u8; 16],
+    ) -> Self {
+        Frame::new(
+            REPORT_LONG,
+            device_index,
+            feature_index,
+            function,
+            sw_id,
+            &params,
+        )
     }
 
     pub fn is_long(&self) -> bool {
@@ -76,7 +109,9 @@ impl Frame {
 
     /// 解析线上字节。设备错误帧返回 `Err(HidppError::Device{..})`。
     pub fn decode(bytes: &[u8]) -> Result<Frame, HidppError> {
-        let (&report, rest) = bytes.split_first().ok_or(HidppError::Malformed(MalformedKind::EmptyFrame))?;
+        let (&report, rest) = bytes
+            .split_first()
+            .ok_or(HidppError::Malformed(MalformedKind::EmptyFrame))?;
         let expected = match report {
             REPORT_SHORT => SHORT_LEN,
             REPORT_LONG => LONG_LEN,
@@ -138,10 +173,16 @@ mod tests {
     #[test]
     fn error_frame_2_0_decodes_to_device_error() {
         // feat=0xFF, p0=原 feature 0x05, p1=错误码 0x06
-        let bytes = [0x11, 0x01, 0xFF, 0x00, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let bytes = [
+            0x11, 0x01, 0xFF, 0x00, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let err = Frame::decode(&bytes).expect_err("must be device error");
         match err {
-            HidppError::Device { device_index, feature_index, code } => {
+            HidppError::Device {
+                device_index,
+                feature_index,
+                code,
+            } => {
                 assert_eq!(device_index, 0x01);
                 assert_eq!(feature_index, 0x05);
                 assert_eq!(code, DeviceErrorCode::InvalidFeatureIndex);
@@ -155,7 +196,11 @@ mod tests {
         let bytes = [0x10, 0x02, 0x8F, 0x00, 0x0D, 0x02, 0x00];
         let err = Frame::decode(&bytes).expect_err("must be device error");
         match err {
-            HidppError::Device { code, feature_index, .. } => {
+            HidppError::Device {
+                code,
+                feature_index,
+                ..
+            } => {
                 assert_eq!(code, DeviceErrorCode::InvalidArgument);
                 assert_eq!(feature_index, 0x0D);
             }
