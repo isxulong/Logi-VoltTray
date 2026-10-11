@@ -81,6 +81,10 @@ impl FeatureRegistry {
     pub fn len(&self) -> usize {
         self.infos.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.infos.is_empty()
+    }
 }
 
 #[cfg(test)]
