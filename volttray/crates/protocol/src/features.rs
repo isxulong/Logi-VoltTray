@@ -46,7 +46,9 @@ pub fn registry() -> &'static FeatureRegistry {
     REGISTRY.get_or_init(|| {
         let file: RegistryFile =
             serde_json::from_str(FEATURES_JSON).expect("fixtures/features.json must be valid JSON");
-        FeatureRegistry { infos: file.features }
+        FeatureRegistry {
+            infos: file.features,
+        }
     })
 }
 
@@ -97,7 +99,10 @@ mod tests {
     #[test]
     fn sensitive_offsets_registered() {
         let r = registry();
-        assert!(!r.sensitive_offsets(0x0007).is_empty(), "serial feature must declare sensitive offsets");
+        assert!(
+            !r.sensitive_offsets(0x0007).is_empty(),
+            "serial feature must declare sensitive offsets"
+        );
         assert!(r.sensitive_offsets(0x1004).is_empty());
     }
 }
