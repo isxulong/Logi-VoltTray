@@ -29,24 +29,15 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
-      - name: ensure lockfile（首轮自举：仓库暂无 Cargo.lock，生成后上传产物；后续迭代改回）
-        run: cargo generate-lockfile
-
+      # 可复现构建（评审 P0-2）：Cargo.lock 已入库，clippy/test/build 一律 --locked
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: build release
-        run: cargo build --release -p volttray-tray
-
-      - name: upload lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: volttray-cargo-lock
-          path: volttray/Cargo.lock
-          if-no-files-found: error
+        run: cargo build --release --locked -p volttray-tray
 
       - name: upload exe
         uses: actions/upload-artifact@v4
