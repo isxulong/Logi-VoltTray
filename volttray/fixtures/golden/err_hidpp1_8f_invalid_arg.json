@@ -1,0 +1,11 @@
+{
+  "name": "err_hidpp1_8f_invalid_arg",
+  "kind": "response",
+  "hex": "10 02 8F 03 0D 02 00",
+  "expect": {
+    "type": "error",
+    "device_index": 2,
+    "feature_index": 13,
+    "error_code": 2
+  }
+}
