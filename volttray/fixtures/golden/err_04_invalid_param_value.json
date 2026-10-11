@@ -1,0 +1,11 @@
+{
+  "name": "err_04_invalid_param_value",
+  "kind": "response",
+  "hex": "10 01 FF 07 06 04 00",
+  "expect": {
+    "type": "error",
+    "device_index": 1,
+    "feature_index": 6,
+    "error_code": 4
+  }
+}
