@@ -1,5 +1,6 @@
 name: build-logi-volttray
 on:
+  push:
   workflow_dispatch:
 
 jobs:
