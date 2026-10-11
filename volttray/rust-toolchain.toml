@@ -1,0 +1,6 @@
+# 可复现构建（评审 P0-2）：锁定精确工具链版本。
+# 注：蓝图为示例值 1.85.0；实际钉在 1.90.0 —— tray-icon 0.26 / muda 0.21 的
+# rust-version 要求 1.90（见 docs/decisions.md D-01）。
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]
