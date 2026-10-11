@@ -1,0 +1,13 @@
+[package]
+name = "volttray-protocol"
+description = "Logi VoltTray - HID++ 协议组帧/解帧（纯计算，无 I/O）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+proptest = "1"
