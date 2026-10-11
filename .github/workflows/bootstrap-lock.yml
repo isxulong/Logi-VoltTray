@@ -1,0 +1,22 @@
+name: bootstrap-lock
+
+# 一次性引导：生成 Cargo.lock 并作为产物取回（锁定依赖 = 可复现构建前提）。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  lock:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: generate lockfile
+        run: cargo generate-lockfile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volttray-cargo-lock
+          path: volttray/Cargo.lock
+          if-no-files-found: error
