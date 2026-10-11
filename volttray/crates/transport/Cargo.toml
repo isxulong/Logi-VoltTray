@@ -1,0 +1,16 @@
+[package]
+name = "volttray-transport"
+description = "Logi VoltTray - HID 传输层（通道抽象、超时/重试、观测事件）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["hid"]
+hid = ["dep:hidapi"]
+
+[dependencies]
+volttray-protocol = { path = "../protocol" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+hidapi = { version = "2.6.7", optional = true }
