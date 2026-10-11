@@ -1,0 +1,16 @@
+{
+  "name": "req_hidpp1_reg0d",
+  "kind": "request",
+  "command": "ReadHidpp1Register0x0D",
+  "device_index": 3,
+  "sw_id": 5,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "10 03 0D 05 00 00 00"
+  }
+}
