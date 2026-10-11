@@ -1,0 +1,11 @@
+{
+  "name": "malformed_short_bad_length",
+  "kind": "malformed",
+  "hex": "10 01 06 07 00 00",
+  "expect": {
+    "kind": "BadLength",
+    "report": 16,
+    "expected": 7,
+    "actual": 6
+  }
+}
