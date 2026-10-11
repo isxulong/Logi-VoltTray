@@ -5,7 +5,10 @@ use volttray_protocol::frame::Frame;
 
 #[test]
 fn empty_input() {
-    assert_eq!(Frame::decode(&[]), Err(HidppError::Malformed(MalformedKind::EmptyFrame)));
+    assert_eq!(
+        Frame::decode(&[]),
+        Err(HidppError::Malformed(MalformedKind::EmptyFrame))
+    );
 }
 
 #[test]
@@ -22,15 +25,27 @@ fn bad_report_ids() {
 fn length_mismatch_both_directions() {
     assert!(matches!(
         Frame::decode(&[0x10, 0, 0, 0, 0, 0]),
-        Err(HidppError::Malformed(MalformedKind::BadLength { expected: 7, actual: 6, .. }))
+        Err(HidppError::Malformed(MalformedKind::BadLength {
+            expected: 7,
+            actual: 6,
+            ..
+        }))
     ));
     assert!(matches!(
         Frame::decode(&[0x10, 0, 0, 0, 0, 0, 0, 0]),
-        Err(HidppError::Malformed(MalformedKind::BadLength { expected: 7, actual: 8, .. }))
+        Err(HidppError::Malformed(MalformedKind::BadLength {
+            expected: 7,
+            actual: 8,
+            ..
+        }))
     ));
     assert!(matches!(
         Frame::decode(&[0x11, 0, 0, 0, 0, 0, 0]),
-        Err(HidppError::Malformed(MalformedKind::BadLength { expected: 20, actual: 7, .. }))
+        Err(HidppError::Malformed(MalformedKind::BadLength {
+            expected: 20,
+            actual: 7,
+            ..
+        }))
     ));
 }
 
@@ -41,8 +56,14 @@ fn error_codes_roundtrip() {
         assert_eq!(c.code(), code);
         assert!(!c.name().is_empty());
     }
-    assert_eq!(DeviceErrorCode::from_code(0x00), DeviceErrorCode::UnknownCode(0x00));
-    assert_eq!(DeviceErrorCode::from_code(0xAB), DeviceErrorCode::UnknownCode(0xAB));
+    assert_eq!(
+        DeviceErrorCode::from_code(0x00),
+        DeviceErrorCode::UnknownCode(0x00)
+    );
+    assert_eq!(
+        DeviceErrorCode::from_code(0xAB),
+        DeviceErrorCode::UnknownCode(0xAB)
+    );
 }
 
 #[test]
@@ -51,7 +72,11 @@ fn long_frame_error_variant() {
     bytes.extend_from_slice(&[0u8; 14]);
     let err = Frame::decode(&bytes).expect_err("device error");
     match err {
-        HidppError::Device { device_index, feature_index, code } => {
+        HidppError::Device {
+            device_index,
+            feature_index,
+            code,
+        } => {
             assert_eq!(device_index, 0x09);
             assert_eq!(feature_index, 0x04);
             assert_eq!(code, DeviceErrorCode::Busy);
