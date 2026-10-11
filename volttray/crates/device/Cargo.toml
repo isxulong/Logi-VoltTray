@@ -1,0 +1,10 @@
+[package]
+name = "volttray-device"
+description = "Logi VoltTray - 设备抽象（状态机、命名消毒、电量策略链）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+volttray-protocol = { path = "../protocol" }
+volttray-transport = { path = "../transport" }
