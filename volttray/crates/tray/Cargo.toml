@@ -1,0 +1,38 @@
+[package]
+name = "volttray-tray"
+description = "Logi VoltTray - Windows 托盘程序（单实例、托盘图标、菜单、通知、诊断面板）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "volttray-tray"
+path = "src/main.rs"
+
+[dependencies]
+volttray-protocol = { path = "../protocol" }
+volttray-transport = { path = "../transport" }
+volttray-device = { path = "../device" }
+volttray-app = { path = "../app" }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_Graphics_Gdi",
+    "Windows_UI_Notifications",
+    "Windows_Data_Xml_Dom",
+] }
+
+[build-dependencies]
+winres = "0.1"
