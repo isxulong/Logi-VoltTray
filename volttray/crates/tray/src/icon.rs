@@ -9,11 +9,14 @@
 use std::collections::HashMap;
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject, SetBkMode,
-    SetTextColor, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, HGDIOBJ,
-    RGBQUAD, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
+    SetBkMode, SetTextColor, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET,
+    DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
 };
-use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_VALUE_TYPE};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+    REG_VALUE_TYPE,
+};
 
 /// 图标颜色档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,7 +91,15 @@ pub fn system_dark_theme() -> bool {
     let name = wide("AppsUseLightTheme");
     unsafe {
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR::from_raw(sub.as_ptr()), None, KEY_QUERY_VALUE, &mut hkey).is_err() {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR::from_raw(sub.as_ptr()),
+            None,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+        .is_err()
+        {
             return true;
         }
         let mut ty = REG_VALUE_TYPE(0);
@@ -119,7 +130,11 @@ pub struct IconCache {
 
 impl IconCache {
     pub fn new(size: u32, dark_theme: bool) -> Self {
-        let mut cache = IconCache { size, dark_theme, map: HashMap::new() };
+        let mut cache = IconCache {
+            size,
+            dark_theme,
+            map: HashMap::new(),
+        };
         cache.fill();
         cache
     }
@@ -160,11 +175,21 @@ fn render_text_bitmap(size: u32, text: &str, (r, g, b): (u8, u8, u8)) -> Vec<u8>
     let chars: Vec<char> = text.chars().collect();
     let nchars = chars.len() as i32;
     let size_i = size as i32;
-    let font_h = if nchars >= 2 { size_i * 5 / 8 } else { size_i * 3 / 4 };
+    let font_h = if nchars >= 2 {
+        size_i * 5 / 8
+    } else {
+        size_i * 3 / 4
+    };
     // 数字宽度 ≈ 0.55 × 字高；CJK 宽度 ≈ 1.0 × 字高。
     let est_w: i32 = chars
         .iter()
-        .map(|c| if c.is_ascii() { font_h * 11 / 20 } else { font_h })
+        .map(|c| {
+            if c.is_ascii() {
+                font_h * 11 / 20
+            } else {
+                font_h
+            }
+        })
         .sum();
     let x = ((size_i - est_w) / 2).max(0);
     let y = ((size_i - font_h) / 2).max(0);
