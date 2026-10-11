@@ -19,18 +19,51 @@ pub enum Layer {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DiagKind {
-    FrameTx { hex: String, feature_id: Option<u16> },
-    FrameRx { hex: String, feature_id: Option<u16> },
-    IoError { message: String },
-    Retry { attempt: u8 },
-    Timeout { after_ms: u64 },
-    DeviceFound { id: String, name: String },
-    DeviceLost { id: String },
-    StateChange { id: String, from: String, to: String },
-    BatteryUpdate { id: String, percent: u8, charging: bool, source: String },
-    ConfigReloaded { warnings: Vec<String> },
-    Alert { level: String, message: String },
-    Info { message: String },
+    FrameTx {
+        hex: String,
+        feature_id: Option<u16>,
+    },
+    FrameRx {
+        hex: String,
+        feature_id: Option<u16>,
+    },
+    IoError {
+        message: String,
+    },
+    Retry {
+        attempt: u8,
+    },
+    Timeout {
+        after_ms: u64,
+    },
+    DeviceFound {
+        id: String,
+        name: String,
+    },
+    DeviceLost {
+        id: String,
+    },
+    StateChange {
+        id: String,
+        from: String,
+        to: String,
+    },
+    BatteryUpdate {
+        id: String,
+        percent: u8,
+        charging: bool,
+        source: String,
+    },
+    ConfigReloaded {
+        warnings: Vec<String>,
+    },
+    Alert {
+        level: String,
+        message: String,
+    },
+    Info {
+        message: String,
+    },
 }
 
 /// 一条诊断事件。`seq` 与 `ts_ms` 由 app 侧 sink 盖戳。
@@ -45,7 +78,12 @@ pub struct DiagEvent {
 
 impl DiagEvent {
     pub fn new(layer: Layer, kind: DiagKind) -> Self {
-        DiagEvent { seq: 0, ts_ms: 0, layer, kind }
+        DiagEvent {
+            seq: 0,
+            ts_ms: 0,
+            layer,
+            kind,
+        }
     }
 }
 
