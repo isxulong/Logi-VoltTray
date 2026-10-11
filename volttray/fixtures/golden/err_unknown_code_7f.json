@@ -1,0 +1,11 @@
+{
+  "name": "err_unknown_code_7f",
+  "kind": "response",
+  "hex": "10 01 FF 07 06 7F 00",
+  "expect": {
+    "type": "error",
+    "device_index": 1,
+    "feature_index": 6,
+    "error_code": 127
+  }
+}
