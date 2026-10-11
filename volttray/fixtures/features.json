@@ -1,0 +1,15 @@
+{
+  "comment": "HID++ feature 注册表：kind 驱动 P1-1 命令白名单复核；sensitive_params 驱动 P1-6 帧级脱敏（响应参数中的敏感字节偏移，如序列号）。id 为十进制。",
+  "features": [
+    { "id": 0, "name": "IRoot", "kind": "query", "sensitive_params": [] },
+    { "id": 1, "name": "IFeatureSet", "kind": "query", "sensitive_params": [] },
+    { "id": 5, "name": "DeviceName", "kind": "query", "sensitive_params": [] },
+    { "id": 7, "name": "DeviceSerialInfo", "kind": "query", "sensitive_params": [0, 1, 2, 3] },
+    { "id": 4096, "name": "BATTERY_STATUS", "kind": "query", "sensitive_params": [] },
+    { "id": 4097, "name": "BATTERY_VOLTAGE", "kind": "query", "sensitive_params": [] },
+    { "id": 4100, "name": "UNIFIED_BATTERY", "kind": "query", "sensitive_params": [] },
+    { "id": 6916, "name": "PairingControl", "kind": "pair", "sensitive_params": [] },
+    { "id": 8709, "name": "AdjustableDpi", "kind": "set", "sensitive_params": [] },
+    { "id": 240, "name": "FirmwareUpdate", "kind": "firmware", "sensitive_params": [4, 5, 6, 7] }
+  ]
+}
