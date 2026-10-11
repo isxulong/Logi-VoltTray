@@ -63,7 +63,13 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn new(id: String, raw_name: &str, link: LinkKind, device_index: u8, is_hidpp1: bool) -> Self {
+    pub fn new(
+        id: String,
+        raw_name: &str,
+        link: LinkKind,
+        device_index: u8,
+        is_hidpp1: bool,
+    ) -> Self {
         Device {
             id,
             name: sanitize::device_name(raw_name),
