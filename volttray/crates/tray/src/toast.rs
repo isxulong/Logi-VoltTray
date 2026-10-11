@@ -16,7 +16,11 @@ fn xml_escape(s: &str) -> String {
 }
 
 pub fn notify(title: &str, body: &str, silent: bool) -> Result<(), String> {
-    let audio = if silent { "<audio silent=\"true\"/>" } else { "" };
+    let audio = if silent {
+        "<audio silent=\"true\"/>"
+    } else {
+        ""
+    };
     let xml = format!(
         "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{}</toast>",
         xml_escape(title),
@@ -30,7 +34,9 @@ pub fn notify(title: &str, body: &str, silent: bool) -> Result<(), String> {
         .map_err(|e| format!("CreateToastNotification failed: {e}"))?;
     let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID))
         .map_err(|e| format!("CreateToastNotifierWithId failed: {e}"))?;
-    notifier.Show(&toast).map_err(|e| format!("toast Show failed: {e}"))
+    notifier
+        .Show(&toast)
+        .map_err(|e| format!("toast Show failed: {e}"))
 }
 
 #[cfg(test)]
