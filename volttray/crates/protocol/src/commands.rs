@@ -69,25 +69,38 @@ impl QueryCommand {
     ///
     /// 蓝图契约 `encode(&QueryCommand) -> Vec<u8>` 的落地形：feature_index
     /// 是每设备动态解析结果，必须随调用传入（见 docs/decisions.md D-02）。
-    pub fn encode_for(&self, device_index: u8, sw_id: u8, features: &FeatureTable) -> Result<Vec<u8>, HidppError> {
+    pub fn encode_for(
+        &self,
+        device_index: u8,
+        sw_id: u8,
+        features: &FeatureTable,
+    ) -> Result<Vec<u8>, HidppError> {
         // P1-1 双保险：只许查询类 feature 上线。
         fn require_query(feature_id: u16) -> Result<(), HidppError> {
             if registry().is_query(feature_id) {
                 Ok(())
             } else {
-                Err(HidppError::NotEncodable("feature is not query-kind (whitelist violation)"))
+                Err(HidppError::NotEncodable(
+                    "feature is not query-kind (whitelist violation)",
+                ))
             }
         }
         fn resolve(features: &FeatureTable, feature_id: u16) -> Result<u8, HidppError> {
-            features
-                .get(feature_id)
-                .ok_or(HidppError::NotEncodable("feature index not resolved for device"))
+            features.get(feature_id).ok_or(HidppError::NotEncodable(
+                "feature index not resolved for device",
+            ))
         }
 
         let frame = match self {
             QueryCommand::GetProtocolVersion => {
                 require_query(feature_ids::IROOT)?;
-                Frame::new_short(device_index, FeatureTable::iroot_index(), 0x01, sw_id, [0, 0, 0])
+                Frame::new_short(
+                    device_index,
+                    FeatureTable::iroot_index(),
+                    0x01,
+                    sw_id,
+                    [0, 0, 0],
+                )
             }
             QueryCommand::GetFeatureIndex { feature_id } => {
                 // HID++ 2.0：GetFeatureIndex 是 IRoot（恒 index 0）的 fn0，
@@ -119,7 +132,13 @@ impl QueryCommand {
             }
             QueryCommand::ReadHidpp1Register0x0D => {
                 // HID++ 1.0：byte2 即寄存器地址，无 feature 表可查。
-                Frame::new_short(device_index, feature_ids::HIDPP1_BATTERY_REGISTER, 0x00, sw_id, [0, 0, 0])
+                Frame::new_short(
+                    device_index,
+                    feature_ids::HIDPP1_BATTERY_REGISTER,
+                    0x00,
+                    sw_id,
+                    [0, 0, 0],
+                )
             }
             QueryCommand::ReadHidPowerDescriptor => {
                 return Err(HidppError::NotEncodable(
@@ -146,7 +165,9 @@ mod tests {
 
     #[test]
     fn battery_unified_encodes() {
-        let bytes = QueryCommand::GetBatteryUnified.encode_for(0x01, 0x07, &table()).expect("encode");
+        let bytes = QueryCommand::GetBatteryUnified
+            .encode_for(0x01, 0x07, &table())
+            .expect("encode");
         assert_eq!(bytes, vec![0x10, 0x01, 0x06, 0x07, 0, 0, 0]);
     }
 
@@ -162,7 +183,9 @@ mod tests {
     #[test]
     fn unresolved_feature_is_not_encodable() {
         let t = FeatureTable::new();
-        let err = QueryCommand::GetBatteryStatus.encode_for(0x01, 0x01, &t).expect_err("must fail");
+        let err = QueryCommand::GetBatteryStatus
+            .encode_for(0x01, 0x01, &t)
+            .expect_err("must fail");
         assert!(matches!(err, HidppError::NotEncodable(_)));
     }
 
