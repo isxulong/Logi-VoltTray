@@ -14,3 +14,7 @@ volttray-protocol = { path = "../protocol" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 hidapi = { version = "2.6.7", optional = true }
+
+[[example]]
+name = "enum_hid"
+required-features = ["hid"]
