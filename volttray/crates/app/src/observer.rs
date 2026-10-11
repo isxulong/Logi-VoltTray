@@ -31,7 +31,10 @@ impl Default for Observer {
 
 impl Observer {
     pub fn new() -> Self {
-        Observer { buf: VecDeque::with_capacity(DIAG_CAPACITY), next_seq: 1 }
+        Observer {
+            buf: VecDeque::with_capacity(DIAG_CAPACITY),
+            next_seq: 1,
+        }
     }
 
     /// 追加并盖戳（seq 单调递增，ts 为 epoch 毫秒）。
@@ -162,14 +165,25 @@ mod tests {
             "10 01 07 01 {:02X} {:02X} {:02X} {:02X}",
             serial_bytes[0], serial_bytes[1], serial_bytes[2], serial_bytes[3]
         );
-        DiagEvent::new(Layer::Transport, DiagKind::FrameRx { hex, feature_id: Some(7) })
+        DiagEvent::new(
+            Layer::Transport,
+            DiagKind::FrameRx {
+                hex,
+                feature_id: Some(7),
+            },
+        )
     }
 
     #[test]
     fn ring_buffer_caps_at_256() {
         let mut obs = Observer::new();
         for _ in 0..300 {
-            obs.push(DiagEvent::new(Layer::App, DiagKind::Info { message: "x".into() }));
+            obs.push(DiagEvent::new(
+                Layer::App,
+                DiagKind::Info {
+                    message: "x".into(),
+                },
+            ));
         }
         assert_eq!(obs.len(), 256);
         let first = obs.events().next().expect("first");
@@ -179,8 +193,18 @@ mod tests {
     #[test]
     fn seq_stamps_monotonic() {
         let mut obs = Observer::new();
-        obs.push(DiagEvent::new(Layer::App, DiagKind::Info { message: "a".into() }));
-        obs.push(DiagEvent::new(Layer::App, DiagKind::Info { message: "b".into() }));
+        obs.push(DiagEvent::new(
+            Layer::App,
+            DiagKind::Info {
+                message: "a".into(),
+            },
+        ));
+        obs.push(DiagEvent::new(
+            Layer::App,
+            DiagKind::Info {
+                message: "b".into(),
+            },
+        ));
         let seqs: Vec<u64> = obs.events().map(|e| e.seq).collect();
         assert_eq!(seqs, vec![1, 2]);
     }
@@ -195,7 +219,10 @@ mod tests {
         assert!(!masked.contains("12 34 AB CD"), "serial leaked: {masked}");
         assert!(masked.contains("** ** ** **"), "mask missing: {masked}");
         let unmasked = obs.export_json(false);
-        assert!(unmasked.contains("12 34 AB CD"), "unmasked export should keep raw bytes");
+        assert!(
+            unmasked.contains("12 34 AB CD"),
+            "unmasked export should keep raw bytes"
+        );
     }
 
     #[test]
