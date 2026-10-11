@@ -1,0 +1,25 @@
+[package]
+name = "volttray-app"
+description = "Logi VoltTray - 应用核心（配置、阈值去抖、诊断观测流、快照）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+volttray-protocol = { path = "../protocol" }
+volttray-transport = { path = "../transport" }
+volttray-device = { path = "../device" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Memory",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
