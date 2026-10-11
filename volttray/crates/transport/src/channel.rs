@@ -44,6 +44,8 @@ pub trait HidChannel {
     /// HID 特性报表读取（HID Power Descriptor 回退路径用）。
     /// 默认不支持；真实 hidapi 通道覆盖此方法。
     fn get_feature_report(&mut self, _report_id: u8, _buf: &mut [u8]) -> Result<usize, IoError> {
-        Err(IoError::Other("feature report unsupported on this channel".into()))
+        Err(IoError::Other(
+            "feature report unsupported on this channel".into(),
+        ))
     }
 }
