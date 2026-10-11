@@ -1,0 +1,14 @@
+{
+  "name": "battery_voltage_3900mv",
+  "kind": "response",
+  "hex": "10 02 05 06 0F 3C 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 2,
+    "feature_index": 5,
+    "function": 0,
+    "sw_id": 6,
+    "params_hex": "0F 3C 00"
+  }
+}
