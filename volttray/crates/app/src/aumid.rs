@@ -12,7 +12,8 @@ pub const SHORTCUT_NAME: &str = "LogiVoltTray.lnk";
 mod imp {
     use super::{AUMID, SHORTCUT_NAME};
     use std::path::{Path, PathBuf};
-    use windows::core::{GUID, PCWSTR, PWSTR};
+    use windows::core::{Interface, GUID, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
@@ -29,8 +30,8 @@ mod imp {
     }
 
     /// PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, pid=5
-    fn pkey_aumid() -> windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
-        windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
+    fn pkey_aumid() -> PROPERTYKEY {
+        PROPERTYKEY {
             fmtid: GUID::from_values(
                 0x9F4C2855,
                 0x9F79,
