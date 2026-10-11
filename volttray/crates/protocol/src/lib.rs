@@ -12,7 +12,9 @@ pub mod voltage;
 pub use commands::{feature_ids, FeatureTable, QueryCommand};
 pub use error::{DeviceErrorCode, HidppError, MalformedKind};
 pub use features::{registry, FeatureInfo, FeatureKind, FeatureRegistry};
-pub use frame::{Frame, ERROR_FEATURE_1_0, ERROR_FEATURE_2_0, LONG_LEN, REPORT_LONG, REPORT_SHORT, SHORT_LEN};
+pub use frame::{
+    Frame, ERROR_FEATURE_1_0, ERROR_FEATURE_2_0, LONG_LEN, REPORT_LONG, REPORT_SHORT, SHORT_LEN,
+};
 
 /// Logitech USB Vendor ID（PRD 协议附录）。
 pub const LOGITECH_VID: u16 = 0x046D;
