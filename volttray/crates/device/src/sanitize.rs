@@ -80,7 +80,10 @@ mod tests {
     #[test]
     fn empty_or_all_control_falls_back() {
         assert_eq!(device_name(""), FALLBACK_DEVICE_NAME);
-        assert_eq!(device_name("\u{0001}\u{0002}\u{0003}"), FALLBACK_DEVICE_NAME);
+        assert_eq!(
+            device_name("\u{0001}\u{0002}\u{0003}"),
+            FALLBACK_DEVICE_NAME
+        );
         assert_eq!(device_name("   "), FALLBACK_DEVICE_NAME);
     }
 
