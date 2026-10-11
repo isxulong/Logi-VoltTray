@@ -1,0 +1,14 @@
+{
+  "name": "unified_battery_45_discharging",
+  "kind": "response",
+  "hex": "11 01 06 08 2D 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 17,
+    "device_index": 1,
+    "feature_index": 6,
+    "function": 0,
+    "sw_id": 8,
+    "params_hex": "2D 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+  }
+}
