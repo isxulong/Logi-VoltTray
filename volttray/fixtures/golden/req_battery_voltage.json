@@ -1,0 +1,16 @@
+{
+  "name": "req_battery_voltage",
+  "kind": "request",
+  "command": "GetBatteryVoltage",
+  "device_index": 2,
+  "sw_id": 3,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "10 02 05 03 00 00 00"
+  }
+}
