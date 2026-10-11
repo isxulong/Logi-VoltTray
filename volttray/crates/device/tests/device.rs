@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 use volttray_device::battery::{
-    map_battery_status, map_battery_voltage, map_hidpp1_register, map_unified_battery, probe_battery,
-    BatterySource,
+    map_battery_status, map_battery_voltage, map_hidpp1_register, map_unified_battery,
+    probe_battery, BatterySource,
 };
 use volttray_protocol::FeatureTable;
 use volttray_transport::channel::{HidChannel, IoError};
@@ -17,7 +17,9 @@ struct StubChannel {
 
 impl StubChannel {
     fn scripted(reads: Vec<Result<Vec<u8>, IoError>>) -> Self {
-        StubChannel { reads: reads.into() }
+        StubChannel {
+            reads: reads.into(),
+        }
     }
 }
 
@@ -60,7 +62,10 @@ fn mapping_functions() {
     assert_eq!(map_unified_battery(&[0x65, 0x00, 0x00]), None); // >100 拒绝
     assert_eq!(map_battery_status(&[0x5A, 0x80]), Some((90, true)));
     assert_eq!(map_battery_status(&[0x0A, 0x00]), Some((10, false)));
-    assert_eq!(map_battery_voltage(&[0x0F, 0x3C], "li-ion"), Some((60, false))); // 3900mV
+    assert_eq!(
+        map_battery_voltage(&[0x0F, 0x3C], "li-ion"),
+        Some((60, false))
+    ); // 3900mV
     assert_eq!(map_hidpp1_register(&[0x46, 0x40]), Some((70, true)));
 }
 
@@ -103,7 +108,10 @@ fn voltage_strategy_uses_curve() {
 
 #[test]
 fn device_gone_aborts_chain() {
-    let ch = StubChannel::scripted(vec![Err(IoError::DeviceGone), Ok(vec![0x10, 0x01, 0x04, 0x01, 0x1E, 0, 0])]);
+    let ch = StubChannel::scripted(vec![
+        Err(IoError::DeviceGone),
+        Ok(vec![0x10, 0x01, 0x04, 0x01, 0x1E, 0, 0]),
+    ]);
     let mut t = Transport::new(ch, VecSink::default());
     let r = probe_battery(&mut t, "dev1", 0x01, &table(), "li-ion", false);
     assert_eq!(r, None); // 不继续尝试后续策略
@@ -117,14 +125,18 @@ fn all_strategies_fail_returns_none() {
         Ok(vec![0x10, 0x01, 0xFF, 0x03, 0x05, 0x09, 0x00]),
     ]);
     let mut t = Transport::new(ch, VecSink::default());
-    assert_eq!(probe_battery(&mut t, "dev1", 0x01, &table(), "li-ion", false), None);
+    assert_eq!(
+        probe_battery(&mut t, "dev1", 0x01, &table(), "li-ion", false),
+        None
+    );
 }
 
 #[test]
 fn hidpp1_device_uses_register() {
     let ch = StubChannel::scripted(vec![Ok(vec![0x10, 0x03, 0x0D, 0x01, 0x46, 0x40, 0x00])]);
     let mut t = Transport::new(ch, VecSink::default());
-    let r = probe_battery(&mut t, "dev3", 0x03, &FeatureTable::new(), "li-ion", true).expect("reading");
+    let r =
+        probe_battery(&mut t, "dev3", 0x03, &FeatureTable::new(), "li-ion", true).expect("reading");
     assert_eq!(r.percent, 70);
     assert!(r.charging);
     assert_eq!(r.source, BatterySource::Hidpp1Register);
