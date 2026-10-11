@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# 单文件 EXE 体积目标 <= 5MB（PRD 非功能需求）：
+# 体积优先优化 + LTO + 单 codegen unit + 去符号。
+# 注意：不能开 panic="abort"，PRD 要求 GUI 边界使用 catch_unwind。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
