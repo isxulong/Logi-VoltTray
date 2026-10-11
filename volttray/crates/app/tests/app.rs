@@ -6,7 +6,11 @@ use volttray_app::observer::{Observer, SharedObserver};
 use volttray_transport::events::{DiagEvent, DiagKind, EventSink, Layer};
 
 fn temp_config(name: &str, content: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("volttray_test_{}_{}.toml", name, std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "volttray_test_{}_{}.toml",
+        name,
+        std::process::id()
+    ));
     let mut f = std::fs::File::create(&path).expect("create temp config");
     f.write_all(content.as_bytes()).expect("write temp config");
     path
@@ -37,7 +41,11 @@ fn watcher_survives_invalid_rewrite() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&path, "low_threshold_warn = 999\nunknown_key = 1\n").expect("rewrite");
     let (cfg, warnings) = watcher.poll().expect("change").expect("load ok");
-    assert_eq!(cfg, Config::default(), "invalid values fall back to defaults");
+    assert_eq!(
+        cfg,
+        Config::default(),
+        "invalid values fall back to defaults"
+    );
     assert_eq!(warnings.len(), 2);
     let _ = std::fs::remove_file(&path);
 }
@@ -46,7 +54,12 @@ fn watcher_survives_invalid_rewrite() {
 fn shared_observer_receives_events_from_sink() {
     let shared = SharedObserver::new();
     let mut sink = shared.clone();
-    sink.emit(DiagEvent::new(Layer::Tray, DiagKind::Info { message: "hello".into() }));
+    sink.emit(DiagEvent::new(
+        Layer::Tray,
+        DiagKind::Info {
+            message: "hello".into(),
+        },
+    ));
     let obs = shared.0.lock().expect("lock");
     assert_eq!(obs.len(), 1);
     let e = obs.events().next().expect("event");
@@ -58,7 +71,10 @@ fn shared_observer_receives_events_from_sink() {
 fn config_reloaded_event_carries_warnings() {
     let mut obs = Observer::new();
     let warnings = vec!["config key \"x\": unknown key; ignored".to_string()];
-    obs.push(DiagEvent::new(Layer::App, DiagKind::ConfigReloaded { warnings }));
+    obs.push(DiagEvent::new(
+        Layer::App,
+        DiagKind::ConfigReloaded { warnings },
+    ));
     let json = obs.export_json(true);
     assert!(json.contains("config_reloaded"));
     assert!(json.contains("unknown key"));
