@@ -1,0 +1,21 @@
+# cargo-fuzz 骨架（评审 P0-2）。独立 workspace，不影响主构建。
+[workspace]
+
+[package]
+name = "volttray-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+volttray-protocol = { path = "../crates/protocol" }
+
+[[bin]]
+name = "frame_fuzz"
+path = "fuzz_targets/frame_fuzz.rs"
+test = false
+doc = false
