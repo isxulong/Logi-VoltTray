@@ -1,7 +1,7 @@
 //! 设备名消毒（评审 P1-5）。
 //!
 //! 设备名来自硬件字符串，进入 UI 文本、tooltip、诊断导出前必须消毒：
-//! 1. 去除 C0/C1 控制字符与 DEL；
+//! 1. 空白字符（含 tab/换行）折叠为单个空格；其余 C0/C1 控制字符与 DEL 丢弃；
 //! 2. 白名单外字符替换为 `?`（白名单：字母数字 + 常用符号）；
 //! 3. 去首尾空白，折叠内部连续空白；
 //! 4. 截断到 64 字符；
@@ -18,16 +18,16 @@ pub fn device_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(MAX_DEVICE_NAME_CHARS));
     let mut pending_space = false;
     for c in raw.chars() {
-        if c.is_control() {
-            continue; // C0/C1/DEL 直接丢弃
-        }
-        let c = if is_allowed(c) { c } else { '?' };
-        if c == ' ' {
+        if c.is_whitespace() {
             if !out.is_empty() {
-                pending_space = true; // 折叠连续空白、丢弃前导空白
+                pending_space = true; // 任意空白（含 tab/换行）折叠为单个空格、丢弃前导空白
             }
             continue;
         }
+        if c.is_control() {
+            continue; // 其余 C0/C1/DEL 直接丢弃
+        }
+        let c = if is_allowed(c) { c } else { '?' };
         if pending_space {
             out.push(' ');
             pending_space = false;
