@@ -1,0 +1,25 @@
+name: nightly
+
+# 评审 P0-2：ubuntu + nightly 的 fuzz / 覆盖率 job 骨架。
+# 本轮仅骨架（continue-on-error）：协议层 fuzz target 在 volttray/fuzz/，
+# 覆盖率与 fuzz 语料的正式接入在后续迭代完成。
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  fuzz-coverage-skeleton:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: protocol tests on nightly（骨架：协议层先行）
+        run: cargo +nightly test -p volttray-protocol
+        continue-on-error: true
+      - name: fuzz skeleton（占位：cargo-fuzz 接入后续迭代）
+        run: echo "fuzz target: volttray/fuzz/fuzz_targets/frame_fuzz.rs（本轮仅骨架，见评审 P0-2）"
