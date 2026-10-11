@@ -1,0 +1,299 @@
+//! 应用核心：设备台账、快照、默认展示设备、90s 灰显派生、调度节奏。
+//!
+//! 与传输层解耦：本模块只维护状态与纯逻辑决策，全部桩上可测。
+
+use crate::config::Config;
+use crate::debounce::{Alert, ThresholdDebouncer};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+use volttray_device::battery::BatteryReading;
+use volttray_device::state::DeviceState;
+use volttray_device::Device;
+
+/// 灰显派生窗口（PRD M2：90s 无成功响应）。
+pub const GRAY_AFTER: Duration = Duration::from_secs(90);
+/// 充电时的轮询间隔（蓝图：15s）。
+pub const POLL_CHARGING: Duration = Duration::from_secs(15);
+
+/// 单台设备的运行时台账。
+#[derive(Debug, Clone)]
+pub struct DeviceEntry {
+    pub device: Device,
+    pub last_success: Option<Instant>,
+    gray_alerted: bool,
+}
+
+impl DeviceEntry {
+    pub fn new(device: Device) -> Self {
+        DeviceEntry { device, last_success: None, gray_alerted: false }
+    }
+
+    /// 派生灰显态（90s 无成功；从未成功过的在线设备不灰）。
+    pub fn is_gray(&self, now: Instant) -> bool {
+        match self.last_success {
+            Some(t) => now.duration_since(t) >= GRAY_AFTER,
+            None => false,
+        }
+    }
+}
+
+/// 给 UI 的设备快照行。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DeviceSnapshot {
+    pub id: String,
+    pub name: String,
+    pub percent: Option<u8>,
+    pub charging: bool,
+    pub link: String,
+    pub state: String,
+    pub gray: bool,
+    pub source: Option<String>,
+}
+
+/// 给 UI 的整体快照。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub devices: Vec<DeviceSnapshot>,
+    /// 托盘图标默认展示的设备下标（None = 无可用电量数据）。
+    pub default_device: Option<usize>,
+}
+
+#[derive(Debug)]
+pub struct AppCore {
+    config: Arc<RwLock<Config>>,
+    entries: Vec<DeviceEntry>,
+    debouncers: HashMap<String, ThresholdDebouncer>,
+    snap_seq: u64,
+}
+
+impl AppCore {
+    pub fn new(config: Arc<RwLock<Config>>) -> Self {
+        AppCore { config, entries: Vec::new(), debouncers: HashMap::new(), snap_seq: 0 }
+    }
+
+    pub fn config(&self) -> Config {
+        self.config.read().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// 原子换入新配置（P1-2：配置所有权在 app）。
+    pub fn swap_config(&self, next: Config) {
+        if let Ok(mut guard) = self.config.write() {
+            *guard = next;
+        }
+    }
+
+    pub fn upsert_device(&mut self, device: Device) {
+        match self.entries.iter_mut().find(|e| e.device.id == device.id) {
+            Some(e) => {
+                let battery = e.device.battery;
+                let state = e.device.state;
+                e.device = device;
+                e.device.battery = battery;
+                e.device.state = state;
+            }
+            None => self.entries.push(DeviceEntry::new(device)),
+        }
+    }
+
+    pub fn remove_device(&mut self, id: &str) {
+        self.entries.retain(|e| e.device.id != id);
+        self.debouncers.remove(id);
+    }
+
+    pub fn entries(&self) -> &[DeviceEntry] {
+        &self.entries
+    }
+
+    /// 记录一次成功电量读取；返回阈值去抖后应发的告警（若有）。
+    pub fn record_success(&mut self, id: &str, reading: BatteryReading, now: Instant) -> Option<Alert> {
+        let entry = self.entries.iter_mut().find(|e| e.device.id == id)?;
+        entry.last_success = Some(now);
+        entry.gray_alerted = false;
+        entry.device.battery = Some(reading);
+        let cfg = self.config();
+        let deb = self
+            .debouncers
+            .entry(id.to_string())
+            .or_insert_with(|| ThresholdDebouncer::new(cfg.low_threshold_warn, cfg.low_threshold_critical));
+        deb.update(reading.percent, reading.charging)
+    }
+
+    /// 记录一次失败（gone=true 表示设备消失）。
+    pub fn record_failure(&mut self, id: &str, gone: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
+            if gone && entry.device.state != DeviceState::Disconnected {
+                let to = DeviceState::Disconnected;
+                entry.device.set_state(to);
+            }
+        }
+    }
+
+    /// 检查是否有设备新进入灰显（用于"90s 设备丢失"通知）；返回新变灰的设备名。
+    pub fn newly_gray(&mut self, now: Instant) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in &mut self.entries {
+            if e.device.state == DeviceState::Online && e.is_gray(now) && !e.gray_alerted {
+                e.gray_alerted = true;
+                out.push(e.device.name.clone());
+            }
+        }
+        out
+    }
+
+    /// 默认展示设备（决策 D-08，蓝图缺口的就地裁决）：
+    /// 在「有电量、未充电、未灰显」的设备中取电量最低者；无候选则
+    /// 放宽到「有电量、未灰显」取最低；仍无 → None（图标显示 "?"）。
+    pub fn default_display_index(&self, now: Instant) -> Option<usize> {
+        let pick_min = |pred: &dyn Fn(&DeviceEntry) -> bool| -> Option<usize> {
+            self.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| pred(e))
+                .filter_map(|(i, e)| e.device.battery.map(|b| (i, b.percent)))
+                .min_by_key(|(_, p)| *p)
+                .map(|(i, _)| i)
+        };
+        pick_min(&|e| e.device.battery.is_some() && !e.device.battery.is_some_and(|b| b.charging) && !e.is_gray(now))
+            .or_else(|| pick_min(&|e| e.device.battery.is_some() && !e.is_gray(now)))
+    }
+
+    /// 下一次轮询间隔：充电中 15s，否则按配置。
+    pub fn poll_interval(&self) -> Duration {
+        let any_charging = self
+            .entries
+            .iter()
+            .any(|e| e.device.battery.is_some_and(|b| b.charging));
+        if any_charging {
+            POLL_CHARGING
+        } else {
+            Duration::from_secs(self.config().poll_interval_secs)
+        }
+    }
+
+    /// 生成快照。
+    pub fn snapshot(&mut self, now: Instant) -> Snapshot {
+        self.snap_seq += 1;
+        let default_device = self.default_display_index(now);
+        Snapshot {
+            seq: self.snap_seq,
+            devices: self
+                .entries
+                .iter()
+                .map(|e| DeviceSnapshot {
+                    id: e.device.id.clone(),
+                    name: e.device.name.clone(),
+                    percent: e.device.battery.map(|b| b.percent),
+                    charging: e.device.battery.is_some_and(|b| b.charging),
+                    link: e.device.link.name().to_string(),
+                    state: e.device.state.name().to_string(),
+                    gray: e.is_gray(now),
+                    source: e.device.battery.map(|b| b.source.name().to_string()),
+                })
+                .collect(),
+            default_device,
+        }
+    }
+}
+
+/// GUI 边界的 panic 护栏（PRD：catch_unwind）。
+pub fn guarded<F>(what: &str, f: F) -> Result<(), String>
+where
+    F: FnOnce() + std::panic::UnwindSafe,
+{
+    std::panic::catch_unwind(f).map_err(|_| format!("{what} panicked"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use volttray_device::battery::BatterySource;
+    use volttray_device::LinkKind;
+
+    fn reading(percent: u8, charging: bool) -> BatteryReading {
+        BatteryReading { percent, charging, source: BatterySource::UnifiedBattery }
+    }
+
+    fn dev(id: &str, index: u8) -> Device {
+        let mut d = Device::new(id.into(), &format!("Mouse {id}"), LinkKind::Bolt, index, false);
+        d.set_state(DeviceState::Online);
+        d
+    }
+
+    #[test]
+    fn default_display_picks_lowest_non_charging() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.upsert_device(dev("c", 3));
+        core.record_success("a", reading(50, false), now);
+        core.record_success("b", reading(15, false), now);
+        core.record_success("c", reading(10, true), now); // 充电中：排除
+        assert_eq!(core.default_display_index(now), Some(1)); // b=15%
+    }
+
+    #[test]
+    fn gray_devices_excluded_from_default() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(5, false), t0);
+        let later = t0 + GRAY_AFTER + Duration::from_secs(1);
+        assert_eq!(core.default_display_index(later), None); // 唯一设备已灰
+    }
+
+    #[test]
+    fn newly_gray_fires_once_and_recovers() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(80, false), t0);
+        let later = t0 + GRAY_AFTER + Duration::from_secs(1);
+        assert_eq!(core.newly_gray(later), vec!["Mouse a".to_string()]);
+        assert!(core.newly_gray(later).is_empty()); // 不重复
+        core.record_success("a", reading(80, false), later);
+        assert!(core.newly_gray(later).is_empty());
+    }
+
+    #[test]
+    fn poll_interval_switches_when_charging() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        assert_eq!(core.poll_interval(), Duration::from_secs(60));
+        core.record_success("a", reading(30, true), now);
+        assert_eq!(core.poll_interval(), POLL_CHARGING);
+    }
+
+    #[test]
+    fn snapshot_reflects_devices() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(66, false), now);
+        let snap = core.snapshot(now);
+        assert_eq!(snap.seq, 1);
+        assert_eq!(snap.devices.len(), 1);
+        assert_eq!(snap.devices[0].percent, Some(66));
+        assert_eq!(snap.default_device, Some(0));
+    }
+
+    #[test]
+    fn threshold_alert_flows_through_record_success() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        assert_eq!(core.record_success("a", reading(19, false), now), None);
+        assert_eq!(core.record_success("a", reading(18, false), now), Some(Alert::Warn(18)));
+    }
+
+    #[test]
+    fn guarded_catches_panic() {
+        let r = guarded("boom", || panic!("x"));
+        assert!(r.is_err());
+        let ok = guarded("fine", || {});
+        assert!(ok.is_ok());
+    }
+}
