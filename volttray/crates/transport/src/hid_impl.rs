@@ -25,7 +25,9 @@ impl HidDeviceChannel {
 
 impl HidChannel for HidDeviceChannel {
     fn write(&mut self, data: &[u8]) -> Result<usize, IoError> {
-        self.dev.write(data).map_err(|e| classify_io(&e.to_string()))
+        self.dev
+            .write(data)
+            .map_err(|e| classify_io(&e.to_string()))
     }
 
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, IoError> {
@@ -51,9 +53,7 @@ impl HidChannel for HidDeviceChannel {
 /// 枚举所有 Logitech HID++ 候选接口。
 pub fn enumerate_logitech(api: &hidapi::HidApi) -> Vec<hidapi::DeviceInfo> {
     api.device_list()
-        .filter(|d| {
-            d.vendor_id() == LOGITECH_VID && HIDPP_USAGE_PAGES.contains(&d.usage_page())
-        })
+        .filter(|d| d.vendor_id() == LOGITECH_VID && HIDPP_USAGE_PAGES.contains(&d.usage_page()))
         .cloned()
         .collect()
 }
