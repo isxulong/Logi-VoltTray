@@ -1,0 +1,16 @@
+{
+  "name": "req_protocol_version",
+  "kind": "request",
+  "command": "GetProtocolVersion",
+  "device_index": 1,
+  "sw_id": 1,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "10 01 00 11 00 00 00"
+  }
+}
