@@ -43,10 +43,11 @@ mod imp {
     use crate::icon::{dpi_bucket_size, icon_text, system_dark_theme, IconCache, IconColor};
     use crate::menu::build_menu;
     use crate::single::{acquire, SingleInstance};
+    use crate::toast;
 
     enum GuiMsg {
         Snapshot(Box<Snapshot>),
-        Alert { title: String, body: String },
+        Alert,
     }
 
     enum IoCmd {
@@ -147,6 +148,7 @@ mod imp {
                             o.push(DiagEvent::new(
                                 Layer::App,
                                 DiagKind::DeviceFound {
+                                    id: key.clone(),
                                     name: raw_name.to_string(),
                                 },
                             ));
@@ -253,23 +255,21 @@ mod imp {
                 if notify_enabled {
                     let _ = toast::notify(&title, &body, silent);
                 }
-                let _ = gui.send(GuiMsg::Alert { title, body });
+                let _ = gui.send(GuiMsg::Alert);
             }
 
             // 配置热重载（P1-2：所有权在 app 层）。
-            if let Some(res) = watcher.poll() {
-                if let Ok((cfg, _warnings)) = res {
-                    if let Ok(mut c) = core.lock() {
-                        c.swap_config(cfg);
-                    }
-                    if let Ok(mut o) = observer.lock() {
-                        o.push(DiagEvent::new(
-                            Layer::App,
-                            DiagKind::Info {
-                                message: "config reloaded".into(),
-                            },
-                        ));
-                    }
+            if let Some(Ok((cfg, _warnings))) = watcher.poll() {
+                if let Ok(c) = core.lock() {
+                    c.swap_config(cfg);
+                }
+                if let Ok(mut o) = observer.lock() {
+                    o.push(DiagEvent::new(
+                        Layer::App,
+                        DiagKind::Info {
+                            message: "config reloaded".into(),
+                        },
+                    ));
                 }
             }
 
@@ -295,7 +295,6 @@ mod imp {
         pinned: Option<String>,
         autostart_on: bool,
         silent: bool,
-        notify_enabled: bool,
     }
 
     pub fn run() -> i32 {
@@ -315,8 +314,12 @@ mod imp {
 
         // 2. AUMID + 开始菜单快捷方式（P0-5，尽力而为）。
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("volttray-tray.exe"));
-        let _ = volttray_app::guarded("aumid", || aumid::set_process_aumid());
-        let _ = volttray_app::guarded("shortcut", || aumid::ensure_start_menu_shortcut(&exe));
+        let _ = volttray_app::guarded("aumid", || {
+            let _ = aumid::set_process_aumid();
+        });
+        let _ = volttray_app::guarded("shortcut", || {
+            let _ = aumid::ensure_start_menu_shortcut(&exe);
+        });
 
         // 3. 配置：不存在则按 schema 默认值创建（P1-8）。
         let cfg_path = Config::default_path();
@@ -357,7 +360,6 @@ mod imp {
             pinned: None,
             autostart_on: autostart::is_enabled(),
             silent: cfg.notification_silent,
-            notify_enabled: cfg.notifications_enabled,
         };
 
         let initial = icon_text(None, false);
@@ -433,7 +435,7 @@ mod imp {
                     state.snapshot = Some(*s);
                     snap_changed = true;
                 }
-                GuiMsg::Alert { .. } => {} // toast 已在 IO 线程发出；此处仅占位便于扩展。
+                GuiMsg::Alert => {} // toast 已在 IO 线程发出；此处仅占位便于扩展。
             }
         }
 
