@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+
+      # 可复现构建：工具链锁定 1.90.0（与 rust-toolchain.toml 一致，见 docs/decisions.md D-01）
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: volttray
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --locked
+
+      - name: build release
+        run: cargo build --release --locked -p volttray-tray
+
+      - name: upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: volttray-tray-exe
+          path: volttray/target/release/volttray-tray.exe
+          if-no-files-found: error
