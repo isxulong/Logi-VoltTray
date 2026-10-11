@@ -84,7 +84,11 @@ pub enum MalformedKind {
     /// 首字节不是 0x10/0x11。
     BadReportId(u8),
     /// 长度与 report id 不匹配。
-    BadLength { report: u8, expected: usize, actual: usize },
+    BadLength {
+        report: u8,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 /// 协议层统一错误。
