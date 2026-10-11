@@ -1,0 +1,14 @@
+{
+  "name": "long_frame_generic_fn2",
+  "kind": "response",
+  "hex": "11 FF 09 2F 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F",
+  "expect": {
+    "type": "frame",
+    "report": 17,
+    "device_index": 255,
+    "feature_index": 9,
+    "function": 2,
+    "sw_id": 15,
+    "params_hex": "00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F"
+  }
+}
