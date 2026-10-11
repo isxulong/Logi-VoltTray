@@ -64,7 +64,11 @@ pub struct Transport<C: HidChannel, S: EventSink> {
 
 impl<C: HidChannel, S: EventSink> Transport<C, S> {
     pub fn new(ch: C, sink: S) -> Self {
-        Transport { ch, sink, next_sw: 0 }
+        Transport {
+            ch,
+            sink,
+            next_sw: 0,
+        }
     }
 
     pub fn sink_mut(&mut self) -> &mut S {
@@ -82,19 +86,33 @@ impl<C: HidChannel, S: EventSink> Transport<C, S> {
     }
 
     /// 一次请求-响应。`feature_id` 用于诊断事件与导出脱敏（P1-6）。
-    pub fn request(&mut self, frame_bytes: &[u8], feature_id: Option<u16>) -> Result<Frame, TransportError> {
+    pub fn request(
+        &mut self,
+        frame_bytes: &[u8],
+        feature_id: Option<u16>,
+    ) -> Result<Frame, TransportError> {
         let req = Frame::decode(frame_bytes)?;
-        self.emit(DiagKind::FrameTx { hex: hex_of(frame_bytes), feature_id });
+        self.emit(DiagKind::FrameTx {
+            hex: hex_of(frame_bytes),
+            feature_id,
+        });
 
         // 写：失败重试一次（DeviceGone 立即失败）。
         if let Err(e) = self.ch.write(frame_bytes) {
             if e == IoError::DeviceGone {
-                self.emit(DiagKind::IoError { message: e.to_string() });
+                self.emit(DiagKind::IoError {
+                    message: e.to_string(),
+                });
                 return Err(TransportError::Io(e));
             }
             self.emit(DiagKind::Retry { attempt: 1 });
             self.ch.write(frame_bytes).map_err(|e2| {
-                self.sink.emit(DiagEvent::new(Layer::Transport, DiagKind::IoError { message: e2.to_string() }));
+                self.sink.emit(DiagEvent::new(
+                    Layer::Transport,
+                    DiagKind::IoError {
+                        message: e2.to_string(),
+                    },
+                ));
                 TransportError::Io(e2)
             })?;
         }
@@ -105,7 +123,9 @@ impl<C: HidChannel, S: EventSink> Transport<C, S> {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                self.emit(DiagKind::Timeout { after_ms: READ_TIMEOUT.as_millis() as u64 });
+                self.emit(DiagKind::Timeout {
+                    after_ms: READ_TIMEOUT.as_millis() as u64,
+                });
                 return Err(TransportError::Timeout);
             }
             let remaining = deadline - now;
@@ -115,20 +135,30 @@ impl<C: HidChannel, S: EventSink> Transport<C, S> {
                     match Frame::decode(&data) {
                         Ok(frame) => {
                             if frame.device_index == req.device_index && frame.sw_id == req.sw_id {
-                                self.emit(DiagKind::FrameRx { hex: hex_of(&data), feature_id });
+                                self.emit(DiagKind::FrameRx {
+                                    hex: hex_of(&data),
+                                    feature_id,
+                                });
                                 return Ok(frame);
                             }
                             // 其它设备 / 其它请求的帧：跳过继续等。
                         }
-                        Err(err @ HidppError::Device { device_index, .. }) if device_index == req.device_index => {
-                            self.emit(DiagKind::FrameRx { hex: hex_of(&data), feature_id });
+                        Err(err @ HidppError::Device { device_index, .. })
+                            if device_index == req.device_index =>
+                        {
+                            self.emit(DiagKind::FrameRx {
+                                hex: hex_of(&data),
+                                feature_id,
+                            });
                             return Err(TransportError::Protocol(err));
                         }
                         Err(HidppError::Device { .. }) => {
                             // 其它设备的错误帧：跳过。
                         }
                         Err(HidppError::Malformed(kind)) => {
-                            self.emit(DiagKind::Info { message: format!("malformed frame skipped: {kind:?}") });
+                            self.emit(DiagKind::Info {
+                                message: format!("malformed frame skipped: {kind:?}"),
+                            });
                         }
                         Err(HidppError::NotEncodable(_)) => {
                             // decode 不会产生此错误；穷尽匹配，不静默。
@@ -136,11 +166,15 @@ impl<C: HidChannel, S: EventSink> Transport<C, S> {
                     }
                 }
                 Err(IoError::Timeout) => {
-                    self.emit(DiagKind::Timeout { after_ms: READ_TIMEOUT.as_millis() as u64 });
+                    self.emit(DiagKind::Timeout {
+                        after_ms: READ_TIMEOUT.as_millis() as u64,
+                    });
                     return Err(TransportError::Timeout);
                 }
                 Err(e) => {
-                    self.emit(DiagKind::IoError { message: e.to_string() });
+                    self.emit(DiagKind::IoError {
+                        message: e.to_string(),
+                    });
                     return Err(TransportError::Io(e));
                 }
             }
@@ -186,5 +220,9 @@ fn normalize_read(raw: &[u8]) -> Vec<u8> {
 }
 
 fn hex_of(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
