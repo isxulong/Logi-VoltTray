@@ -1,0 +1,16 @@
+{
+  "name": "req_get_feature_index_unified",
+  "kind": "request",
+  "command": "GetFeatureIndex",
+  "device_index": 1,
+  "sw_id": 2,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "10 01 00 02 10 04 00"
+  }
+}
