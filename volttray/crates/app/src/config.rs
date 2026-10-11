@@ -120,7 +120,12 @@ impl Config {
     pub fn parse(text: &str) -> (Self, Vec<ConfigWarning>) {
         let mut cfg = Config::default();
         let mut warnings = Vec::new();
-        let mut warn = |key: &str, reason: &str| warnings.push(ConfigWarning { key: key.into(), reason: reason.into() });
+        let mut warn = |key: &str, reason: &str| {
+            warnings.push(ConfigWarning {
+                key: key.into(),
+                reason: reason.into(),
+            })
+        };
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -142,9 +147,15 @@ impl Config {
             };
             match (key, &value) {
                 ("autostart", Value::Bool(b)) => cfg.autostart = *b,
-                ("low_threshold_warn", Value::Int(n)) if *n <= 100 => cfg.low_threshold_warn = *n as u8,
-                ("low_threshold_critical", Value::Int(n)) if *n <= 100 => cfg.low_threshold_critical = *n as u8,
-                ("poll_interval_secs", Value::Int(n)) if (POLL_MIN_SECS..=POLL_MAX_SECS).contains(n) => {
+                ("low_threshold_warn", Value::Int(n)) if *n <= 100 => {
+                    cfg.low_threshold_warn = *n as u8
+                }
+                ("low_threshold_critical", Value::Int(n)) if *n <= 100 => {
+                    cfg.low_threshold_critical = *n as u8
+                }
+                ("poll_interval_secs", Value::Int(n))
+                    if (POLL_MIN_SECS..=POLL_MAX_SECS).contains(n) =>
+                {
                     cfg.poll_interval_secs = *n
                 }
                 ("icon_style", Value::Str(s)) => match s.as_str() {
@@ -239,7 +250,9 @@ impl ConfigWatcher {
 
     /// mtime 变化时返回 Some(load 结果)；无变化返回 None。
     pub fn poll(&mut self) -> Option<io::Result<(Config, Vec<ConfigWarning>)>> {
-        let mtime = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
         if mtime == self.last_mtime {
             return None;
         }
@@ -291,7 +304,9 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back_with_warning() {
-        let (c, w) = Config::parse("low_threshold_warn = 999\npoll_interval_secs = 5\nicon_style = \"neon\"\n");
+        let (c, w) = Config::parse(
+            "low_threshold_warn = 999\npoll_interval_secs = 5\nicon_style = \"neon\"\n",
+        );
         assert_eq!(c.low_threshold_warn, DEFAULT_WARN);
         assert_eq!(c.poll_interval_secs, DEFAULT_POLL_SECS);
         assert_eq!(c.icon_style, IconStyle::Auto);
@@ -308,14 +323,20 @@ mod tests {
 
     #[test]
     fn comments_and_malformed_lines_tolerated() {
-        let (c, w) = Config::parse("# comment\n\nlow_threshold_warn = 15 # inline\n[section]\ngarbage line\n");
+        let (c, w) = Config::parse(
+            "# comment\n\nlow_threshold_warn = 15 # inline\n[section]\ngarbage line\n",
+        );
         assert_eq!(c.low_threshold_warn, 15);
         assert_eq!(w.len(), 2); // section + garbage
     }
 
     #[test]
     fn toml_roundtrip() {
-        let c = Config { autostart: true, low_threshold_warn: 22, ..Config::default() };
+        let c = Config {
+            autostart: true,
+            low_threshold_warn: 22,
+            ..Config::default()
+        };
         let (back, w) = Config::parse(&c.to_toml());
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(back, c);
