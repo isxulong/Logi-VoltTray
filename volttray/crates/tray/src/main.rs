@@ -24,14 +24,14 @@ mod imp {
     use tray_icon::menu::MenuEvent;
     use tray_icon::{TrayIconBuilder, TrayIconEvent};
     use windows::core::PCWSTR;
-    use windows::Win32::UI::HiDpi::{GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+    use windows::Win32::UI::HiDpi::{
+        GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     use volttray_app::aumid;
     use volttray_app::autostart;
-    use volttray_app::{
-        Alert, AppCore, Config, ConfigWatcher, Observer, SharedObserver, Snapshot,
-    };
+    use volttray_app::{Alert, AppCore, Config, ConfigWatcher, Observer, SharedObserver, Snapshot};
     use volttray_device::battery::probe_battery;
     use volttray_device::handshake::{handshake, Handshake};
     use volttray_device::{classify_pid, Device};
@@ -87,7 +87,10 @@ mod imp {
     fn alert_text(alert: Alert, name: &str) -> (String, String) {
         match alert {
             Alert::Warn(p) => ("VoltTray 电量偏低".into(), format!("{name} 电量剩余 {p}%")),
-            Alert::Critical(p) => ("VoltTray 电量严重不足".into(), format!("{name} 电量仅剩 {p}%，请尽快充电")),
+            Alert::Critical(p) => (
+                "VoltTray 电量严重不足".into(),
+                format!("{name} 电量仅剩 {p}%，请尽快充电"),
+            ),
         }
     }
 
@@ -130,14 +133,31 @@ mod imp {
                             Handshake::NoResponse => continue,
                         };
                         let raw_name = info.product_string().unwrap_or("Logitech 设备");
-                        let dev = Device::new(key.clone(), raw_name, classify_pid(info.product_id()), 0xFF, is_hidpp1);
+                        let dev = Device::new(
+                            key.clone(),
+                            raw_name,
+                            classify_pid(info.product_id()),
+                            0xFF,
+                            is_hidpp1,
+                        );
                         if let Ok(mut c) = core.lock() {
                             c.upsert_device(dev);
                         }
                         if let Ok(mut o) = observer.lock() {
-                            o.push(DiagEvent::new(Layer::App, DiagKind::DeviceFound { name: raw_name.to_string() }));
+                            o.push(DiagEvent::new(
+                                Layer::App,
+                                DiagKind::DeviceFound {
+                                    name: raw_name.to_string(),
+                                },
+                            ));
                         }
-                        handles.push(DevHandle { id: key, transport: t, features, is_hidpp1, failures: 0 });
+                        handles.push(DevHandle {
+                            id: key,
+                            transport: t,
+                            features,
+                            is_hidpp1,
+                            failures: 0,
+                        });
                     }
                     // 掉线设备移除。
                     let mut i = 0;
@@ -148,7 +168,10 @@ mod imp {
                                 c.remove_device(&gone.id);
                             }
                             if let Ok(mut o) = observer.lock() {
-                                o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id: gone.id }));
+                                o.push(DiagEvent::new(
+                                    Layer::App,
+                                    DiagKind::DeviceLost { id: gone.id },
+                                ));
                             }
                         } else {
                             i += 1;
@@ -168,7 +191,14 @@ mod imp {
                 let mut i = 0;
                 while i < handles.len() {
                     let h = &mut handles[i];
-                    let reading = probe_battery(&mut h.transport, &h.id, 0xFF, &h.features, "li-ion", h.is_hidpp1);
+                    let reading = probe_battery(
+                        &mut h.transport,
+                        &h.id,
+                        0xFF,
+                        &h.features,
+                        "li-ion",
+                        h.is_hidpp1,
+                    );
                     match reading {
                         Some(r) => {
                             h.failures = 0;
@@ -190,7 +220,10 @@ mod imp {
                             if gone {
                                 let gone_h = handles.remove(i);
                                 if let Ok(mut o) = observer.lock() {
-                                    o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id: gone_h.id }));
+                                    o.push(DiagEvent::new(
+                                        Layer::App,
+                                        DiagKind::DeviceLost { id: gone_h.id },
+                                    ));
                                 }
                             } else {
                                 i += 1;
@@ -199,7 +232,10 @@ mod imp {
                     }
                 }
                 for id in core.newly_gray(now) {
-                    alerts.push(("VoltTray 设备离线".into(), format!("设备 {id} 超过 90 秒未响应，已置灰")));
+                    alerts.push((
+                        "VoltTray 设备离线".into(),
+                        format!("设备 {id} 超过 90 秒未响应，已置灰"),
+                    ));
                 }
                 let snap = core.snapshot(now);
                 let _ = gui.send(GuiMsg::Snapshot(Box::new(snap)));
@@ -227,7 +263,12 @@ mod imp {
                         c.swap_config(cfg);
                     }
                     if let Ok(mut o) = observer.lock() {
-                        o.push(DiagEvent::new(Layer::App, DiagKind::Info { message: "config reloaded".into() }));
+                        o.push(DiagEvent::new(
+                            Layer::App,
+                            DiagKind::Info {
+                                message: "config reloaded".into(),
+                            },
+                        ));
                     }
                 }
             }
@@ -348,7 +389,19 @@ mod imp {
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message == WM_TIMER {
-                    pump(&tray, &gui_rx, &cmd_tx, &mut state, &mut cache, &mut cur_size, &mut cur_dark, &observer, &cfg_path, &exe, &mut ids);
+                    pump(
+                        &tray,
+                        &gui_rx,
+                        &cmd_tx,
+                        &mut state,
+                        &mut cache,
+                        &mut cur_size,
+                        &mut cur_dark,
+                        &observer,
+                        &cfg_path,
+                        &exe,
+                        &mut ids,
+                    );
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -441,7 +494,9 @@ mod imp {
             Some(s) => (s.devices.clone(), s.default_device),
             None => (Vec::new(), None),
         };
-        let default_id = default_idx.and_then(|i| devices.get(i)).map(|d| d.id.clone());
+        let default_id = default_idx
+            .and_then(|i| devices.get(i))
+            .map(|d| d.id.clone());
         let (menu_obj, new_ids) = build_menu(
             &devices,
             default_id.as_deref(),
@@ -498,7 +553,12 @@ mod imp {
         let text = wide(&msg);
         let title = wide("Logi VoltTray 诊断");
         unsafe {
-            MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(
+                None,
+                PCWSTR(text.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONINFORMATION,
+            );
         }
     }
 }
