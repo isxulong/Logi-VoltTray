@@ -112,7 +112,7 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
     curve: &str,
     is_hidpp1: bool,
 ) -> Option<BatteryReading> {
-    let mut emit = |t: &mut Transport<C, S>, kind: DiagKind| {
+    let emit = |t: &mut Transport<C, S>, kind: DiagKind| {
         t.sink_mut().emit(DiagEvent::new(Layer::Device, kind));
     };
 
