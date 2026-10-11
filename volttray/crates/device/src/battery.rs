@@ -93,7 +93,9 @@ fn should_fallback(err: &TransportError) -> bool {
     match err {
         TransportError::Protocol(HidppError::Device { code, .. }) => matches!(
             code,
-            DeviceErrorCode::InvalidFeatureIndex | DeviceErrorCode::Unsupported | DeviceErrorCode::UnknownCode(_)
+            DeviceErrorCode::InvalidFeatureIndex
+                | DeviceErrorCode::Unsupported
+                | DeviceErrorCode::UnknownCode(_)
         ),
         TransportError::Protocol(HidppError::Malformed(_)) => true,
         TransportError::Protocol(HidppError::NotEncodable(_)) => true,
@@ -115,12 +117,28 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
     };
 
     let strategies: &[(QueryCommand, BatterySource, Option<u16>)] = if is_hidpp1 {
-        &[(QueryCommand::ReadHidpp1Register0x0D, BatterySource::Hidpp1Register, None)]
+        &[(
+            QueryCommand::ReadHidpp1Register0x0D,
+            BatterySource::Hidpp1Register,
+            None,
+        )]
     } else {
         &[
-            (QueryCommand::GetBatteryUnified, BatterySource::UnifiedBattery, Some(feature_ids::UNIFIED_BATTERY)),
-            (QueryCommand::GetBatteryStatus, BatterySource::BatteryStatus, Some(feature_ids::BATTERY_STATUS)),
-            (QueryCommand::GetBatteryVoltage, BatterySource::BatteryVoltage, Some(feature_ids::BATTERY_VOLTAGE)),
+            (
+                QueryCommand::GetBatteryUnified,
+                BatterySource::UnifiedBattery,
+                Some(feature_ids::UNIFIED_BATTERY),
+            ),
+            (
+                QueryCommand::GetBatteryStatus,
+                BatterySource::BatteryStatus,
+                Some(feature_ids::BATTERY_STATUS),
+            ),
+            (
+                QueryCommand::GetBatteryVoltage,
+                BatterySource::BatteryVoltage,
+                Some(feature_ids::BATTERY_VOLTAGE),
+            ),
         ]
     };
 
@@ -139,23 +157,40 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
                     BatterySource::HidPowerDescriptor => None, // 不在此策略表内
                 };
                 if let Some((percent, charging)) = mapped {
-                    let reading = BatteryReading { percent, charging, source: *source };
-                    emit(t, DiagKind::BatteryUpdate {
-                        id: device_id.to_string(),
+                    let reading = BatteryReading {
                         percent,
                         charging,
-                        source: source.name().to_string(),
-                    });
+                        source: *source,
+                    };
+                    emit(
+                        t,
+                        DiagKind::BatteryUpdate {
+                            id: device_id.to_string(),
+                            percent,
+                            charging,
+                            source: source.name().to_string(),
+                        },
+                    );
                     return Some(reading);
                 }
                 // 参数映射失败（百分比>100 等）→ 下一策略
             }
             Err(err) => {
                 if matches!(err, TransportError::Io(IoError::DeviceGone)) {
-                    emit(t, DiagKind::DeviceLost { id: device_id.to_string() });
+                    emit(
+                        t,
+                        DiagKind::DeviceLost {
+                            id: device_id.to_string(),
+                        },
+                    );
                 }
                 if !should_fallback(&err) {
-                    emit(t, DiagKind::Info { message: format!("battery probe aborted: {err}") });
+                    emit(
+                        t,
+                        DiagKind::Info {
+                            message: format!("battery probe aborted: {err}"),
+                        },
+                    );
                     return None;
                 }
             }
@@ -164,16 +199,28 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
 
     // HID Power Descriptor 兜底（尽力而为）。
     if let Some((percent, charging)) = t.read_hid_power_descriptor() {
-        let reading = BatteryReading { percent, charging, source: BatterySource::HidPowerDescriptor };
-        emit(t, DiagKind::BatteryUpdate {
-            id: device_id.to_string(),
+        let reading = BatteryReading {
             percent,
             charging,
-            source: BatterySource::HidPowerDescriptor.name().to_string(),
-        });
+            source: BatterySource::HidPowerDescriptor,
+        };
+        emit(
+            t,
+            DiagKind::BatteryUpdate {
+                id: device_id.to_string(),
+                percent,
+                charging,
+                source: BatterySource::HidPowerDescriptor.name().to_string(),
+            },
+        );
         return Some(reading);
     }
 
-    emit(t, DiagKind::Info { message: format!("battery unknown for {device_id}") });
+    emit(
+        t,
+        DiagKind::Info {
+            message: format!("battery unknown for {device_id}"),
+        },
+    );
     None
 }
