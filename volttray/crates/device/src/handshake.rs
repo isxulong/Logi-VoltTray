@@ -28,9 +28,14 @@ pub const PROBED_FEATURES: [u16; 3] = [
     feature_ids::BATTERY_VOLTAGE,
 ];
 
-pub fn handshake<C: HidChannel, S: EventSink>(t: &mut Transport<C, S>, device_index: u8) -> Handshake {
+pub fn handshake<C: HidChannel, S: EventSink>(
+    t: &mut Transport<C, S>,
+    device_index: u8,
+) -> Handshake {
     let sw = t.alloc_sw_id();
-    let Ok(ping) = QueryCommand::GetProtocolVersion.encode_for(device_index, sw, &FeatureTable::new()) else {
+    let Ok(ping) =
+        QueryCommand::GetProtocolVersion.encode_for(device_index, sw, &FeatureTable::new())
+    else {
         return Handshake::NoResponse;
     };
     match t.request(&ping, Some(feature_ids::IROOT)) {
@@ -42,7 +47,9 @@ pub fn handshake<C: HidChannel, S: EventSink>(t: &mut Transport<C, S>, device_in
     let mut table = FeatureTable::new();
     for fid in PROBED_FEATURES {
         let sw = t.alloc_sw_id();
-        let Ok(req) = QueryCommand::GetFeatureIndex { feature_id: fid }.encode_for(device_index, sw, &table) else {
+        let Ok(req) =
+            QueryCommand::GetFeatureIndex { feature_id: fid }.encode_for(device_index, sw, &table)
+        else {
             continue;
         };
         if let Ok(frame) = t.request(&req, Some(fid)) {
@@ -86,7 +93,12 @@ mod tests {
     }
 
     fn stub(reads: Vec<Result<Vec<u8>, IoError>>) -> Transport<Stub, Sink> {
-        Transport::new(Stub { reads: reads.into() }, Sink)
+        Transport::new(
+            Stub {
+                reads: reads.into(),
+            },
+            Sink,
+        )
     }
 
     #[test]
