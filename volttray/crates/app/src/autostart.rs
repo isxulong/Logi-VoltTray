@@ -9,8 +9,8 @@ mod imp {
     use std::path::Path;
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
     };
 
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -19,11 +19,19 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn open_run_key(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Result<HKEY, String> {
+    fn open_run_key(
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Result<HKEY, String> {
         let sub = wide(RUN_KEY);
         let mut hkey = HKEY::default();
         unsafe {
-            let r = RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR::from_raw(sub.as_ptr()), None, access, &mut hkey);
+            let r = RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR::from_raw(sub.as_ptr()),
+                None,
+                access,
+                &mut hkey,
+            );
             if r.is_err() {
                 return Err(format!("RegOpenKeyExW failed: {r:?}"));
             }
@@ -32,12 +40,21 @@ mod imp {
     }
 
     pub fn is_enabled() -> bool {
-        let Ok(hkey) = open_run_key(KEY_QUERY_VALUE) else { return false };
+        let Ok(hkey) = open_run_key(KEY_QUERY_VALUE) else {
+            return false;
+        };
         let name = wide(RUN_VALUE_NAME);
         let mut ty = REG_VALUE_TYPE(0);
         let mut size = 0u32;
         unsafe {
-            let r = RegQueryValueExW(hkey, PCWSTR::from_raw(name.as_ptr()), None, Some(&mut ty), None, Some(&mut size));
+            let r = RegQueryValueExW(
+                hkey,
+                PCWSTR::from_raw(name.as_ptr()),
+                None,
+                Some(&mut ty),
+                None,
+                Some(&mut size),
+            );
             let _ = RegCloseKey(hkey);
             r.is_ok() && size > 0
         }
@@ -50,7 +67,13 @@ mod imp {
             unsafe { std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2) };
         let name = wide(RUN_VALUE_NAME);
         unsafe {
-            let r = RegSetValueExW(hkey, PCWSTR::from_raw(name.as_ptr()), None, REG_SZ, Some(bytes));
+            let r = RegSetValueExW(
+                hkey,
+                PCWSTR::from_raw(name.as_ptr()),
+                None,
+                REG_SZ,
+                Some(bytes),
+            );
             let _ = RegCloseKey(hkey);
             if r.is_err() {
                 return Err(format!("RegSetValueExW failed: {r:?}"));
