@@ -36,13 +36,16 @@ static TABLE: OnceLock<CurveTable> = OnceLock::new();
 
 fn table() -> &'static CurveTable {
     TABLE.get_or_init(|| {
-        let file: CurvesFile =
-            serde_json::from_str(CURVES_JSON).expect("fixtures/voltage_curves.json must be valid JSON");
+        let file: CurvesFile = serde_json::from_str(CURVES_JSON)
+            .expect("fixtures/voltage_curves.json must be valid JSON");
         let mut curves = Vec::with_capacity(file.curves.len());
         for raw in file.curves {
             let mut points = raw.points;
             points.sort_by(|a, b| b.0.cmp(&a.0));
-            curves.push(Curve { name: raw.name, points });
+            curves.push(Curve {
+                name: raw.name,
+                points,
+            });
         }
         CurveTable { curves }
     })
@@ -51,11 +54,15 @@ fn table() -> &'static CurveTable {
 impl Curve {
     /// 分段线性插值；超出锚点范围按端点钳制。
     pub fn percent_at(&self, mv: u16) -> u8 {
-        let Some(first) = self.points.first() else { return 0 };
+        let Some(first) = self.points.first() else {
+            return 0;
+        };
         if mv >= first.0 {
             return first.1;
         }
-        let Some(last) = self.points.last() else { return 0 };
+        let Some(last) = self.points.last() else {
+            return 0;
+        };
         if mv <= last.0 {
             return last.1;
         }
