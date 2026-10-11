@@ -1,0 +1,11 @@
+{
+  "name": "err_07_invalid_function_id",
+  "kind": "response",
+  "hex": "10 01 FF 07 06 07 00",
+  "expect": {
+    "type": "error",
+    "device_index": 1,
+    "feature_index": 6,
+    "error_code": 7
+  }
+}
