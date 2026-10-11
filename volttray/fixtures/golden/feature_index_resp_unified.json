@@ -1,0 +1,14 @@
+{
+  "name": "feature_index_resp_unified",
+  "kind": "response",
+  "hex": "10 01 01 04 06 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 1,
+    "feature_index": 1,
+    "function": 0,
+    "sw_id": 4,
+    "params_hex": "06 00 00"
+  }
+}
