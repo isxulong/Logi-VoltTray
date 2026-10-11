@@ -1,0 +1,8 @@
+{
+  "name": "malformed_empty",
+  "kind": "malformed",
+  "hex": "",
+  "expect": {
+    "kind": "EmptyFrame"
+  }
+}
