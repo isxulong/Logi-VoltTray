@@ -15,11 +15,14 @@ mod imp {
     use windows::core::{GUID, PCWSTR, PWSTR};
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
-    use windows::Win32::UI::Shell::{IShellLinkW, SetCurrentProcessExplicitAppUserModelID, ShellLink};
+    use windows::Win32::UI::Shell::{
+        IShellLinkW, SetCurrentProcessExplicitAppUserModelID, ShellLink,
+    };
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -28,14 +31,25 @@ mod imp {
     /// PKEY_AppUserModel_ID = {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, pid=5
     fn pkey_aumid() -> windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
         windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
-            fmtid: GUID::from_values(0x9F4C2855, 0x9F79, 0x4B39, [0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3]),
+            fmtid: GUID::from_values(
+                0x9F4C2855,
+                0x9F79,
+                0x4B39,
+                [0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3],
+            ),
             pid: 5,
         }
     }
 
     pub fn shortcut_path() -> PathBuf {
-        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        base.join("Microsoft").join("Windows").join("Start Menu").join("Programs").join(SHORTCUT_NAME)
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join(SHORTCUT_NAME)
     }
 
     pub fn set_process_aumid() -> Result<(), String> {
@@ -59,12 +73,15 @@ mod imp {
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("CoCreateInstance(ShellLink) failed: {e}"))?;
             let exe = wide(&exe_path.display().to_string());
-            link.SetPath(PCWSTR::from_raw(exe.as_ptr())).map_err(|e| format!("SetPath failed: {e}"))?;
+            link.SetPath(PCWSTR::from_raw(exe.as_ptr()))
+                .map_err(|e| format!("SetPath failed: {e}"))?;
             let desc = wide("Logi VoltTray - battery monitor");
             let _ = link.SetDescription(PCWSTR::from_raw(desc.as_ptr()));
 
             // 写 AUMID 属性（手工构造 VT_LPWSTR PROPVARIANT，D-09）。
-            let store: IPropertyStore = link.cast().map_err(|e| format!("cast IPropertyStore failed: {e}"))?;
+            let store: IPropertyStore = link
+                .cast()
+                .map_err(|e| format!("cast IPropertyStore failed: {e}"))?;
             let mut aumid_w = wide(AUMID);
             let pv = PROPVARIANT {
                 Anonymous: windows::Win32::System::Com::StructuredStorage::PROPVARIANT_0 {
@@ -74,18 +91,25 @@ mod imp {
                             wReserved1: 0,
                             wReserved2: 0,
                             wReserved3: 0,
-                            Anonymous: windows::Win32::System::Com::StructuredStorage::PROPVARIANT_0_0_0 {
-                                pwszVal: PWSTR::from_raw(aumid_w.as_mut_ptr()),
-                            },
+                            Anonymous:
+                                windows::Win32::System::Com::StructuredStorage::PROPVARIANT_0_0_0 {
+                                    pwszVal: PWSTR::from_raw(aumid_w.as_mut_ptr()),
+                                },
                         },
                     ),
                 },
             };
             let pkey = pkey_aumid();
-            store.SetValue(&pkey, &pv).map_err(|e| format!("IPropertyStore::SetValue failed: {e}"))?;
-            store.Commit().map_err(|e| format!("IPropertyStore::Commit failed: {e}"))?;
+            store
+                .SetValue(&pkey, &pv)
+                .map_err(|e| format!("IPropertyStore::SetValue failed: {e}"))?;
+            store
+                .Commit()
+                .map_err(|e| format!("IPropertyStore::Commit failed: {e}"))?;
 
-            let persist: IPersistFile = link.cast().map_err(|e| format!("cast IPersistFile failed: {e}"))?;
+            let persist: IPersistFile = link
+                .cast()
+                .map_err(|e| format!("cast IPersistFile failed: {e}"))?;
             let path_w = wide(&link_path.display().to_string());
             persist
                 .Save(PCWSTR::from_raw(path_w.as_ptr()), true)
