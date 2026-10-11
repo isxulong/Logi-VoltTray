@@ -17,7 +17,11 @@ struct StubChannel {
 
 impl StubChannel {
     fn new() -> Self {
-        StubChannel { writes: VecDeque::new(), reads: VecDeque::new(), written: Vec::new() }
+        StubChannel {
+            writes: VecDeque::new(),
+            reads: VecDeque::new(),
+            written: Vec::new(),
+        }
     }
     fn push_write(&mut self, r: Result<usize, IoError>) {
         self.writes.push_back(r);
@@ -68,8 +72,12 @@ fn happy_path_request_response() {
     let frame = t.request(&req_frame(), Some(4100)).expect("request");
     assert_eq!(frame.params()[0], 0x50);
     let events = &t.sink_mut().0;
-    assert!(events.iter().any(|e| matches!(e.kind, DiagKind::FrameTx { .. })));
-    assert!(events.iter().any(|e| matches!(e.kind, DiagKind::FrameRx { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e.kind, DiagKind::FrameTx { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e.kind, DiagKind::FrameRx { .. })));
 }
 
 #[test]
@@ -81,7 +89,11 @@ fn write_failure_retries_once() {
     let mut t = Transport::new(ch, VecSink::default());
     let frame = t.request(&req_frame(), None).expect("request");
     assert_eq!(frame.params()[0], 0x50);
-    assert!(t.sink_mut().0.iter().any(|e| matches!(e.kind, DiagKind::Retry { attempt: 1 })));
+    assert!(t
+        .sink_mut()
+        .0
+        .iter()
+        .any(|e| matches!(e.kind, DiagKind::Retry { attempt: 1 })));
 }
 
 #[test]
@@ -92,7 +104,11 @@ fn device_gone_is_not_retried() {
     let mut t = Transport::new(ch, VecSink::default());
     let err = t.request(&req_frame(), None).expect_err("must fail");
     assert!(matches!(err, TransportError::Io(IoError::DeviceGone)));
-    assert!(!t.sink_mut().0.iter().any(|e| matches!(e.kind, DiagKind::Retry { .. })));
+    assert!(!t
+        .sink_mut()
+        .0
+        .iter()
+        .any(|e| matches!(e.kind, DiagKind::Retry { .. })));
 }
 
 #[test]
@@ -111,7 +127,11 @@ fn read_timeout_returns_timeout() {
     let mut t = Transport::new(ch, VecSink::default());
     let err = t.request(&req_frame(), None).expect_err("must fail");
     assert!(matches!(err, TransportError::Timeout));
-    assert!(t.sink_mut().0.iter().any(|e| matches!(e.kind, DiagKind::Timeout { .. })));
+    assert!(t
+        .sink_mut()
+        .0
+        .iter()
+        .any(|e| matches!(e.kind, DiagKind::Timeout { .. })));
 }
 
 #[test]
@@ -142,7 +162,11 @@ fn device_error_frame_propagates_as_protocol_error() {
     let mut t = Transport::new(ch, VecSink::default());
     let err = t.request(&req_frame(), None).expect_err("must fail");
     match err {
-        TransportError::Protocol(HidppError::Device { code, feature_index, .. }) => {
+        TransportError::Protocol(HidppError::Device {
+            code,
+            feature_index,
+            ..
+        }) => {
             assert_eq!(code, DeviceErrorCode::InvalidFeatureIndex);
             assert_eq!(feature_index, 0x06);
         }
