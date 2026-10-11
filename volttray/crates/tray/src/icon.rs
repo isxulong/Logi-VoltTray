@@ -214,7 +214,7 @@ fn render_text_bitmap(size: u32, text: &str, (r, g, b): (u8, u8, u8)) -> Vec<u8>
             bmiColors: [RGBQUAD::default()],
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let Ok(hbmp) = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+        let Ok(hbmp) = CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
             let _ = DeleteDC(hdc);
             return rgba;
         };
