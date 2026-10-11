@@ -1,0 +1,14 @@
+{
+  "name": "battery_status_90",
+  "kind": "response",
+  "hex": "10 02 04 05 5A 80 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 2,
+    "feature_index": 4,
+    "function": 0,
+    "sw_id": 5,
+    "params_hex": "5A 80 00"
+  }
+}
