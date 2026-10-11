@@ -26,7 +26,11 @@ pub struct DeviceEntry {
 
 impl DeviceEntry {
     pub fn new(device: Device) -> Self {
-        DeviceEntry { device, last_success: None, gray_alerted: false }
+        DeviceEntry {
+            device,
+            last_success: None,
+            gray_alerted: false,
+        }
     }
 
     /// 派生灰显态（90s 无成功；从未成功过的在线设备不灰）。
@@ -70,7 +74,12 @@ pub struct AppCore {
 
 impl AppCore {
     pub fn new(config: Arc<RwLock<Config>>) -> Self {
-        AppCore { config, entries: Vec::new(), debouncers: HashMap::new(), snap_seq: 0 }
+        AppCore {
+            config,
+            entries: Vec::new(),
+            debouncers: HashMap::new(),
+            snap_seq: 0,
+        }
     }
 
     pub fn config(&self) -> Config {
@@ -107,16 +116,20 @@ impl AppCore {
     }
 
     /// 记录一次成功电量读取；返回阈值去抖后应发的告警（若有）。
-    pub fn record_success(&mut self, id: &str, reading: BatteryReading, now: Instant) -> Option<Alert> {
+    pub fn record_success(
+        &mut self,
+        id: &str,
+        reading: BatteryReading,
+        now: Instant,
+    ) -> Option<Alert> {
         let entry = self.entries.iter_mut().find(|e| e.device.id == id)?;
         entry.last_success = Some(now);
         entry.gray_alerted = false;
         entry.device.battery = Some(reading);
         let cfg = self.config();
-        let deb = self
-            .debouncers
-            .entry(id.to_string())
-            .or_insert_with(|| ThresholdDebouncer::new(cfg.low_threshold_warn, cfg.low_threshold_critical));
+        let deb = self.debouncers.entry(id.to_string()).or_insert_with(|| {
+            ThresholdDebouncer::new(cfg.low_threshold_warn, cfg.low_threshold_critical)
+        });
         deb.update(reading.percent, reading.charging)
     }
 
@@ -155,8 +168,12 @@ impl AppCore {
                 .min_by_key(|(_, p)| *p)
                 .map(|(i, _)| i)
         };
-        pick_min(&|e| e.device.battery.is_some() && !e.device.battery.is_some_and(|b| b.charging) && !e.is_gray(now))
-            .or_else(|| pick_min(&|e| e.device.battery.is_some() && !e.is_gray(now)))
+        pick_min(&|e| {
+            e.device.battery.is_some()
+                && !e.device.battery.is_some_and(|b| b.charging)
+                && !e.is_gray(now)
+        })
+        .or_else(|| pick_min(&|e| e.device.battery.is_some() && !e.is_gray(now)))
     }
 
     /// 下一次轮询间隔：充电中 15s，否则按配置。
@@ -212,11 +229,21 @@ mod tests {
     use volttray_device::LinkKind;
 
     fn reading(percent: u8, charging: bool) -> BatteryReading {
-        BatteryReading { percent, charging, source: BatterySource::UnifiedBattery }
+        BatteryReading {
+            percent,
+            charging,
+            source: BatterySource::UnifiedBattery,
+        }
     }
 
     fn dev(id: &str, index: u8) -> Device {
-        let mut d = Device::new(id.into(), &format!("Mouse {id}"), LinkKind::Bolt, index, false);
+        let mut d = Device::new(
+            id.into(),
+            &format!("Mouse {id}"),
+            LinkKind::Bolt,
+            index,
+            false,
+        );
         d.set_state(DeviceState::Online);
         d
     }
@@ -286,7 +313,10 @@ mod tests {
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
         assert_eq!(core.record_success("a", reading(19, false), now), None);
-        assert_eq!(core.record_success("a", reading(18, false), now), Some(Alert::Warn(18)));
+        assert_eq!(
+            core.record_success("a", reading(18, false), now),
+            Some(Alert::Warn(18))
+        );
     }
 
     #[test]
