@@ -237,7 +237,6 @@ fn response_matches(req: &Frame, resp: &Frame) -> bool {
     dev_hit && resp.feature_index == req.feature_index && resp.sw_id == req.sw_id
 }
 
-
 fn hex_of(bytes: &[u8]) -> String {
     bytes
         .iter()
