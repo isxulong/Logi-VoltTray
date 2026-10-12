@@ -420,9 +420,9 @@ mod tests {
         assert_eq!(IconColor::for_percent(51, false, 20), IconColor::Default);
         assert_eq!(IconColor::for_percent(50, false, 20), IconColor::Yellow);
         assert_eq!(IconColor::for_percent(20, false, 20), IconColor::Red);
-        // 阈值调到 35：31 变红档。
+        // 阈值调到 35：31 变红档；36 落在固定黄档（≤50）。
         assert_eq!(IconColor::for_percent(31, false, 35), IconColor::Red);
-        assert_eq!(IconColor::for_percent(36, false, 35), IconColor::Default);
+        assert_eq!(IconColor::for_percent(36, false, 35), IconColor::Yellow);
         // 阈值 50：黄档被红档覆盖（≤50 全红）。
         assert_eq!(IconColor::for_percent(45, false, 50), IconColor::Red);
         assert_eq!(IconColor::for_percent(90, true, 20), IconColor::Gray);
