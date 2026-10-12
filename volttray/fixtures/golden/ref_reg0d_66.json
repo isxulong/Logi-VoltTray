@@ -1,0 +1,15 @@
+{
+  "name": "ref_reg0d_66",
+  "kind": "response",
+  "hex": "10 03 81 0D 42 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 3,
+    "feature_index": 129,
+    "function": 0,
+    "sw_id": 13,
+    "params_hex": "42 00 00"
+  },
+  "comment": "应答 byte2=0x81 byte3=0x0D（回显 sub+addr，无 sw_id）"
+}
