@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 use volttray_device::battery::{
-    map_battery_status, map_battery_voltage, map_hidpp1_register, map_unified_battery,
-    probe_battery, BatterySource,
+    map_battery_status, map_battery_voltage, map_hidpp1_register_0x0d, map_unified_battery,
+    probe_battery, BatterySource, UnknownReason,
 };
 use volttray_protocol::FeatureTable;
 use volttray_transport::channel::{HidChannel, IoError};
@@ -63,10 +63,13 @@ fn mapping_functions() {
     assert_eq!(map_battery_status(&[0x5A, 0x80]), Some((90, true)));
     assert_eq!(map_battery_status(&[0x0A, 0x00]), Some((10, false)));
     assert_eq!(
-        map_battery_voltage(&[0x0F, 0x3C], "li-ion"),
-        Some((60, false))
+        map_battery_voltage(&[0x0F, 0x3C, 0x00], "li-ion"),
+        Ok((60, false))
     ); // 3900mV
-    assert_eq!(map_hidpp1_register(&[0x46, 0x40]), Some((70, true)));
+    assert_eq!(
+        map_hidpp1_register_0x0d(&[0x46, 0x00, 0x50]),
+        Some((70, true))
+    ); // state 0x50 = 充电中
 }
 
 #[test]
@@ -114,7 +117,7 @@ fn device_gone_aborts_chain() {
     ]);
     let mut t = Transport::new(ch, VecSink::default());
     let r = probe_battery(&mut t, "dev1", 0x01, &table(), "li-ion", false);
-    assert_eq!(r, None); // 不继续尝试后续策略
+    assert_eq!(r, Err(UnknownReason::DeviceGone)); // 不继续尝试后续策略
 }
 
 #[test]
@@ -127,17 +130,18 @@ fn all_strategies_fail_returns_none() {
     let mut t = Transport::new(ch, VecSink::default());
     assert_eq!(
         probe_battery(&mut t, "dev1", 0x01, &table(), "li-ion", false),
-        None
+        Err(UnknownReason::ErrorResponse)
     );
 }
 
 #[test]
 fn hidpp1_device_uses_register() {
-    let ch = StubChannel::scripted(vec![Ok(vec![0x10, 0x03, 0x0D, 0x01, 0x46, 0x40, 0x00])]);
+    // v0.2.0 请求带 0x81 子地址，响应回显 byte2=0x81、byte3=寄存器号 0x0D（D-17）。
+    let ch = StubChannel::scripted(vec![Ok(vec![0x10, 0x03, 0x81, 0x0D, 0x46, 0x00, 0x50])]);
     let mut t = Transport::new(ch, VecSink::default());
     let r =
         probe_battery(&mut t, "dev3", 0x03, &FeatureTable::new(), "li-ion", true).expect("reading");
     assert_eq!(r.percent, 70);
     assert!(r.charging);
-    assert_eq!(r.source, BatterySource::Hidpp1Register);
+    assert_eq!(r.source, BatterySource::Hidpp1Register0x0D);
 }
