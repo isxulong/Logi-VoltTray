@@ -2,6 +2,11 @@
 //!
 //! 线程模型：GUI 线程（托盘 + 消息泵）+ IO 线程（HID 枚举 / 握手 / 轮询）。
 //! 跨线程只走 channel 与共享的 AppCore / Observer（诊断观测流 P1-2）。
+//!
+//! v0.2.0（红队差异 #1 决定性修正）：不再对 0xFF 一把梭——按配对通道枚举
+//! （`enumerate_channels`），每个接收器通道逐槽扫描 1..=6 再试 0xFF（参考
+//! 实现 `_scan_channel` 实证），拿到电量才注册设备；读不到时原因分类已进
+//! 诊断流（`BatteryUnknown`），不再留下无法定位的常驻「？」空设备。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -31,19 +36,26 @@ mod imp {
 
     use volttray_app::aumid;
     use volttray_app::autostart;
+    use volttray_app::config::{IconBackground, IconFontColor};
     use volttray_app::{Alert, AppCore, Config, ConfigWatcher, Observer, SharedObserver, Snapshot};
     use volttray_device::battery::probe_battery;
     use volttray_device::handshake::{handshake, Handshake};
     use volttray_device::{classify_pid, Device};
     use volttray_protocol::FeatureTable;
+    use volttray_transport::channel::{HidChannel, IoError};
     use volttray_transport::events::{DiagEvent, DiagKind, Layer};
-    use volttray_transport::hid_impl::{enumerate_logitech, HidDeviceChannel};
+    use volttray_transport::hid_impl::{enumerate_channels, ChannelInfo, HidDeviceChannel};
     use volttray_transport::Transport;
 
     use crate::icon::{dpi_bucket_size, icon_text, system_dark_theme, IconCache, IconColor};
     use crate::menu::build_menu;
     use crate::single::{acquire, SingleInstance};
     use crate::toast;
+
+    /// 接收器槽位扫描顺序（参考实现 `_scan_channel` 实证：1..=6 再 0xFF）。
+    const SCAN_SLOTS: [u8; 7] = [1, 2, 3, 4, 5, 6, 0xFF];
+    /// 电压曲线名（v0.2.0：参考实现 13 锚点实证曲线）。
+    const CURVE: &str = "li-ion-logi";
 
     enum GuiMsg {
         Snapshot(Box<Snapshot>),
@@ -55,12 +67,49 @@ mod imp {
         Shutdown,
     }
 
-    struct DevHandle {
+    /// 同一接收器通道的句柄共享：多个槽位（设备）共用一对 HID collection。
+    #[derive(Clone)]
+    struct SharedChannel(Arc<Mutex<HidDeviceChannel>>);
+
+    impl HidChannel for SharedChannel {
+        fn write(&mut self, d: &[u8]) -> Result<usize, IoError> {
+            self.0
+                .lock()
+                .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
+                .write(d)
+        }
+        fn read(&mut self, buf: &mut [u8], t: Duration) -> Result<usize, IoError> {
+            self.0
+                .lock()
+                .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
+                .read(buf, t)
+        }
+        fn drain(&mut self) {
+            if let Ok(mut c) = self.0.lock() {
+                c.drain();
+            }
+        }
+        fn get_feature_report(&mut self, id: u8, buf: &mut [u8]) -> Result<usize, IoError> {
+            self.0
+                .lock()
+                .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
+                .get_feature_report(id, buf)
+        }
+    }
+
+    struct SlotState {
         id: String,
-        transport: Transport<HidDeviceChannel, SharedObserver>,
+        index: u8,
         features: FeatureTable,
         is_hidpp1: bool,
         failures: u32,
+    }
+
+    struct ChannelState {
+        key: String,
+        info: ChannelInfo,
+        shared: SharedChannel,
+        slots: Vec<SlotState>,
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -95,6 +144,64 @@ mod imp {
         }
     }
 
+    /// 槽位显示名：接收器产品名 + 槽位号（接收器本体 0xFF 不加后缀）。
+    fn slot_name(info: &ChannelInfo, slot: u8) -> String {
+        let base = if info.product.is_empty() {
+            "Logitech 设备".to_string()
+        } else {
+            info.product.clone()
+        };
+        if slot == 0xFF {
+            base
+        } else {
+            format!("{base} ·{slot}")
+        }
+    }
+
+    /// 对单个通道扫描一个槽位：握手 → 电量探测；拿到电量才注册。
+    /// 返回注册成功的槽位（None = 未发现/电量未知，原因已进诊断流）。
+    fn try_slot(
+        core: &Arc<Mutex<AppCore>>,
+        observer: &Arc<Mutex<Observer>>,
+        shared: &SharedChannel,
+        info: &ChannelInfo,
+        slot: u8,
+    ) -> Option<SlotState> {
+        let id = format!("{}#{}", info.key(), slot);
+        let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
+        let hs = handshake(&mut t, slot);
+        let (features, is_hidpp1) = match hs {
+            Handshake::Hidpp2(table) => (table, false),
+            Handshake::Hidpp1 => (FeatureTable::new(), true),
+            Handshake::NoResponse => return None,
+        };
+        // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
+        let reading = probe_battery(&mut t, &id, slot, &features, CURVE, is_hidpp1).ok()?;
+        let name = slot_name(info, slot);
+        let dev = Device::new(id.clone(), &name, classify_pid(info.pid), slot, is_hidpp1);
+        let now = Instant::now();
+        if let Ok(mut c) = core.lock() {
+            c.upsert_device(dev);
+            c.record_success(&id, reading, now);
+        }
+        if let Ok(mut o) = observer.lock() {
+            o.push(DiagEvent::new(
+                Layer::App,
+                DiagKind::DeviceFound {
+                    id: id.clone(),
+                    name,
+                },
+            ));
+        }
+        Some(SlotState {
+            id,
+            index: slot,
+            features,
+            is_hidpp1,
+            failures: 0,
+        })
+    }
+
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
     fn io_loop(
         core: Arc<Mutex<AppCore>>,
@@ -103,7 +210,7 @@ mod imp {
         cmd: mpsc::Receiver<IoCmd>,
         cfg_path: PathBuf,
     ) {
-        let mut handles: Vec<DevHandle> = Vec::new();
+        let mut channels: Vec<ChannelState> = Vec::new();
         let mut watcher = ConfigWatcher::new(cfg_path);
         let mut last_enum = Instant::now() - Duration::from_secs(60);
         'outer: loop {
@@ -111,69 +218,64 @@ mod imp {
                 return;
             }
 
-            // 30s 重新枚举一次（或当前无设备时每次循环都枚举）。
-            if last_enum.elapsed() >= Duration::from_secs(30) || handles.is_empty() {
+            // 30s 重新枚举一次（或当前无通道时每次循环都枚举）。
+            if last_enum.elapsed() >= Duration::from_secs(30) || channels.is_empty() {
                 last_enum = Instant::now();
                 if let Ok(api) = hidapi::HidApi::new() {
                     let mut seen: Vec<String> = Vec::new();
-                    for info in enumerate_logitech(&api) {
-                        let key = info.path().to_string_lossy().into_owned();
+                    for info in enumerate_channels(&api) {
+                        let key = info.key();
                         seen.push(key.clone());
-                        if handles.iter().any(|h| h.id == key) {
+                        if let Some(state) = channels.iter_mut().find(|c| c.key == key) {
+                            // 已有通道：补扫新出现的槽位（休眠唤醒 / 新配对）。
+                            for slot in SCAN_SLOTS {
+                                if state.slots.iter().any(|s| s.index == slot) {
+                                    continue;
+                                }
+                                if let Some(s) =
+                                    try_slot(&core, &observer, &state.shared, &state.info, slot)
+                                {
+                                    state.slots.push(s);
+                                }
+                            }
                             continue;
                         }
-                        let Ok(ch) = HidDeviceChannel::open_path(&api, info.path()) else {
+                        let Ok(ch) = HidDeviceChannel::open(
+                            &api,
+                            info.short_path.as_deref(),
+                            info.long_path.as_deref(),
+                        ) else {
                             continue;
                         };
-                        let sink = SharedObserver(observer.clone());
-                        let mut t = Transport::new(ch, sink);
-                        let hs = handshake(&mut t, 0xFF);
-                        let (features, is_hidpp1) = match hs {
-                            Handshake::Hidpp2(table) => (table, false),
-                            Handshake::Hidpp1 => (FeatureTable::new(), true),
-                            Handshake::NoResponse => continue,
-                        };
-                        let raw_name = info.product_string().unwrap_or("Logitech 设备");
-                        let dev = Device::new(
-                            key.clone(),
-                            raw_name,
-                            classify_pid(info.product_id()),
-                            0xFF,
-                            is_hidpp1,
-                        );
-                        if let Ok(mut c) = core.lock() {
-                            c.upsert_device(dev);
+                        let shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                        let mut slots = Vec::new();
+                        for slot in SCAN_SLOTS {
+                            if let Some(s) = try_slot(&core, &observer, &shared, &info, slot) {
+                                slots.push(s);
+                            }
                         }
-                        if let Ok(mut o) = observer.lock() {
-                            o.push(DiagEvent::new(
-                                Layer::App,
-                                DiagKind::DeviceFound {
-                                    id: key.clone(),
-                                    name: raw_name.to_string(),
-                                },
-                            ));
-                        }
-                        handles.push(DevHandle {
-                            id: key,
-                            transport: t,
-                            features,
-                            is_hidpp1,
-                            failures: 0,
+                        channels.push(ChannelState {
+                            key,
+                            info,
+                            shared,
+                            slots,
                         });
                     }
-                    // 掉线设备移除。
+                    // 掉线通道整体移除（接收器拔出）。
                     let mut i = 0;
-                    while i < handles.len() {
-                        if !seen.contains(&handles[i].id) {
-                            let gone = handles.remove(i);
-                            if let Ok(mut c) = core.lock() {
-                                c.remove_device(&gone.id);
-                            }
-                            if let Ok(mut o) = observer.lock() {
-                                o.push(DiagEvent::new(
-                                    Layer::App,
-                                    DiagKind::DeviceLost { id: gone.id },
-                                ));
+                    while i < channels.len() {
+                        if !seen.contains(&channels[i].key) {
+                            let gone = channels.remove(i);
+                            for s in &gone.slots {
+                                if let Ok(mut c) = core.lock() {
+                                    c.remove_device(&s.id);
+                                }
+                                if let Ok(mut o) = observer.lock() {
+                                    o.push(DiagEvent::new(
+                                        Layer::App,
+                                        DiagKind::DeviceLost { id: s.id.clone() },
+                                    ));
+                                }
                             }
                         } else {
                             i += 1;
@@ -182,7 +284,7 @@ mod imp {
                 }
             }
 
-            // 轮询一轮。
+            // 轮询一轮：逐通道逐槽位探测电量。
             let now = Instant::now();
             let mut alerts: Vec<(String, String)> = Vec::new();
             {
@@ -190,45 +292,53 @@ mod imp {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                let mut i = 0;
-                while i < handles.len() {
-                    let h = &mut handles[i];
-                    let reading = probe_battery(
-                        &mut h.transport,
-                        &h.id,
-                        0xFF,
-                        &h.features,
-                        "li-ion",
-                        h.is_hidpp1,
-                    );
-                    match reading {
-                        Some(r) => {
-                            h.failures = 0;
-                            if let Some(a) = core.record_success(&h.id.clone(), r, now) {
-                                let name = core
-                                    .entries()
-                                    .iter()
-                                    .find(|e| e.device.id == h.id)
-                                    .map(|e| e.device.name.clone())
-                                    .unwrap_or_else(|| "设备".into());
-                                alerts.push(alert_text(a, &name));
-                            }
-                            i += 1;
-                        }
-                        None => {
-                            h.failures += 1;
-                            let gone = h.failures >= 3;
-                            core.record_failure(&h.id.clone(), gone);
-                            if gone {
-                                let gone_h = handles.remove(i);
-                                if let Ok(mut o) = observer.lock() {
-                                    o.push(DiagEvent::new(
-                                        Layer::App,
-                                        DiagKind::DeviceLost { id: gone_h.id },
-                                    ));
+                for ch_state in &mut channels {
+                    let mut i = 0;
+                    while i < ch_state.slots.len() {
+                        let s = &mut ch_state.slots[i];
+                        let mut t = Transport::new(
+                            ch_state.shared.clone(),
+                            SharedObserver(observer.clone()),
+                        );
+                        let reading = probe_battery(
+                            &mut t,
+                            &s.id,
+                            s.index,
+                            &s.features,
+                            CURVE,
+                            s.is_hidpp1,
+                        );
+                        match reading {
+                            Ok(r) => {
+                                s.failures = 0;
+                                if let Some(a) = core.record_success(&s.id, r, now) {
+                                    let name = core
+                                        .entries()
+                                        .iter()
+                                        .find(|e| e.device.id == s.id)
+                                        .map(|e| e.device.name.clone())
+                                        .unwrap_or_else(|| "设备".into());
+                                    alerts.push(alert_text(a, &name));
                                 }
-                            } else {
                                 i += 1;
+                            }
+                            Err(_) => {
+                                s.failures += 1;
+                                let gone = s.failures >= 3;
+                                core.record_failure(&s.id, gone);
+                                if gone {
+                                    let gone_slot = ch_state.slots.remove(i);
+                                    if let Ok(mut o) = observer.lock() {
+                                        o.push(DiagEvent::new(
+                                            Layer::App,
+                                            DiagKind::DeviceLost {
+                                                id: gone_slot.id,
+                                            },
+                                        ));
+                                    }
+                                } else {
+                                    i += 1;
+                                }
                             }
                         }
                     }
@@ -295,6 +405,8 @@ mod imp {
         pinned: Option<String>,
         autostart_on: bool,
         silent: bool,
+        icon_bg: IconBackground,
+        icon_font: IconFontColor,
     }
 
     pub fn run() -> i32 {
@@ -348,10 +460,15 @@ mod imp {
             std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path));
         }
 
-        // 4. 图标缓存（评审 4.1：启动预渲染）+ 托盘。
+        // 4. 图标缓存（评审 4.1：启动预渲染；v0.2.0：含背景/字色设置）+ 托盘。
         let dpi = unsafe { GetDpiForSystem() };
         let dark = system_dark_theme();
-        let mut cache = IconCache::new(dpi_bucket_size(dpi), dark);
+        let mut cache = IconCache::new(
+            dpi_bucket_size(dpi),
+            dark,
+            cfg.icon_background,
+            cfg.icon_font_color,
+        );
         let mut cur_size = dpi_bucket_size(dpi);
         let mut cur_dark = dark;
 
@@ -360,6 +477,8 @@ mod imp {
             pinned: None,
             autostart_on: autostart::is_enabled(),
             silent: cfg.notification_silent,
+            icon_bg: cfg.icon_background,
+            icon_font: cfg.icon_font_color,
         };
 
         let initial = icon_text(None, false);
@@ -399,6 +518,7 @@ mod imp {
                         &mut cache,
                         &mut cur_size,
                         &mut cur_dark,
+                        &core,
                         &observer,
                         &cfg_path,
                         &exe,
@@ -422,6 +542,7 @@ mod imp {
         cache: &mut IconCache,
         cur_size: &mut u32,
         cur_dark: &mut bool,
+        core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
         cfg_path: &Path,
         exe: &Path,
@@ -439,15 +560,30 @@ mod imp {
             }
         }
 
-        // DPI / 主题变化 → 重建图标缓存（评审 4.1）。
+        // DPI / 主题 / 图标背景 / 字色任一变化 → 重建图标缓存
+        //（评审 4.1 + v0.2.0：设置变更经热重载即时生效）。
+        let (bg, font) = match core.lock() {
+            Ok(c) => {
+                let cfg = c.config();
+                (cfg.icon_background, cfg.icon_font_color)
+            }
+            Err(_) => (state.icon_bg, state.icon_font),
+        };
+        if bg != state.icon_bg || font != state.icon_font {
+            state.icon_bg = bg;
+            state.icon_font = font;
+            snap_changed = true;
+        }
         let dpi = unsafe { GetDpiForSystem() };
         let size = dpi_bucket_size(dpi);
         let dark = system_dark_theme();
         if size != *cur_size || dark != *cur_dark {
-            cache.rebuild(size, dark);
+            cache.rebuild(size, dark, state.icon_bg, state.icon_font);
             *cur_size = size;
             *cur_dark = dark;
             snap_changed = true;
+        } else if snap_changed {
+            cache.rebuild(size, dark, state.icon_bg, state.icon_font);
         }
 
         if snap_changed {
