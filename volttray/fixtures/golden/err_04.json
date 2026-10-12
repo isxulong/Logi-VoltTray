@@ -1,0 +1,13 @@
+{
+  "name": "err_04",
+  "kind": "response",
+  "hex": "10 01 FF 06 17 04 00",
+  "expect": {
+    "type": "error",
+    "device_index": 1,
+    "family": "hidpp2",
+    "feature_index": 6,
+    "error_code": 4
+  },
+  "comment": "v0.2.0 再生：2.0 错误帧 byte3=feat 回显(0x06) byte4=fn|sw(0x17) byte5=code"
+}
