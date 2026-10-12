@@ -1,14 +1,15 @@
 {
   "name": "hidpp1_reg0d_70_charging",
   "kind": "response",
-  "hex": "10 03 0D 02 46 40 00",
+  "hex": "10 03 81 0D 46 40 00",
   "expect": {
     "type": "frame",
     "report": 16,
     "device_index": 3,
-    "feature_index": 13,
+    "feature_index": 129,
     "function": 0,
-    "sw_id": 2,
+    "sw_id": 13,
     "params_hex": "46 40 00"
-  }
+  },
+  "comment": "v0.2.0 再生：byte2=sub(0x81) byte3=addr(0x0D)；params [70, 0x40, 0x00]"
 }
