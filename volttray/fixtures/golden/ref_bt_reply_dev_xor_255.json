@@ -1,0 +1,15 @@
+{
+  "name": "ref_bt_reply_dev_xor_255",
+  "kind": "response",
+  "hex": "10 FE 81 0D 37 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 254,
+    "feature_index": 129,
+    "function": 0,
+    "sw_id": 13,
+    "params_hex": "37 00 00"
+  },
+  "comment": "蓝牙设备对 dev=1 的请求用 dev^0xFF=0xFE 回包，55%"
+}
