@@ -29,10 +29,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: volttray
-          # v0.3.1：burst 推送期多 run 并发恢复旧缓存、产物 mtime 被置为恢复时刻，
-          # cargo 误判 fresh 跳过重编译（跑出旧二进制/旧测试集）。prefixKey 随版本
-          # 递增以强制全量重编译，保证 CI 证据与源码一致。
-          prefix-key: v0.3.1
 
       # 自动格式化并回推：cargo fmt 修平差异后提交回 main（HEAD:main 推送避免 detached HEAD 问题），
       # 无差异则跳过；随后 fmt --check 作为最终守卫
