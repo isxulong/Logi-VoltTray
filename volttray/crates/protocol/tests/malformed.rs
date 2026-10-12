@@ -76,6 +76,7 @@ fn long_frame_error_variant() {
             device_index,
             feature_index,
             code,
+            family: _,
         } => {
             assert_eq!(device_index, 0x09);
             assert_eq!(feature_index, 0x04);
