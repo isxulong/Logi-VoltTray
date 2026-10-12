@@ -1,12 +1,16 @@
-//! 托盘图标渲染与缓存（蓝图 7 + 评审 4.1 修订）。
+//! 托盘图标渲染与缓存（蓝图 7 + 评审 4.1 修订 + v0.2.0 可读性）。
 //!
 //! - 启动时按当前 DPI 档（100%/150%/200% → 16/24/32px）用 GDI 预渲染
 //!   全部文本位图（"0".."99"、"满"、"?"、"--"）× 4 色，运行时只做像素缓存换图标，
 //!   热路径零 GDI 调用。
 //! - 两位数字封顶：100% 显示 "满"；未知 "?"；灰显 "--"。
-//! - 颜色：>50 默认（随主题黑/白）、20..=50 黄、<=20 红、灰显灰。
+//! - 颜色：>50 默认、20..=50 黄、<=20 红、灰显灰；默认档颜色依背景/主题取高对比。
+//! - v0.2.0 可读性：图标背景（transparent/light/dark，默认 dark 深色圆底）+
+//!   字体颜色（auto / #RRGGBB）。出厂组合「深色圆底 + 依背景高对比字色」保证
+//!   在深色与浅色任务栏上都清晰可读（真机反馈：无背景黑字不清晰）。
 
 use std::collections::HashMap;
+use volttray_app::config::{IconBackground, IconFontColor};
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
@@ -42,20 +46,36 @@ impl IconColor {
             Self::Default
         }
     }
+}
 
-    fn rgb(self, dark_theme: bool) -> (u8, u8, u8) {
-        match self {
-            Self::Default => {
+/// 解析某电量档的字体 RGB（v0.2.0 可读性）。
+///
+/// - 灰显（未知/离线）固定灰色，不受固定色覆盖；
+/// - 固定色覆盖正常/警告/严重档；
+/// - auto：警告黄、严重红、正常档依背景取高对比（深底白字/浅底深字/透明按主题）。
+pub fn font_rgb(
+    level: IconColor,
+    dark_theme: bool,
+    bg: IconBackground,
+    font: IconFontColor,
+) -> (u8, u8, u8) {
+    match (font, level) {
+        // 灰显永远是灰色：未知(?)与离线(--)不参与配色覆盖。
+        (_, IconColor::Gray) => (0x80, 0x80, 0x80),
+        (IconFontColor::Fixed(c), _) => (c.r, c.g, c.b),
+        (IconFontColor::Auto, IconColor::Yellow) => (0xFF, 0xD2, 0x1F),
+        (IconFontColor::Auto, IconColor::Red) => (0xE8, 0x11, 0x23),
+        (IconFontColor::Auto, IconColor::Default) => match bg {
+            IconBackground::Dark => (0xFF, 0xFF, 0xFF),
+            IconBackground::Light => (0x1B, 0x1B, 0x1B),
+            IconBackground::Transparent => {
                 if dark_theme {
                     (0xFF, 0xFF, 0xFF)
                 } else {
                     (0x1B, 0x1B, 0x1B)
                 }
             }
-            Self::Yellow => (0xFF, 0xD2, 0x1F),
-            Self::Red => (0xE8, 0x11, 0x23),
-            Self::Gray => (0x80, 0x80, 0x80),
-        }
+        },
     }
 }
 
@@ -121,18 +141,27 @@ pub fn system_dark_theme() -> bool {
     }
 }
 
-/// 预渲染位图缓存：key = (颜色, 文本)。
+/// 预渲染位图缓存：key = (颜色档, 文本)。
 pub struct IconCache {
     pub size: u32,
     dark_theme: bool,
+    background: IconBackground,
+    font: IconFontColor,
     map: HashMap<(IconColor, String), Vec<u8>>,
 }
 
 impl IconCache {
-    pub fn new(size: u32, dark_theme: bool) -> Self {
+    pub fn new(
+        size: u32,
+        dark_theme: bool,
+        background: IconBackground,
+        font: IconFontColor,
+    ) -> Self {
         let mut cache = IconCache {
             size,
             dark_theme,
+            background,
+            font,
             map: HashMap::new(),
         };
         cache.fill();
@@ -146,18 +175,31 @@ impl IconCache {
         texts.push("?".to_string());
         texts.push("--".to_string());
         for color in IconColor::ALL {
-            let rgb = color.rgb(self.dark_theme);
+            let rgb = font_rgb(color, self.dark_theme, self.background, self.font);
             for text in &texts {
-                let rgba = render_text_bitmap(self.size, text, rgb);
+                let rgba = render_text_bitmap(self.size, text, rgb, self.background.rgb());
                 self.map.insert((color, text.clone()), rgba);
             }
         }
     }
 
-    pub fn rebuild(&mut self, size: u32, dark_theme: bool) {
-        if size != self.size || dark_theme != self.dark_theme {
+    /// 任何渲染输入变化（DPI 档 / 主题 / 背景设置 / 字色设置）时重建缓存。
+    pub fn rebuild(
+        &mut self,
+        size: u32,
+        dark_theme: bool,
+        background: IconBackground,
+        font: IconFontColor,
+    ) {
+        if size != self.size
+            || dark_theme != self.dark_theme
+            || background != self.background
+            || font != self.font
+        {
             self.size = size;
             self.dark_theme = dark_theme;
+            self.background = background;
+            self.font = font;
             self.fill();
         }
     }
@@ -168,8 +210,16 @@ impl IconCache {
     }
 }
 
-/// GDI 渲染：黑底白字 → 逐像素 alpha = 亮度，颜色 = 目标色。
-fn render_text_bitmap(size: u32, text: &str, (r, g, b): (u8, u8, u8)) -> Vec<u8> {
+/// GDI 渲染：黑底白字取覆盖率，再按「背景圆底 + 字色」直出 RGBA。
+///
+/// - 背景为 None（transparent）时保持旧版行为：颜色 = 目标色，alpha = 字覆盖率；
+/// - 有背景时：整圆底色（1px 软边缘），文字按 source-over 叠加在底色之上。
+fn render_text_bitmap(
+    size: u32,
+    text: &str,
+    (r, g, b): (u8, u8, u8),
+    bg: Option<(u8, u8, u8)>,
+) -> Vec<u8> {
     let n = (size * size) as usize;
     let mut rgba = vec![0u8; n * 4];
     let chars: Vec<char> = text.chars().collect();
@@ -241,17 +291,41 @@ fn render_text_bitmap(size: u32, text: &str, (r, g, b): (u8, u8, u8)) -> Vec<u8>
             let _ = SetBkMode(hdc, TRANSPARENT);
             let _ = SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
             let _ = TextOutW(hdc, x, y, &text_w);
-            // BGRA → RGBA（alpha = 亮度，颜色 = 目标色）。
+            // BGRA → RGBA：取字覆盖度（亮度），与背景圆底合成。
             let src = std::slice::from_raw_parts(bits as *const u8, n * 4);
+            let cx = (size_i - 1) as f32 / 2.0;
+            let radius = size_i as f32 / 2.0;
             for i in 0..n {
+                let (py, px) = ((i / size as usize) as i32, (i % size as usize) as i32);
                 let (bb, gg, rr) = (src[i * 4], src[i * 4 + 1], src[i * 4 + 2]);
-                let alpha = bb.max(gg).max(rr);
-                if alpha > 0 {
-                    rgba[i * 4] = r;
-                    rgba[i * 4 + 1] = g;
-                    rgba[i * 4 + 2] = b;
-                    rgba[i * 4 + 3] = alpha;
+                let t = bb.max(gg).max(rr) as f32 / 255.0;
+                let (br, bgc, bb_, ba) = match bg {
+                    Some((br_, bg__, bl_)) => {
+                        // 1px 软边缘圆底。
+                        let dx = px as f32 - cx;
+                        let dy = py as f32 - cx;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        let cover = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                        (br_, bg__, bl_, cover)
+                    }
+                    None => (0u8, 0u8, 0u8, 0.0),
+                };
+                if t <= 0.0 && ba <= 0.0 {
+                    continue;
                 }
+                // source-over：文字（颜色=字色，覆盖度 t）叠在底色上。
+                let out_a = t + ba * (1.0 - t);
+                if out_a <= 0.0 {
+                    continue;
+                }
+                let blend_fg = t / out_a;
+                let mix = |fc: u8, bc: u8| -> u8 {
+                    ((fc as f32 * blend_fg + bc as f32 * (1.0 - blend_fg)) as u16).min(255) as u8
+                };
+                rgba[i * 4] = mix(r, br);
+                rgba[i * 4 + 1] = mix(g, bgc);
+                rgba[i * 4 + 2] = mix(b, bb_);
+                rgba[i * 4 + 3] = (out_a * 255.0 + 0.5) as u8;
             }
             SelectObject(hdc, old_font);
             SelectObject(hdc, old);
@@ -266,6 +340,7 @@ fn render_text_bitmap(size: u32, text: &str, (r, g, b): (u8, u8, u8)) -> Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use volttray_app::config::RgbColor;
 
     #[test]
     fn text_rules() {
@@ -290,5 +365,63 @@ mod tests {
         assert_eq!(dpi_bucket_size(96), 16);
         assert_eq!(dpi_bucket_size(144), 24);
         assert_eq!(dpi_bucket_size(192), 32);
+    }
+
+    #[test]
+    fn auto_font_resolves_against_background() {
+        // 默认出厂组合：深色底 + 正常档白字 → 深浅任务栏均可读。
+        assert_eq!(
+            font_rgb(IconColor::Default, true, IconBackground::Dark, IconFontColor::Auto),
+            (0xFF, 0xFF, 0xFF)
+        );
+        assert_eq!(
+            font_rgb(IconColor::Default, false, IconBackground::Dark, IconFontColor::Auto),
+            (0xFF, 0xFF, 0xFF)
+        );
+        // 浅色底配深字。
+        assert_eq!(
+            font_rgb(IconColor::Default, true, IconBackground::Light, IconFontColor::Auto),
+            (0x1B, 0x1B, 0x1B)
+        );
+        // 透明底回退主题对比（旧版行为）。
+        assert_eq!(
+            font_rgb(IconColor::Default, true, IconBackground::Transparent, IconFontColor::Auto),
+            (0xFF, 0xFF, 0xFF)
+        );
+        assert_eq!(
+            font_rgb(IconColor::Default, false, IconBackground::Transparent, IconFontColor::Auto),
+            (0x1B, 0x1B, 0x1B)
+        );
+        // 警告/严重档不随背景变化。
+        assert_eq!(
+            font_rgb(IconColor::Yellow, false, IconBackground::Dark, IconFontColor::Auto),
+            (0xFF, 0xD2, 0x1F)
+        );
+        assert_eq!(
+            font_rgb(IconColor::Red, false, IconBackground::Light, IconFontColor::Auto),
+            (0xE8, 0x11, 0x23)
+        );
+    }
+
+    #[test]
+    fn fixed_color_overrides_levels_but_not_gray() {
+        let fixed = IconFontColor::Fixed(RgbColor { r: 0x0A, g: 0x6C, b: 0xFF });
+        assert_eq!(
+            font_rgb(IconColor::Default, false, IconBackground::Light, fixed),
+            (0x0A, 0x6C, 0xFF)
+        );
+        assert_eq!(
+            font_rgb(IconColor::Yellow, false, IconBackground::Dark, fixed),
+            (0x0A, 0x6C, 0xFF)
+        );
+        assert_eq!(
+            font_rgb(IconColor::Red, false, IconBackground::Dark, fixed),
+            (0x0A, 0x6C, 0xFF)
+        );
+        // 灰显（未知?/离线--）保持灰色。
+        assert_eq!(
+            font_rgb(IconColor::Gray, false, IconBackground::Dark, fixed),
+            (0x80, 0x80, 0x80)
+        );
     }
 }
