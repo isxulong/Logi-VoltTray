@@ -56,6 +56,22 @@ pub fn transition(from: DeviceState, to: DeviceState) -> DeviceState {
     to
 }
 
+/// 迁回 Online 的组合迁移（D-33：注册/读数成功的统一收尾）。
+///
+/// Online 幂等；Sleeping / Connected 直达 Online；Disconnected 先回 Connected
+/// 再 Online（迁移表无直达边）。GrayedOut 是派生展示态、不应落库，防御性幂等
+/// 返回 Online 而不走迁移表（GrayedOut 没有任何出边，走表会 panic）。
+pub fn mark_online(from: DeviceState) -> DeviceState {
+    match from {
+        DeviceState::Online | DeviceState::GrayedOut => DeviceState::Online,
+        DeviceState::Sleeping | DeviceState::Connected => transition(from, DeviceState::Online),
+        DeviceState::Disconnected => transition(
+            transition(from, DeviceState::Connected),
+            DeviceState::Online,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +106,17 @@ mod tests {
         for to in [Connected, Online, Sleeping, Disconnected, GrayedOut] {
             assert!(!is_legal_transition(GrayedOut, to));
         }
+    }
+
+    #[test]
+    fn mark_online_covers_all_states() {
+        use DeviceState::*;
+        assert_eq!(mark_online(Online), Online);
+        assert_eq!(mark_online(Sleeping), Online);
+        assert_eq!(mark_online(Connected), Online);
+        // Disconnected 无直达边，经 Connected 组合迁移，不 panic。
+        assert_eq!(mark_online(Disconnected), Online);
+        // 派生态防御性幂等（不走迁移表）。
+        assert_eq!(mark_online(GrayedOut), Online);
     }
 }
