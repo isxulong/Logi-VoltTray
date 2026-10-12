@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use volttray_protocol::commands::QueryCommand;
-use volttray_protocol::error::{DeviceErrorCode, ErrorFamily, HidppError, MalformedKind};
+use volttray_protocol::error::{DeviceErrorCode, HidppError, MalformedKind};
 use volttray_protocol::frame::Frame;
 use volttray_protocol::FeatureTable;
 
