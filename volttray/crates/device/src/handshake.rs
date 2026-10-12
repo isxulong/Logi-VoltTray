@@ -6,6 +6,7 @@
 //!   上层置 Sleeping，下轮重试；
 //! - HID++ 2.0 错误帧（0xFF）→ ping 阶段不正常（2.0 设备必须认识 IRoot），按 NoResponse
 //!   处理留待重试，不得误判成 1.0 设备。
+//!
 //! 成功则逐个 GetFeatureIndex 解析 0x1004 / 0x1000 / 0x1001。超时按 NoResponse 处理。
 
 use volttray_protocol::commands::{feature_ids, QueryCommand};
