@@ -15,6 +15,8 @@ mod icon;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
+mod settings;
+#[cfg(windows)]
 mod single;
 #[cfg(windows)]
 mod toast;
@@ -36,10 +38,11 @@ mod imp {
 
     use volttray_app::aumid;
     use volttray_app::autostart;
-    use volttray_app::config::{IconBackground, IconFontColor};
+    use volttray_app::config::{IconBackground, IconFontColor, IconShape};
     use volttray_app::{Alert, AppCore, Config, ConfigWatcher, Observer, SharedObserver, Snapshot};
     use volttray_device::battery::probe_battery;
     use volttray_device::handshake::{handshake, Handshake};
+    use volttray_device::name::read_device_name;
     use volttray_device::{classify_pid, Device};
     use volttray_protocol::FeatureTable;
     use volttray_transport::channel::{HidChannel, IoError};
@@ -116,8 +119,9 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// 平面 TOML 的布尔键就地改写（配置所有权在 app，托盘只触发持久化）。
-    fn persist_bool(path: &Path, key: &str, value: bool) {
+    /// 平面 TOML 的标量键就地改写；键不存在则追加到文件尾（配置所有权在 app，
+    /// 托盘/设置窗口只触发持久化）。读取失败（如文件不存在）则只写该键。
+    fn persist_kv(path: &Path, key: &str, value: &str) {
         if let Ok(text) = std::fs::read_to_string(path) {
             let mut out = String::with_capacity(text.len() + 16);
             let mut done = false;
@@ -130,21 +134,30 @@ mod imp {
                 }
                 out.push('\n');
             }
+            if !done {
+                out.push_str(&format!("{key} = {value}\n"));
+            }
             let _ = std::fs::write(path, out);
+        } else {
+            let _ = std::fs::write(path, format!("{key} = {value}\n"));
         }
+    }
+
+    fn persist_bool(path: &Path, key: &str, value: bool) {
+        persist_kv(path, key, if value { "true" } else { "false" });
     }
 
     fn alert_text(alert: Alert, name: &str) -> (String, String) {
         match alert {
-            Alert::Warn(p) => ("VoltTray 电量偏低".into(), format!("{name} 电量剩余 {p}%")),
-            Alert::Critical(p) => (
-                "VoltTray 电量严重不足".into(),
-                format!("{name} 电量仅剩 {p}%，请尽快充电"),
+            Alert::LowBattery(p) => (
+                "VoltTray 电量偏低".into(),
+                format!("{name} 电量剩余 {p}%，请及时充电"),
             ),
         }
     }
 
-    /// 槽位显示名：接收器产品名 + 槽位号（接收器本体 0xFF 不加后缀）。
+    /// 槽位显示名（v0.3.0「?」修复：消毒白名单已含 U+00B7「·」）：
+    /// 真实设备名取不到时的干净回退，分隔符用「·」+ 空格，杜绝裸「?」。
     fn slot_name(info: &ChannelInfo, slot: u8) -> String {
         let base = if info.product.is_empty() {
             "Logitech 设备".to_string()
@@ -154,7 +167,7 @@ mod imp {
         if slot == 0xFF {
             base
         } else {
-            format!("{base} ·{slot}")
+            format!("{base} · 槽位 {slot}")
         }
     }
 
@@ -177,8 +190,13 @@ mod imp {
         };
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
         let reading = probe_battery(&mut t, &id, slot, &features, CURVE, is_hidpp1).ok()?;
-        let name = slot_name(info, slot);
-        let dev = Device::new(id.clone(), &name, classify_pid(info.pid), slot, is_hidpp1);
+        // v0.3.0「?」修复：优先取真实设备名（HID++ DEVICE_NAME / 接收器配对名
+        // 寄存器 0x2B5，见 name.rs 来源链）；取不到用干净回退，不出裸「?」。
+        let raw_name = read_device_name(&mut t, slot, &features, is_hidpp1)
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| slot_name(info, slot));
+        let dev = Device::new(id.clone(), &raw_name, classify_pid(info.pid), slot, is_hidpp1);
+        let name = dev.name.clone();
         let now = Instant::now();
         if let Ok(mut c) = core.lock() {
             c.upsert_device(dev);
@@ -392,13 +410,46 @@ mod imp {
         }
     }
 
+    /// GUI 侧缓存的可视化配置（与共享配置逐 tick 对账，变化即重建图标缓存）。
     struct GuiState {
         snapshot: Option<Snapshot>,
         pinned: Option<String>,
         autostart_on: bool,
         silent: bool,
+        /// 以下均为共享配置的镜像（设置窗口 / TOML 改动经 core 同步进来）。
+        icon_shape: IconShape,
         icon_bg: IconBackground,
         icon_font: IconFontColor,
+        icon_family: String,
+        poll_secs: u64,
+        blink_enabled: bool,
+        low_threshold: u8,
+        /// 低电闪烁状态机（M11）：相位 500ms 翻转 → 1Hz；ack = 用户已点击停闪；
+        /// low_active = 展示设备当前处于低电触发状态。
+        blink_phase: bool,
+        blink_ack: bool,
+        low_active: bool,
+    }
+
+    impl GuiState {
+        fn from_config(cfg: &Config) -> Self {
+            GuiState {
+                snapshot: None,
+                pinned: None,
+                autostart_on: autostart::is_enabled(),
+                silent: cfg.notification_silent,
+                icon_shape: cfg.icon_shape,
+                icon_bg: cfg.icon_background,
+                icon_font: cfg.icon_font_color,
+                icon_family: cfg.icon_font_family.clone(),
+                poll_secs: cfg.poll_interval_secs,
+                blink_enabled: cfg.blink_enabled,
+                low_threshold: cfg.low_threshold,
+                blink_phase: false,
+                blink_ack: false,
+                low_active: false,
+            }
+        }
     }
 
     pub fn run() -> i32 {
@@ -441,7 +492,8 @@ mod imp {
 
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
-        let core = Arc::new(Mutex::new(AppCore::new(config_arc)));
+        // 共享配置同时喂 AppCore 与设置窗口（GUI ↔ TOML 双向一致，M9/M10）。
+        let core = Arc::new(Mutex::new(AppCore::new(config_arc.clone())));
 
         let (gui_tx, gui_rx) = mpsc::channel::<GuiMsg>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
@@ -452,33 +504,37 @@ mod imp {
             std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path));
         }
 
-        // 4. 图标缓存（评审 4.1：启动预渲染；v0.2.0：含背景/字色设置）+ 托盘。
+        // 4. 图标缓存（评审 4.1：启动预渲染；v0.3.0：形状/背景/字色/字体 + 低电
+        //    提亮档，M9/M11）+ 托盘。
         let dpi = unsafe { GetDpiForSystem() };
         let dark = system_dark_theme();
         let mut cache = IconCache::new(
             dpi_bucket_size(dpi),
             dark,
+            cfg.icon_shape,
             cfg.icon_background,
             cfg.icon_font_color,
+            cfg.icon_font_family.clone(),
         );
         let mut cur_size = dpi_bucket_size(dpi);
         let mut cur_dark = dark;
 
-        let mut state = GuiState {
-            snapshot: None,
-            pinned: None,
-            autostart_on: autostart::is_enabled(),
-            silent: cfg.notification_silent,
-            icon_bg: cfg.icon_background,
-            icon_font: cfg.icon_font_color,
-        };
+        let mut state = GuiState::from_config(&cfg);
 
         let initial = icon_text(None, false);
-        let Some(first_icon) = cache.icon_for(IconColor::Default, &initial) else {
+        let Some(first_icon) = cache.icon_for(IconColor::Default, &initial, false) else {
             eprintln!("icon cache init failed");
             return 1;
         };
-        let (menu_obj, mut ids) = build_menu(&[], None, None, state.autostart_on, state.silent);
+        let (menu_obj, mut ids) = build_menu(
+            &[],
+            None,
+            None,
+            state.poll_secs,
+            state.blink_enabled,
+            state.autostart_on,
+            state.silent,
+        );
         let tray = match TrayIconBuilder::new()
             .with_menu(Box::new(menu_obj))
             .with_tooltip("Logi VoltTray")
@@ -512,6 +568,7 @@ mod imp {
                         &mut cur_dark,
                         &core,
                         &observer,
+                        &config_arc,
                         &cfg_path,
                         &exe,
                         &mut ids,
@@ -536,6 +593,7 @@ mod imp {
         cur_dark: &mut bool,
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
+        cfg_arc: &Arc<RwLock<Config>>,
         cfg_path: &Path,
         exe: &Path,
         ids: &mut crate::menu::MenuIds,
@@ -552,45 +610,109 @@ mod imp {
             }
         }
 
-        // DPI / 主题 / 图标背景 / 字色任一变化 → 重建图标缓存
-        //（评审 4.1 + v0.2.0：设置变更经热重载即时生效）。
-        let (bg, font) = match core.lock() {
+        // 共享配置对账（GUI ↔ TOML 双向一致）：设置窗口直接写共享配置、外部
+        // TOML 改动经热重载 swap_config——任何一侧变化都落到 GUI 镜像。
+        let cfg_changed = match core.lock() {
             Ok(c) => {
                 let cfg = c.config();
-                (cfg.icon_background, cfg.icon_font_color)
+                let changed = cfg.icon_shape != state.icon_shape
+                    || cfg.icon_background != state.icon_bg
+                    || cfg.icon_font_color != state.icon_font
+                    || cfg.icon_font_family != state.icon_family
+                    || cfg.poll_interval_secs != state.poll_secs
+                    || cfg.blink_enabled != state.blink_enabled
+                    || cfg.low_threshold != state.low_threshold;
+                if changed {
+                    state.icon_shape = cfg.icon_shape;
+                    state.icon_bg = cfg.icon_background;
+                    state.icon_font = cfg.icon_font_color;
+                    state.icon_family = cfg.icon_font_family.clone();
+                    state.poll_secs = cfg.poll_interval_secs;
+                    state.blink_enabled = cfg.blink_enabled;
+                    state.low_threshold = cfg.low_threshold;
+                }
+                changed
             }
-            Err(_) => (state.icon_bg, state.icon_font),
+            Err(_) => false,
         };
-        if bg != state.icon_bg || font != state.icon_font {
-            state.icon_bg = bg;
-            state.icon_font = font;
+        if cfg_changed {
             snap_changed = true;
         }
+
+        // DPI / 主题 / 渲染输入任一变化 → 重建图标缓存
+        //（rebuild 内部判等，输入未变时零开销）。
         let dpi = unsafe { GetDpiForSystem() };
         let size = dpi_bucket_size(dpi);
         let dark = system_dark_theme();
-        if size != *cur_size || dark != *cur_dark {
-            cache.rebuild(size, dark, state.icon_bg, state.icon_font);
+        if size != *cur_size || dark != *cur_dark || cfg_changed {
+            cache.rebuild(
+                size,
+                dark,
+                state.icon_shape,
+                state.icon_bg,
+                state.icon_font,
+                state.icon_family.clone(),
+            );
             *cur_size = size;
             *cur_dark = dark;
             snap_changed = true;
-        } else if snap_changed {
-            cache.rebuild(size, dark, state.icon_bg, state.icon_font);
         }
 
-        if snap_changed {
+        // 低电闪烁状态机（M11）：500ms tick 翻相位 → 1Hz；
+        // 活跃 = 开 && 展示设备处于低电触发态 && 未被点击停闪；解除后重新武装。
+        state.blink_phase = !state.blink_phase;
+        let low_active = shown_device(state).is_some_and(|d| {
+            !d.gray && core.lock().map(|c| c.is_low_battery(&d.id)).unwrap_or(false)
+        });
+        if low_active != state.low_active {
+            state.low_active = low_active;
+            if !low_active {
+                state.blink_ack = false; // 低电解除：重新武装
+            }
+            snap_changed = true;
+        }
+        let blinking = state.blink_enabled && state.low_active && !state.blink_ack;
+
+        if snap_changed || blinking {
             refresh_ui(tray, state, cache, ids);
         }
 
-        // 托盘图标事件（左键上弹由菜单接管，其余暂不处理）。
-        while let Ok(_e) = TrayIconEvent::receiver().try_recv() {}
+        // 托盘图标事件：任意点击本次停闪（M11）；菜单左键弹出不在此列。
+        while let Ok(e) = TrayIconEvent::receiver().try_recv() {
+            if matches!(e, TrayIconEvent::Click { .. }) && state.low_active && !state.blink_ack {
+                state.blink_ack = true;
+                refresh_ui(tray, state, cache, ids);
+            }
+        }
 
         // 菜单事件。
         while let Ok(e) = MenuEvent::receiver().try_recv() {
             if e.id == ids.refresh {
                 let _ = cmd_tx.send(IoCmd::RefreshNow);
+            } else if e.id == ids.settings {
+                let preview = state
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| pinned_or_default(s, state.pinned.as_deref()))
+                    .and_then(|i| s_snapshot_device(state, i))
+                    .and_then(|d| d.percent)
+                    .map(|p| icon_text(Some(p), false))
+                    .unwrap_or_else(|| "50".to_string());
+                crate::settings::open_settings(
+                    cfg_arc,
+                    &cfg_path.to_path_buf(),
+                    *cur_dark,
+                    &preview,
+                );
             } else if e.id == ids.diag {
                 export_diag(observer);
+            } else if e.id == ids.blink {
+                state.blink_enabled = !state.blink_enabled;
+                if let Ok(mut guard) = cfg_arc.write() {
+                    guard.blink_enabled = state.blink_enabled;
+                }
+                persist_bool(cfg_path, "blink_enabled", state.blink_enabled);
+                refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.autostart {
                 let now_on = if state.autostart_on {
                     autostart::disable().is_ok()
@@ -598,10 +720,16 @@ mod imp {
                     autostart::enable(exe).is_ok()
                 };
                 state.autostart_on = if state.autostart_on { !now_on } else { now_on };
+                if let Ok(mut guard) = cfg_arc.write() {
+                    guard.autostart = state.autostart_on;
+                }
                 persist_bool(cfg_path, "autostart", state.autostart_on);
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.silent {
                 state.silent = !state.silent;
+                if let Ok(mut guard) = cfg_arc.write() {
+                    guard.notification_silent = state.silent;
+                }
                 persist_bool(cfg_path, "notification_silent", state.silent);
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.exit {
@@ -612,6 +740,27 @@ mod imp {
                 refresh_ui(tray, state, cache, ids);
             }
         }
+    }
+
+    /// 钉选优先，其次默认展示设备；返回快照中的下标。
+    fn pinned_or_default(s: &Snapshot, pinned: Option<&str>) -> Option<usize> {
+        if let Some(p) = pinned {
+            if let Some(i) = s.devices.iter().position(|d| d.id == p) {
+                return Some(i);
+            }
+        }
+        s.default_device
+    }
+
+    fn s_snapshot_device(state: &GuiState, idx: usize) -> Option<&volttray_app::DeviceSnapshot> {
+        state.snapshot.as_ref().and_then(|s| s.devices.get(idx))
+    }
+
+    /// 当前展示的设备（钉选优先）。
+    fn shown_device(state: &GuiState) -> Option<&volttray_app::DeviceSnapshot> {
+        let s = state.snapshot.as_ref()?;
+        let idx = pinned_or_default(s, state.pinned.as_deref())?;
+        s.devices.get(idx)
     }
 
     fn refresh_ui(
@@ -631,6 +780,8 @@ mod imp {
             &devices,
             default_id.as_deref(),
             state.pinned.as_deref(),
+            state.poll_secs,
+            state.blink_enabled,
             state.autostart_on,
             state.silent,
         );
@@ -649,10 +800,13 @@ mod imp {
         };
         let text = icon_text(percent, gray);
         let color = match percent {
-            Some(p) => IconColor::for_percent(p, gray),
+            Some(p) => IconColor::for_percent(p, gray, state.low_threshold),
             None => IconColor::Default,
         };
-        if let Some(ic) = cache.icon_for(color, &text) {
+        // M11：低电闪烁 = 常态与提亮档各 500ms 交替；点击托盘后本次停闪。
+        let bright =
+            state.blink_enabled && state.low_active && !state.blink_ack && state.blink_phase;
+        if let Some(ic) = cache.icon_for(color, &text, bright) {
             let _ = tray.set_icon(Some(ic));
         }
         let tip = match show {
