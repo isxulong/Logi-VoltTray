@@ -18,16 +18,16 @@ fn temp_config(name: &str, content: &str) -> std::path::PathBuf {
 
 #[test]
 fn watcher_detects_mtime_change() {
-    let path = temp_config("watch", "low_threshold_warn = 30\n");
+    let path = temp_config("watch", "low_threshold = 30\n");
     let mut watcher = ConfigWatcher::new(path.clone());
     assert!(watcher.poll().is_none(), "no change yet");
 
     // 确保 mtime 前进（部分文件系统粒度为秒级）。
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "low_threshold_warn = 33\n").expect("rewrite");
+    std::fs::write(&path, "low_threshold = 33\n").expect("rewrite");
 
     let loaded = watcher.poll().expect("change detected").expect("load ok");
-    assert_eq!(loaded.0.low_threshold_warn, 33);
+    assert_eq!(loaded.0.low_threshold, 33);
     assert!(loaded.1.is_empty());
     assert!(watcher.poll().is_none(), "no further change");
 
@@ -36,10 +36,10 @@ fn watcher_detects_mtime_change() {
 
 #[test]
 fn watcher_survives_invalid_rewrite() {
-    let path = temp_config("watch_bad", "low_threshold_warn = 30\n");
+    let path = temp_config("watch_bad", "low_threshold = 30\n");
     let mut watcher = ConfigWatcher::new(path.clone());
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "low_threshold_warn = 999\nunknown_key = 1\n").expect("rewrite");
+    std::fs::write(&path, "low_threshold = \"abc\"\nunknown_key = 1\n").expect("rewrite");
     let (cfg, warnings) = watcher.poll().expect("change").expect("load ok");
     assert_eq!(
         cfg,
