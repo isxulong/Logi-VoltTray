@@ -1,0 +1,15 @@
+{
+  "name": "ref_reg2b5_name_dev2_mxkeys",
+  "kind": "response",
+  "hex": "11 FF 83 B5 4D 58 20 4B 65 79 73 00 00 00 00 00 00 00 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 17,
+    "device_index": 255,
+    "feature_index": 131,
+    "function": 11,
+    "sw_id": 5,
+    "params_hex": "4D 58 20 4B 65 79 73 00 00 00 00 00 00 00 00 00"
+  },
+  "comment": "0x2B5 应答走长帧；子寄存器参数在请求 p0=0x41(dev2)"
+}
