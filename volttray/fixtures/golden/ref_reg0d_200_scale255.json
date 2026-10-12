@@ -1,0 +1,15 @@
+{
+  "name": "ref_reg0d_200_scale255",
+  "kind": "response",
+  "hex": "10 03 81 0D C8 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 3,
+    "feature_index": 129,
+    "function": 0,
+    "sw_id": 13,
+    "params_hex": "C8 00 00"
+  },
+  "comment": "个别设备回 0~255：200→round(200*100/255)=78"
+}
