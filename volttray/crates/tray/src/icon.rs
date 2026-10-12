@@ -1,16 +1,18 @@
-//! 托盘图标渲染与缓存（蓝图 7 + 评审 4.1 修订 + v0.2.0 可读性）。
+//! 托盘图标渲染与缓存（v0.3.0 设置体系 M9/M11/M12）。
 //!
 //! - 启动时按当前 DPI 档（100%/150%/200% → 16/24/32px）用 GDI 预渲染
-//!   全部文本位图（"0".."99"、"满"、"?"、"--"）× 4 色，运行时只做像素缓存换图标，
-//!   热路径零 GDI 调用。
+//!   全部文本位图（"0".."99"、"满"、"?"、"--"）× 4 色 × 常态/提亮两档，
+//!   运行时只做像素缓存换图标，热路径零 GDI 调用。
 //! - 两位数字封顶：100% 显示 "满"；未知 "?"；灰显 "--"。
-//! - 颜色：>50 默认、20..=50 黄、<=20 红、灰显灰；默认档颜色依背景/主题取高对比。
-//! - v0.2.0 可读性：图标背景（transparent/light/dark，默认 dark 深色圆底）+
-//!   字体颜色（auto / #RRGGBB）。出厂组合「深色圆底 + 依背景高对比字色」保证
-//!   在深色与浅色任务栏上都清晰可读（真机反馈：无背景黑字不清晰）。
+//! - 颜色档（M12）：≤ 用户阈值 红、≤ 50 黄（固定）、其余默认；灰显灰。
+//! - 形状（M9）：rounded 圆底（默认）/ square 直角 / transparent 透明无背景。
+//! - 背景色（M9）：light/dark 预设或 #RRGGBB 自定义；透明语义由形状承担。
+//! - 字体（M9）：系统字体名（默认 Segoe UI），GDI 缺字体时静默回退。
+//! - 闪烁（M11）：低电触发时在常态与「背景提亮 40%」两档间 1Hz 切换；
+//!   透明底改为提亮字色。
 
 use std::collections::HashMap;
-use volttray_app::config::{IconBackground, IconFontColor};
+use volttray_app::config::{brighten, contrast_ratio, IconBackground, IconFontColor, IconShape};
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
@@ -34,11 +36,11 @@ pub enum IconColor {
 impl IconColor {
     const ALL: [IconColor; 4] = [Self::Default, Self::Yellow, Self::Red, Self::Gray];
 
-    /// 按电量选色（蓝图 7）。
-    pub fn for_percent(percent: u8, gray: bool) -> Self {
+    /// 按电量选色（M12：红档阈值 = 用户设定 low_threshold；黄档固定 50）。
+    pub fn for_percent(percent: u8, gray: bool, threshold: u8) -> Self {
         if gray {
             Self::Gray
-        } else if percent <= 20 {
+        } else if percent <= threshold {
             Self::Red
         } else if percent <= 50 {
             Self::Yellow
@@ -48,14 +50,27 @@ impl IconColor {
     }
 }
 
-/// 解析某电量档的字体 RGB（v0.2.0 可读性）。
+/// 白/黑中选对背景对比度更高者（自定义背景 auto 字色用）。
+fn high_contrast_bw(bg: (u8, u8, u8)) -> (u8, u8, u8) {
+    const WHITE: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
+    const BLACK: (u8, u8, u8) = (0x1B, 0x1B, 0x1B);
+    if contrast_ratio(WHITE, bg) >= contrast_ratio(BLACK, bg) {
+        WHITE
+    } else {
+        BLACK
+    }
+}
+
+/// 解析某电量档的字体 RGB（M9）。
 ///
 /// - 灰显（未知/离线）固定灰色，不受固定色覆盖；
-/// - 固定色覆盖正常/警告/严重档；
-/// - auto：警告黄、严重红、正常档依背景取高对比（深底白字/浅底深字/透明按主题）。
+/// - 固定色覆盖正常/警告/低电档；
+/// - auto：警告黄、低电红、正常档依背景/形状取高对比
+///   （深底白字 / 浅底深字 / 自定义底取黑白中对比更高者 / 透明按系统主题）。
 pub fn font_rgb(
     level: IconColor,
     dark_theme: bool,
+    shape: IconShape,
     bg: IconBackground,
     font: IconFontColor,
 ) -> (u8, u8, u8) {
@@ -65,16 +80,19 @@ pub fn font_rgb(
         (IconFontColor::Fixed(c), _) => (c.r, c.g, c.b),
         (IconFontColor::Auto, IconColor::Yellow) => (0xFF, 0xD2, 0x1F),
         (IconFontColor::Auto, IconColor::Red) => (0xE8, 0x11, 0x23),
-        (IconFontColor::Auto, IconColor::Default) => match bg {
-            IconBackground::Dark => (0xFF, 0xFF, 0xFF),
-            IconBackground::Light => (0x1B, 0x1B, 0x1B),
-            IconBackground::Transparent => {
+        (IconFontColor::Auto, IconColor::Default) => match shape {
+            IconShape::Transparent => {
                 if dark_theme {
                     (0xFF, 0xFF, 0xFF)
                 } else {
                     (0x1B, 0x1B, 0x1B)
                 }
             }
+            IconShape::Rounded | IconShape::Square => match bg {
+                IconBackground::Dark => (0xFF, 0xFF, 0xFF),
+                IconBackground::Light => (0x1B, 0x1B, 0x1B),
+                IconBackground::Custom(_) => high_contrast_bw(bg.rgb()),
+            },
         },
     }
 }
@@ -141,27 +159,36 @@ pub fn system_dark_theme() -> bool {
     }
 }
 
-/// 预渲染位图缓存：key = (颜色档, 文本)。
+/// 闪烁时的背景提亮系数（M11：约 +40%）。
+const BLINK_BRIGHTEN: f64 = 0.4;
+
+/// 预渲染位图缓存：key = (颜色档, 文本, 提亮档)。
 pub struct IconCache {
     pub size: u32,
     dark_theme: bool,
+    shape: IconShape,
     background: IconBackground,
     font: IconFontColor,
-    map: HashMap<(IconColor, String), Vec<u8>>,
+    font_family: String,
+    map: HashMap<(IconColor, String, bool), Vec<u8>>,
 }
 
 impl IconCache {
     pub fn new(
         size: u32,
         dark_theme: bool,
+        shape: IconShape,
         background: IconBackground,
         font: IconFontColor,
+        font_family: String,
     ) -> Self {
         let mut cache = IconCache {
             size,
             dark_theme,
+            shape,
             background,
             font,
+            font_family,
             map: HashMap::new(),
         };
         cache.fill();
@@ -174,51 +201,77 @@ impl IconCache {
         texts.push("满".to_string());
         texts.push("?".to_string());
         texts.push("--".to_string());
+        let shape = self.shape;
+        let bg_rgb = self.background.rgb();
+        let face = self.font_family.clone();
         for color in IconColor::ALL {
-            let rgb = font_rgb(color, self.dark_theme, self.background, self.font);
-            for text in &texts {
-                let rgba = render_text_bitmap(self.size, text, rgb, self.background.rgb());
-                self.map.insert((color, text.clone()), rgba);
+            let rgb = font_rgb(color, self.dark_theme, shape, self.background, self.font);
+            for bright in [false, true] {
+                // M11 闪烁：有背景时提亮背景，透明底提亮字色。
+                let (fg, bg) = if bright {
+                    if shape == IconShape::Transparent {
+                        (brighten(rgb, BLINK_BRIGHTEN), None)
+                    } else {
+                        (rgb, Some(brighten(bg_rgb, BLINK_BRIGHTEN)))
+                    }
+                } else {
+                    (rgb, (shape == IconShape::Transparent).then_some(bg_rgb))
+                };
+                for text in &texts {
+                    let rgba = render_text_bitmap(self.size, text, fg, bg, shape, &face);
+                    self.map.insert((color, text.clone(), bright), rgba);
+                }
             }
         }
     }
 
-    /// 任何渲染输入变化（DPI 档 / 主题 / 背景设置 / 字色设置）时重建缓存。
+    /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体）时重建缓存。
     pub fn rebuild(
         &mut self,
         size: u32,
         dark_theme: bool,
+        shape: IconShape,
         background: IconBackground,
         font: IconFontColor,
+        font_family: String,
     ) {
         if size != self.size
             || dark_theme != self.dark_theme
+            || shape != self.shape
             || background != self.background
             || font != self.font
+            || font_family != self.font_family
         {
             self.size = size;
             self.dark_theme = dark_theme;
+            self.shape = shape;
             self.background = background;
             self.font = font;
+            self.font_family = font_family;
             self.fill();
         }
     }
 
-    pub fn icon_for(&self, color: IconColor, text: &str) -> Option<tray_icon::Icon> {
-        let rgba = self.map.get(&(color, text.to_string()))?;
+    /// 取渲染位图；`bright` = 低电闪烁的提亮档。
+    pub fn icon_for(&self, color: IconColor, text: &str, bright: bool) -> Option<tray_icon::Icon> {
+        let rgba = self.map.get(&(color, text.to_string(), bright))?;
         tray_icon::Icon::from_rgba(rgba.clone(), self.size, self.size).ok()
     }
 }
 
-/// GDI 渲染：黑底白字取覆盖率，再按「背景圆底 + 字色」直出 RGBA。
+/// GDI 渲染：黑底白字取覆盖率，再按「形状底 + 字色」直出 RGBA。
 ///
-/// - 背景为 None（transparent）时保持旧版行为：颜色 = 目标色，alpha = 字覆盖率；
-/// - 有背景时：整圆底色（1px 软边缘），文字按 source-over 叠加在底色之上。
-fn render_text_bitmap(
+/// - `bg = None`（transparent 形状）：颜色 = 目标色，alpha = 字覆盖率；
+/// - `bg = Some`：rounded 圆底（1px 软边缘）/ square 直角底（四边 1px 软边缘），
+///   文字按 source-over 叠加在底色之上；
+/// - `face` 字体缺失时 GDI 静默回退系统默认（M9 容错，不报错）。
+pub fn render_text_bitmap(
     size: u32,
     text: &str,
     (r, g, b): (u8, u8, u8),
     bg: Option<(u8, u8, u8)>,
+    shape: IconShape,
+    face: &str,
 ) -> Vec<u8> {
     let n = (size * size) as usize;
     let mut rgba = vec![0u8; n * 4];
@@ -244,7 +297,7 @@ fn render_text_bitmap(
     let x = ((size_i - est_w) / 2).max(0);
     let y = ((size_i - font_h) / 2).max(0);
     let text_w: Vec<u16> = text.encode_utf16().collect();
-    let face = wide("Segoe UI");
+    let face_w = wide(face);
 
     unsafe {
         let hdc = CreateCompatibleDC(None);
@@ -285,13 +338,13 @@ fn render_text_bitmap(
                 Default::default(),
                 Default::default(),
                 0,
-                PCWSTR::from_raw(face.as_ptr()),
+                PCWSTR::from_raw(face_w.as_ptr()),
             );
             let old_font = SelectObject(hdc, HGDIOBJ(font.0));
             let _ = SetBkMode(hdc, TRANSPARENT);
             let _ = SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
             let _ = TextOutW(hdc, x, y, &text_w);
-            // BGRA → RGBA：取字覆盖度（亮度），与背景圆底合成。
+            // BGRA → RGBA：取字覆盖度（亮度），与形状底色合成。
             let src = std::slice::from_raw_parts(bits as *const u8, n * 4);
             let cx = (size_i - 1) as f32 / 2.0;
             let radius = size_i as f32 / 2.0;
@@ -301,11 +354,20 @@ fn render_text_bitmap(
                 let t = bb.max(gg).max(rr) as f32 / 255.0;
                 let (br, bgc, bb_, ba) = match bg {
                     Some((br_, bg__, bl_)) => {
-                        // 1px 软边缘圆底。
-                        let dx = px as f32 - cx;
-                        let dy = py as f32 - cx;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        let cover = (radius + 0.5 - dist).clamp(0.0, 1.0);
+                        // 形状覆盖度：圆底 = 内切圆 1px 软边缘；直角 = 四边 1px 软边缘。
+                        let cover = match shape {
+                            IconShape::Rounded => {
+                                let dx = px as f32 - cx;
+                                let dy = py as f32 - cx;
+                                let dist = (dx * dx + dy * dy).sqrt();
+                                (radius + 0.5 - dist).clamp(0.0, 1.0)
+                            }
+                            IconShape::Square => {
+                                let edge = (px).min(py).min(size_i - 1 - px).min(size_i - 1 - py);
+                                (edge as f32 + 0.5).clamp(0.0, 1.0)
+                            }
+                            IconShape::Transparent => 0.0,
+                        };
                         (br_, bg__, bl_, cover)
                     }
                     None => (0u8, 0u8, 0u8, 0.0),
@@ -352,12 +414,18 @@ mod tests {
     }
 
     #[test]
-    fn color_thresholds() {
-        assert_eq!(IconColor::for_percent(80, false), IconColor::Default);
-        assert_eq!(IconColor::for_percent(51, false), IconColor::Default);
-        assert_eq!(IconColor::for_percent(50, false), IconColor::Yellow);
-        assert_eq!(IconColor::for_percent(20, false), IconColor::Red);
-        assert_eq!(IconColor::for_percent(90, true), IconColor::Gray);
+    fn color_thresholds_use_user_threshold() {
+        // M12：红档跟随用户阈值（默认 20）。
+        assert_eq!(IconColor::for_percent(80, false, 20), IconColor::Default);
+        assert_eq!(IconColor::for_percent(51, false, 20), IconColor::Default);
+        assert_eq!(IconColor::for_percent(50, false, 20), IconColor::Yellow);
+        assert_eq!(IconColor::for_percent(20, false, 20), IconColor::Red);
+        // 阈值调到 35：31 变红档。
+        assert_eq!(IconColor::for_percent(31, false, 35), IconColor::Red);
+        assert_eq!(IconColor::for_percent(36, false, 35), IconColor::Default);
+        // 阈值 50：黄档被红档覆盖（≤50 全红）。
+        assert_eq!(IconColor::for_percent(45, false, 50), IconColor::Red);
+        assert_eq!(IconColor::for_percent(90, true, 20), IconColor::Gray);
     }
 
     #[test]
@@ -368,21 +436,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_font_resolves_against_background() {
-        // 默认出厂组合：深色底 + 正常档白字 → 深浅任务栏均可读。
+    fn auto_font_resolves_against_shape_and_background() {
+        // 默认出厂组合：深色圆底 + 正常档白字。
         assert_eq!(
             font_rgb(
                 IconColor::Default,
                 true,
-                IconBackground::Dark,
-                IconFontColor::Auto
-            ),
-            (0xFF, 0xFF, 0xFF)
-        );
-        assert_eq!(
-            font_rgb(
-                IconColor::Default,
-                false,
+                IconShape::Rounded,
                 IconBackground::Dark,
                 IconFontColor::Auto
             ),
@@ -393,17 +453,19 @@ mod tests {
             font_rgb(
                 IconColor::Default,
                 true,
+                IconShape::Rounded,
                 IconBackground::Light,
                 IconFontColor::Auto
             ),
             (0x1B, 0x1B, 0x1B)
         );
-        // 透明底回退主题对比（旧版行为）。
+        // 透明形状回退主题对比。
         assert_eq!(
             font_rgb(
                 IconColor::Default,
                 true,
-                IconBackground::Transparent,
+                IconShape::Transparent,
+                IconBackground::Dark,
                 IconFontColor::Auto
             ),
             (0xFF, 0xFF, 0xFF)
@@ -412,16 +474,33 @@ mod tests {
             font_rgb(
                 IconColor::Default,
                 false,
-                IconBackground::Transparent,
+                IconShape::Transparent,
+                IconBackground::Dark,
                 IconFontColor::Auto
             ),
             (0x1B, 0x1B, 0x1B)
         );
-        // 警告/严重档不随背景变化。
+        // 自定义底：黑白中取对比更高者（深紫底 → 白字）。
+        assert_eq!(
+            font_rgb(
+                IconColor::Default,
+                false,
+                IconShape::Square,
+                IconBackground::Custom(RgbColor {
+                    r: 0x30,
+                    g: 0x10,
+                    b: 0x50
+                }),
+                IconFontColor::Auto
+            ),
+            (0xFF, 0xFF, 0xFF)
+        );
+        // 警告/低电档不随背景变化。
         assert_eq!(
             font_rgb(
                 IconColor::Yellow,
                 false,
+                IconShape::Rounded,
                 IconBackground::Dark,
                 IconFontColor::Auto
             ),
@@ -431,6 +510,7 @@ mod tests {
             font_rgb(
                 IconColor::Red,
                 false,
+                IconShape::Rounded,
                 IconBackground::Light,
                 IconFontColor::Auto
             ),
@@ -446,20 +526,34 @@ mod tests {
             b: 0xFF,
         });
         assert_eq!(
-            font_rgb(IconColor::Default, false, IconBackground::Light, fixed),
+            font_rgb(
+                IconColor::Default,
+                false,
+                IconShape::Rounded,
+                IconBackground::Light,
+                fixed
+            ),
             (0x0A, 0x6C, 0xFF)
         );
         assert_eq!(
-            font_rgb(IconColor::Yellow, false, IconBackground::Dark, fixed),
-            (0x0A, 0x6C, 0xFF)
-        );
-        assert_eq!(
-            font_rgb(IconColor::Red, false, IconBackground::Dark, fixed),
+            font_rgb(
+                IconColor::Yellow,
+                false,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed
+            ),
             (0x0A, 0x6C, 0xFF)
         );
         // 灰显（未知?/离线--）保持灰色。
         assert_eq!(
-            font_rgb(IconColor::Gray, false, IconBackground::Dark, fixed),
+            font_rgb(
+                IconColor::Gray,
+                false,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed
+            ),
             (0x80, 0x80, 0x80)
         );
     }
