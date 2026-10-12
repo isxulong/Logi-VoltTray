@@ -1,0 +1,15 @@
+{
+  "name": "ref_devname_fn2_kind",
+  "kind": "response",
+  "hex": "10 01 03 25 02 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 1,
+    "feature_index": 3,
+    "function": 2,
+    "sw_id": 5,
+    "params_hex": "02 00 00"
+  },
+  "comment": "fn2 类型码 0x02=mouse；真机注意：PRO X 2 DEX 回 0x03，fn2 不可靠只能兜底"
+}
