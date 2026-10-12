@@ -195,7 +195,7 @@ impl QueryCommand {
                 require_query(feature_ids::DEVICE_NAME)?;
                 let idx = resolve(features, feature_ids::DEVICE_NAME)?;
                 let mut params = [0u8; 16];
-                params[0] = offset;
+                params[0] = *offset;
                 Frame::new_long(device_index, idx, 0x01, sw_id, params)
             }
             QueryCommand::ReadReceiverRegister0x2B5 { p0, p1 } => {
@@ -204,8 +204,8 @@ impl QueryCommand {
                 // byte3 低半字节 5 即 sw 回显位，故 sw 恒为 5，忽略传入 sw_id）。
                 require_query(feature_ids::HIDPP1_REG_RECEIVER_INFO)?;
                 let mut params = [0u8; 16];
-                params[0] = p0;
-                params[1] = p1;
+                params[0] = *p0;
+                params[1] = *p1;
                 Frame::new_long(0xFF, 0x83, 0x0B, 0x05, params)
             }
             QueryCommand::ReadHidPowerDescriptor => {
