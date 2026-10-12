@@ -53,7 +53,7 @@ fn read_name_via_feature<C: HidChannel, S: EventSink>(
     device_index: u8,
     features: &FeatureTable,
 ) -> Option<String> {
-    let idx = features.get(feature_ids::DEVICE_NAME)?;
+    features.get(feature_ids::DEVICE_NAME)?;
     let sw = t.alloc_sw_id();
     let req = QueryCommand::GetDeviceNameLength
         .encode_for(device_index, sw, features)
@@ -144,18 +144,20 @@ pub fn read_device_name<C: HidChannel, S: EventSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
     use std::time::Duration;
     use volttray_transport::channel::IoError;
     use volttray_transport::events::DiagEvent;
 
     struct Stub {
         reads: VecDeque<Result<Vec<u8>, IoError>>,
-        writes: Vec<Vec<u8>>,
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
     }
     impl HidChannel for Stub {
         fn write(&mut self, d: &[u8]) -> Result<usize, IoError> {
-            self.writes.push(d.to_vec());
+            self.writes.borrow_mut().push(d.to_vec());
             Ok(d.len())
         }
         fn read(&mut self, buf: &mut [u8], _t: Duration) -> Result<usize, IoError> {
@@ -173,14 +175,18 @@ mod tests {
         fn emit(&mut self, _e: DiagEvent) {}
     }
 
-    fn stub(reads: Vec<Result<Vec<u8>, IoError>>) -> Transport<Stub, Sink> {
-        Transport::new(
+    fn stub(
+        reads: Vec<Result<Vec<u8>, IoError>>,
+    ) -> (Transport<Stub, Sink>, Rc<RefCell<Vec<Vec<u8>>>>) {
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let t = Transport::new(
             Stub {
                 reads: reads.into(),
-                writes: Vec::new(),
+                writes: writes.clone(),
             },
             Sink,
-        )
+        );
+        (t, writes)
     }
 
     fn feature_table() -> FeatureTable {
@@ -193,11 +199,11 @@ mod tests {
     fn hidpp2_chunked_name_read() {
         // 总长 11（fn0 sw=1 → byte3=0x01）；分片 "MX Master 3"（fn1 sw=2 → byte3=0x12）。
         // 分片 11 字节 < 16 槽宽 → 提前结束。
-        let mut t = stub(vec![
+        let (mut t, _writes) = stub(vec![
             Ok(vec![0x10, 0x01, 0x03, 0x01, 0x0B, 0x00, 0x00]),
             Ok(vec![
-                0x11, 0x01, 0x03, 0x12, b'M', b'X', b' ', b'M', b'a', b's', b't', b'e', b'r', b' ',
-                b'3', 0, 0, 0, 0, 0,
+                0x11, 0x01, 0x03, 0x12, b'M', b'X', b' ', b'M', b'a', b's', b't', b'e', b'r',
+                b' ', b'3', 0, 0, 0, 0, 0,
             ]),
         ]);
         let name = read_device_name(&mut t, 0x01, &feature_table(), false);
@@ -213,7 +219,7 @@ mod tests {
         let frag1 = b"QRST".to_vec();
         let mut second = vec![0x11, 0x01, 0x03, 0x13];
         second.extend_from_slice(&frag1);
-        let mut t = stub(vec![
+        let (mut t, writes) = stub(vec![
             Ok(vec![0x10, 0x01, 0x03, 0x01, 0x14, 0x00, 0x00]),
             Ok(first),
             Ok(second),
@@ -221,24 +227,20 @@ mod tests {
         let name = read_device_name(&mut t, 0x01, &feature_table(), false);
         assert_eq!(name.as_deref(), Some("ABCDEFGHIJKLMNOPQRST"));
         // 第二次分片请求偏移 = 16。
-        let writes = &t.ch.writes;
-        assert_eq!(writes[2][4], 16);
+        assert_eq!(writes.borrow()[2][4], 16);
     }
 
     #[test]
     fn hidpp2_zero_length_or_unresolved_returns_none() {
         // fn0 总长 0 → None（随后 0x2B5 对 dev1 也超时 → 全链 None）。
-        let mut t = stub(vec![
+        let (mut t, _writes) = stub(vec![
             Ok(vec![0x10, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00]),
             Err(IoError::Timeout),
             Err(IoError::Timeout),
         ]);
-        assert_eq!(
-            read_device_name(&mut t, 0x01, &feature_table(), false),
-            None
-        );
+        assert_eq!(read_device_name(&mut t, 0x01, &feature_table(), false), None);
         // 未解析 DEVICE_NAME（空表）→ 直接走 0x2B5 回退。
-        let mut t2 = stub(vec![Err(IoError::Timeout), Err(IoError::Timeout)]);
+        let (mut t2, _w2) = stub(vec![Err(IoError::Timeout), Err(IoError::Timeout)]);
         assert_eq!(
             read_device_name(&mut t2, 0x01, &FeatureTable::new(), false),
             None
@@ -248,53 +250,47 @@ mod tests {
     #[test]
     fn receiver_register_0x2b5_name() {
         // 黄金样例回放：dev2 Unifying 变体 p0=0x41 → "MX Keys"。
-        let mut t = stub(vec![Ok(vec![
-            0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'K', b'e', b'y', b's', 0, 0, 0, 0, 0, 0, 0,
-            0, 0,
+        let (mut t, writes) = stub(vec![Ok(vec![
+            0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'K', b'e', b'y', b's', 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
         ])]);
         assert_eq!(
             read_device_name(&mut t, 0x02, &FeatureTable::new(), true).as_deref(),
             Some("MX Keys")
         );
         // 请求字节：byte2=0x83、byte3=0xB5、p0=0x41、p1=0x00。
-        let w = &t.ch.writes[0];
-        assert_eq!(&w[..6], &[0x11, 0xFF, 0x83, 0xB5, 0x41, 0x00]);
+        let ws = writes.borrow();
+        assert_eq!(&ws[0][..6], &[0x11, 0xFF, 0x83, 0xB5, 0x41, 0x00]);
     }
 
     #[test]
     fn receiver_register_tries_both_variants_then_gives_up() {
         // Unifying 变体超时 → Bolt 变体 (p0=0x62, p1=1) 命中 "MX Ergo"。
-        let mut t = stub(vec![
+        let (mut t, writes) = stub(vec![
             Err(IoError::Timeout),
             Ok(vec![
-                0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'E', b'r', b'g', b'o', 0, 0, 0, 0, 0, 0,
-                0, 0, 0,
+                0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'E', b'r', b'g', b'o', 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
             ]),
         ]);
         assert_eq!(
             read_device_name(&mut t, 0x02, &FeatureTable::new(), true).as_deref(),
             Some("MX Ergo")
         );
-        assert_eq!(&t.ch.writes[1][4..6], &[0x62, 0x01]);
+        assert_eq!(&writes.borrow()[1][4..6], &[0x62, 0x01]);
         // dev=7 超出配对范围 → 不发任何请求。
-        let mut t2 = stub(vec![]);
-        assert_eq!(
-            read_device_name(&mut t2, 0x07, &FeatureTable::new(), true),
-            None
-        );
-        assert!(t2.ch.writes.is_empty());
+        let (mut t2, w2) = stub(vec![]);
+        assert_eq!(read_device_name(&mut t2, 0x07, &FeatureTable::new(), true), None);
+        assert!(w2.borrow().is_empty());
     }
 
     #[test]
     fn invalid_receiver_name_rejected() {
         // 名字不通过 name_ok（首字符非字母数字）→ 放弃，返回 None。
-        let mut t = stub(vec![Ok(vec![
+        let (mut t, _writes) = stub(vec![Ok(vec![
             0x11, 0xFF, 0x83, 0xB5, b' ', b'?', b'!', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ])]);
-        assert_eq!(
-            read_device_name(&mut t, 0x02, &FeatureTable::new(), true),
-            None
-        );
+        assert_eq!(read_device_name(&mut t, 0x02, &FeatureTable::new(), true), None);
     }
 
     #[test]
