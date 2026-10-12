@@ -1,0 +1,15 @@
+{
+  "name": "ref_reg07_50_charging",
+  "kind": "response",
+  "hex": "10 03 81 07 05 21 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 3,
+    "feature_index": 129,
+    "function": 0,
+    "sw_id": 7,
+    "params_hex": "05 21 00"
+  },
+  "comment": "约50%，充电中"
+}
