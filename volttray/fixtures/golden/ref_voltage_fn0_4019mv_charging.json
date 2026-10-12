@@ -1,0 +1,15 @@
+{
+  "name": "ref_voltage_fn0_4019mv_charging",
+  "kind": "response",
+  "hex": "10 02 05 06 0F B3 80",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 2,
+    "feature_index": 5,
+    "function": 0,
+    "sw_id": 6,
+    "params_hex": "0F B3 80"
+  },
+  "comment": "flags bit7(0x80)=充电"
+}
