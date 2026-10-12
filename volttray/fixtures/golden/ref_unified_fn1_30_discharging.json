@@ -1,0 +1,15 @@
+{
+  "name": "ref_unified_fn1_30_discharging",
+  "kind": "response",
+  "hex": "11 01 06 18 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 17,
+    "device_index": 1,
+    "feature_index": 6,
+    "function": 1,
+    "sw_id": 8,
+    "params_hex": "1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+  },
+  "comment": "30% 放电"
+}
