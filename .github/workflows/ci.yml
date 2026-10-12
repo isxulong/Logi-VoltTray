@@ -50,11 +50,18 @@ jobs:
         run: cargo fmt --all -- --check
 
       # 可复现构建（评审 P0-2）：Cargo.lock 已入库，clippy/test/build 一律 --locked
+      # clippy/test/build 输出落盘，失败时上传为 artifact 供离线排查（日志 API 无权限）
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee ../clippy.log
 
       - name: test
-        run: cargo test --workspace --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee ../test.log
 
       - name: build release
         run: cargo build --release --locked -p volttray-tray
@@ -65,3 +72,14 @@ jobs:
           name: volttray-tray-exe
           path: volttray/target/release/volttray-tray.exe
           if-no-files-found: error
+
+      - name: upload logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            clippy.log
+            test.log
+          if-no-files-found: ignore
+          retention-days: 7
