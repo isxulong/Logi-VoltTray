@@ -41,6 +41,9 @@ pub trait HidChannel {
     fn write(&mut self, data: &[u8]) -> Result<usize, IoError>;
     /// 返回读取字节数；超时返回 `Err(IoError::Timeout)`。
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, IoError>;
+    /// 请求前清空通道里滞留的旧帧（参考实现实证：每次请求前排空最多 80 帧，
+    /// 避免上一轮的迟到响应被当成本轮应答）。默认空操作，测试桩无需覆盖。
+    fn drain(&mut self) {}
     /// HID 特性报表读取（HID Power Descriptor 回退路径用）。
     /// 默认不支持；真实 hidapi 通道覆盖此方法。
     fn get_feature_report(&mut self, _report_id: u8, _buf: &mut [u8]) -> Result<usize, IoError> {
