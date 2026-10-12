@@ -1,0 +1,345 @@
+{
+  "comment": "电量映射级黄金用例（真机实证）。消费方式：device crate tests/battery_map.rs。",
+  "voltage_curve_liion_logi": {
+    "comment": "真机 13 锚点锂电曲线（ref: logi_hidpp.py:113）；已入 voltage_curves.json 为 li-ion-logi",
+    "points": [
+      [
+        4186,
+        100
+      ],
+      [
+        4067,
+        90
+      ],
+      [
+        3989,
+        80
+      ],
+      [
+        3922,
+        70
+      ],
+      [
+        3859,
+        60
+      ],
+      [
+        3811,
+        50
+      ],
+      [
+        3778,
+        40
+      ],
+      [
+        3751,
+        30
+      ],
+      [
+        3717,
+        20
+      ],
+      [
+        3671,
+        10
+      ],
+      [
+        3646,
+        5
+      ],
+      [
+        3579,
+        2
+      ],
+      [
+        3500,
+        0
+      ]
+    ],
+    "cases": [
+      {
+        "mv": 5000,
+        "pct": 100
+      },
+      {
+        "mv": 4186,
+        "pct": 100
+      },
+      {
+        "mv": 3500,
+        "pct": 0
+      },
+      {
+        "mv": 3000,
+        "pct": 0
+      },
+      {
+        "mv": 4019,
+        "pct": 84
+      },
+      {
+        "mv": 3989,
+        "pct": 80
+      },
+      {
+        "mv": 3811,
+        "pct": 50
+      },
+      {
+        "mv": 3646,
+        "pct": 5
+      },
+      {
+        "mv": 3579,
+        "pct": 2
+      }
+    ],
+    "monotonic_sweep_mv": [
+      3500,
+      4200,
+      7
+    ]
+  },
+  "clamp_pct": [
+    {
+      "in": 0,
+      "out": 0
+    },
+    {
+      "in": 55,
+      "out": 55
+    },
+    {
+      "in": 100,
+      "out": 100
+    },
+    {
+      "in": 101,
+      "out": 100
+    },
+    {
+      "in": 255,
+      "out": 100
+    }
+  ],
+  "battery_paths": [
+    {
+      "source": "unified_battery",
+      "params": [
+        85,
+        0,
+        1,
+        0
+      ],
+      "percent": 85,
+      "charging": true,
+      "approx": false
+    },
+    {
+      "source": "unified_battery",
+      "params": [
+        85,
+        0,
+        2,
+        0
+      ],
+      "percent": 85,
+      "charging": true,
+      "approx": false,
+      "note": "state=2 也是充电中"
+    },
+    {
+      "source": "unified_battery",
+      "params": [
+        85,
+        0,
+        3,
+        0
+      ],
+      "percent": 85,
+      "charging": false,
+      "approx": false,
+      "note": "state=3 接电源未充电"
+    },
+    {
+      "source": "unified_battery",
+      "params": [
+        85,
+        0
+      ],
+      "percent": null,
+      "approx": false,
+      "note": "参数不足"
+    },
+    {
+      "source": "battery_status",
+      "params": [
+        30,
+        20,
+        3
+      ],
+      "percent": 30,
+      "charging": false,
+      "approx": false
+    },
+    {
+      "source": "battery_status",
+      "params": [
+        30,
+        20,
+        2
+      ],
+      "percent": 30,
+      "charging": true,
+      "approx": false
+    },
+    {
+      "source": "battery_voltage",
+      "params": [
+        15,
+        179,
+        0
+      ],
+      "mv": 4019,
+      "percent": 84,
+      "charging": false,
+      "approx": true
+    },
+    {
+      "source": "battery_voltage",
+      "params": [
+        15,
+        179,
+        128
+      ],
+      "mv": 4019,
+      "percent": 84,
+      "charging": true,
+      "approx": true
+    },
+    {
+      "source": "hidpp1_reg_0d",
+      "params": [
+        66,
+        0,
+        0
+      ],
+      "percent": 66,
+      "charging": false,
+      "approx": false
+    },
+    {
+      "source": "hidpp1_reg_0d",
+      "params": [
+        200,
+        0,
+        0
+      ],
+      "percent": 78,
+      "charging": false,
+      "approx": false,
+      "note": ">100 按 v*100/255 换算，不得丢弃"
+    },
+    {
+      "source": "hidpp1_reg_0d",
+      "params": [
+        0,
+        0,
+        80
+      ],
+      "percent": 0,
+      "charging": true,
+      "approx": false
+    },
+    {
+      "source": "hidpp1_reg_0d",
+      "params": [
+        0,
+        0,
+        144
+      ],
+      "percent": 100,
+      "charging": false,
+      "approx": false,
+      "note": "0x90=接电视为满：percent 0 → 100"
+    },
+    {
+      "source": "hidpp1_reg_07",
+      "params": [
+        7,
+        34
+      ],
+      "percent": 90,
+      "charging": false,
+      "approx": true
+    },
+    {
+      "source": "hidpp1_reg_07",
+      "params": [
+        5,
+        33
+      ],
+      "percent": 50,
+      "charging": true,
+      "approx": true
+    },
+    {
+      "source": "hidpp1_reg_07",
+      "params": [
+        7,
+        0
+      ],
+      "percent": 90,
+      "charging": false,
+      "approx": true
+    }
+  ],
+  "clean_name": [
+    {
+      "in": "4D 58 20 4D 61 73 74 65 72 20 33 53 00 FF",
+      "out": "MX Master 3S"
+    },
+    {
+      "in": "4D 58 20 4B 65 79 73 00 00 00",
+      "out": "MX Keys"
+    },
+    {
+      "in": "4B 01 6B 35 38 30 0D 0A",
+      "out": "Kk580"
+    },
+    {
+      "in": "20 20 47 35 30 32 20 20",
+      "out": "G502"
+    },
+    {
+      "in": "",
+      "out": ""
+    }
+  ],
+  "transport_matching": [
+    {
+      "note": "dev^0xFF 应答必须配对成功（蓝牙直连）",
+      "req_dev": 1,
+      "resp": "10 FE 81 0D 37 00 00",
+      "expect_match": true
+    },
+    {
+      "note": "1.0 寄存器应答 byte3=0x0D 无 sw_id，按 sub+addr 回显配对",
+      "req_dev": 1,
+      "resp": "10 01 81 0D 42 00 00",
+      "expect_match": true
+    },
+    {
+      "note": "sub/addr 不回显的设备主动通知不配对",
+      "req_dev": 1,
+      "resp": "10 01 41 00 01 01 01",
+      "expect_match": false
+    },
+    {
+      "note": "1.0 错误帧 0x8F code=0x08 → 立即判 Sleeping（不等超时）",
+      "req_dev": 1,
+      "resp": "10 01 8F 81 0D 08 00",
+      "expect": "Err(Sleeping)"
+    }
+  ]
+}
