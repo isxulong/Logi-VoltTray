@@ -1,0 +1,15 @@
+{
+  "name": "ref_reg0d_ac_full",
+  "kind": "response",
+  "hex": "10 03 81 0D 00 00 90",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 3,
+    "feature_index": 129,
+    "function": 0,
+    "sw_id": 13,
+    "params_hex": "00 00 90"
+  },
+  "comment": "状态 0x90=接电满：percent 0 应修正为 100"
+}
