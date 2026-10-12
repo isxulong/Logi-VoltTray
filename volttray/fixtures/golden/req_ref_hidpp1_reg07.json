@@ -1,0 +1,17 @@
+{
+  "name": "req_ref_hidpp1_reg07",
+  "kind": "request",
+  "command": "ReadHidpp1Register0x07",
+  "device_index": 3,
+  "sw_id": 5,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "10 03 81 07 00 00 00"
+  },
+  "comment": "老款 K270/M185/MK270/K400/M345 不支持 0x0D 时唯一电量来源"
+}
