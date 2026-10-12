@@ -575,6 +575,22 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         hinst,
         hfont,
     );
+    // D-33：轮询间隔耗电提示——每次 HID++ 查询都是一次射频交互，
+    // 更短的间隔 = 更频繁唤醒鼠标无线链路 = 更快耗电池。
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("提示：更短的间隔会增加鼠标耗电"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        96,
+        296,
+        320,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
     create_ctl(
         hwnd,
         "BUTTON",
