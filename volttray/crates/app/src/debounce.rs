@@ -1,81 +1,85 @@
-//! 双阈值去抖（PRD M3 + 评审 P1-3 数值口径）。
+//! 单阈值低电追踪（v0.3.0 产品方案 M11/M12，取代 v0.2.0 的双阈值去抖）。
 //!
-//! 规则：连续 2 次读数低于阈值才触发一次告警；读数回升到阈值之上
-//! （或设备进入充电）即复位，之后可再次触发。critical 优先于 warn。
+//! 规则：
+//! - 触发：连续 2 次读数 ≤ 阈值且设备未在充电；
+//! - 解除（带 5% 迟滞）：读数 > 阈值 + 5，或设备进入充电；
+//! - 阈值可通过 [`LowBatteryTracker::set_threshold`] 随配置热更新。
 
-/// 告警类型。
+/// 告警类型：低于用户设定的低电阈值（携带本次百分比）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alert {
-    /// 低于 warn 阈值（含百分比）。
-    Warn(u8),
-    /// 低于 critical 阈值。
-    Critical(u8),
+    /// 低电告警（含百分比）。
+    LowBattery(u8),
 }
 
-/// 触发所需的连续越限次数（评审 P1-3）。
+/// 触发所需的连续越限次数。
 pub const DEBOUNCE_COUNT: u8 = 2;
 
+/// 解除所需的额外回升幅度（迟滞，百分比点）。
+pub const RELEASE_HYSTERESIS: u8 = 5;
+
 #[derive(Debug, Clone)]
-pub struct ThresholdDebouncer {
-    warn_below: u8,
-    critical_below: u8,
-    warn_streak: u8,
-    critical_streak: u8,
-    warn_fired: bool,
-    critical_fired: bool,
+pub struct LowBatteryTracker {
+    threshold: u8,
+    streak: u8,
+    active: bool,
 }
 
-impl ThresholdDebouncer {
-    pub fn new(warn_below: u8, critical_below: u8) -> Self {
-        debug_assert!(critical_below < warn_below);
-        ThresholdDebouncer {
-            warn_below,
-            critical_below,
-            warn_streak: 0,
-            critical_streak: 0,
-            warn_fired: false,
-            critical_fired: false,
+impl LowBatteryTracker {
+    pub fn new(threshold: u8) -> Self {
+        LowBatteryTracker {
+            threshold,
+            streak: 0,
+            active: false,
+        }
+    }
+
+    /// 配置热更新（设置窗口 / TOML 改阈值后调用）。
+    pub fn set_threshold(&mut self, threshold: u8) {
+        if threshold != self.threshold {
+            self.threshold = threshold;
+            // 阈值变化后重估：保守起见复位连击，已触发状态保留，
+            // 由下一次 update 决定是否继续处于低电（活跃仅由迟滞/充电解除）。
+            self.streak = 0;
         }
     }
 
     /// 喂入一次读数；返回本次应发的告警（若有）。
     pub fn update(&mut self, percent: u8, charging: bool) -> Option<Alert> {
         if charging {
-            self.reset();
+            self.streak = 0;
+            self.active = false;
             return None;
         }
-
-        if percent < self.critical_below {
-            self.critical_streak = self.critical_streak.saturating_add(1);
+        if self.active {
+            // 迟滞解除：必须回升到阈值 + 5 之上。
+            if percent > self.threshold.saturating_add(RELEASE_HYSTERESIS) {
+                self.active = false;
+                self.streak = 0;
+            }
+            return None;
+        }
+        if percent <= self.threshold {
+            self.streak = self.streak.saturating_add(1);
+            if self.streak >= DEBOUNCE_COUNT {
+                self.active = true;
+                self.streak = 0;
+                return Some(Alert::LowBattery(percent));
+            }
         } else {
-            self.critical_streak = 0;
-            self.critical_fired = false;
-        }
-        if percent < self.warn_below {
-            self.warn_streak = self.warn_streak.saturating_add(1);
-        } else {
-            self.warn_streak = 0;
-            self.warn_fired = false;
-        }
-
-        if self.critical_streak >= DEBOUNCE_COUNT && !self.critical_fired {
-            self.critical_fired = true;
-            // critical 触发时抑制同周期的 warn 重复提醒。
-            self.warn_fired = true;
-            return Some(Alert::Critical(percent));
-        }
-        if self.warn_streak >= DEBOUNCE_COUNT && !self.warn_fired {
-            self.warn_fired = true;
-            return Some(Alert::Warn(percent));
+            self.streak = 0;
         }
         None
     }
 
-    pub fn reset(&mut self) {
-        self.warn_streak = 0;
-        self.critical_streak = 0;
-        self.warn_fired = false;
-        self.critical_fired = false;
+    /// 当前是否处于低电触发状态（托盘闪烁判定用）。
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// 当前生效阈值（测试与诊断用）。
+    pub fn threshold(&self) -> u8 {
+        self.threshold
     }
 }
 
@@ -84,54 +88,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn two_consecutive_below_warn_fires_once() {
-        let mut d = ThresholdDebouncer::new(20, 10);
-        assert_eq!(d.update(19, false), None); // 第 1 次：不触发
-        assert_eq!(d.update(18, false), Some(Alert::Warn(18))); // 第 2 次：触发
-        assert_eq!(d.update(17, false), None); // 已触发：不重复
+    fn two_consecutive_at_or_below_fires_once() {
+        let mut t = LowBatteryTracker::new(20);
+        assert_eq!(t.update(21, false), None); // 高于阈值：不计连击
+        assert_eq!(t.update(20, false), None); // 第 1 次（含等于）
+        assert_eq!(t.update(18, false), Some(Alert::LowBattery(18))); // 第 2 次
+        assert_eq!(t.update(17, false), None); // 已触发：不重复
+        assert!(t.is_active());
     }
 
     #[test]
-    fn recovery_resets_and_can_fire_again() {
-        let mut d = ThresholdDebouncer::new(20, 10);
-        d.update(19, false);
-        assert_eq!(d.update(18, false), Some(Alert::Warn(18)));
-        d.update(50, false); // 回升：复位
-        assert_eq!(d.update(19, false), None);
-        assert_eq!(d.update(18, false), Some(Alert::Warn(18)));
+    fn release_requires_hysteresis() {
+        let mut t = LowBatteryTracker::new(20);
+        t.update(19, false);
+        t.update(19, false);
+        assert!(t.is_active());
+        assert_eq!(t.update(21, false), None); // 回到阈值之上但不足迟滞
+        assert!(t.is_active());
+        assert_eq!(t.update(26, false), None); // > 20+5 才解除
+        assert!(!t.is_active());
     }
 
     #[test]
-    fn charging_resets() {
-        let mut d = ThresholdDebouncer::new(20, 10);
-        d.update(15, false);
-        d.update(15, true); // 充电：复位
-        assert_eq!(d.update(15, false), None);
+    fn release_then_can_fire_again() {
+        let mut t = LowBatteryTracker::new(20);
+        t.update(15, false);
+        t.update(15, false);
+        assert!(t.is_active());
+        t.update(26, false); // 迟滞解除
+        assert!(!t.is_active());
+        assert_eq!(t.update(19, false), None);
+        assert_eq!(t.update(19, false), Some(Alert::LowBattery(19)));
     }
 
     #[test]
-    fn critical_dominates() {
-        let mut d = ThresholdDebouncer::new(20, 10);
-        assert_eq!(d.update(8, false), None);
-        assert_eq!(d.update(7, false), Some(Alert::Critical(7))); // critical 而非 warn
-        assert_eq!(d.update(6, false), None);
+    fn charging_releases_immediately() {
+        let mut t = LowBatteryTracker::new(20);
+        t.update(15, false);
+        t.update(15, false);
+        assert!(t.is_active());
+        t.update(10, true); // 充电：立即解除
+        assert!(!t.is_active());
+        assert_eq!(t.update(15, false), None); // 连击已复位
     }
 
     #[test]
     fn bounce_around_threshold_does_not_fire() {
-        let mut d = ThresholdDebouncer::new(20, 10);
+        let mut t = LowBatteryTracker::new(20);
         for _ in 0..5 {
-            assert_eq!(d.update(19, false), None);
-            assert_eq!(d.update(21, false), None);
+            assert_eq!(t.update(19, false), None);
+            assert_eq!(t.update(21, false), None);
         }
+        assert!(!t.is_active());
     }
 
     #[test]
-    fn falling_through_both_thresholds_escalates() {
-        let mut d = ThresholdDebouncer::new(20, 10);
-        d.update(15, false);
-        assert_eq!(d.update(14, false), Some(Alert::Warn(14)));
-        d.update(9, false);
-        assert_eq!(d.update(8, false), Some(Alert::Critical(8))); // 升级
+    fn set_threshold_takes_effect() {
+        let mut t = LowBatteryTracker::new(20);
+        assert_eq!(t.threshold(), 20);
+        t.set_threshold(50);
+        assert_eq!(t.threshold(), 50);
+        assert_eq!(t.update(49, false), None);
+        assert_eq!(t.update(49, false), Some(Alert::LowBattery(49)));
+        // 相同值不重置连击
+        t.set_threshold(50);
+        assert_eq!(t.update(60, false), None);
     }
 }
