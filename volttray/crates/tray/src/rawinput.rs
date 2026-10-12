@@ -66,8 +66,8 @@ pub fn install() -> Option<RawInputSink> {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinst,
-            hIcon: windows::Win32::Foundation::HICON::default(),
-            hCursor: windows::Win32::Foundation::HCURSOR::default(),
+            hIcon: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+            hCursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
             hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: PCWSTR(class.as_ptr()),
@@ -129,7 +129,7 @@ pub fn is_logitech_mouse_input(lparam: LPARAM) -> bool {
             return true;
         }
         let header = &*(buf.as_ptr() as *const RAWINPUTHEADER);
-        if header.dwType != RIM_TYPEMOUSE {
+        if header.dwType != RIM_TYPEMOUSE.0 {
             return false; // 键盘等其它设备输入：不相关。
         }
         // 设备名取不到：保守视为相关。
