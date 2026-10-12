@@ -11,7 +11,9 @@ pub mod core;
 pub mod debounce;
 pub mod observer;
 
-pub use config::{Config, ConfigWarning, ConfigWatcher, IconStyle};
+pub use config::{
+    Config, ConfigWarning, ConfigWatcher, IconBackground, IconFontColor, IconStyle, RgbColor,
+};
 pub use core::{guarded, AppCore, DeviceSnapshot, Snapshot, GRAY_AFTER, POLL_CHARGING};
 pub use debounce::{Alert, ThresholdDebouncer, DEBOUNCE_COUNT};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
