@@ -16,8 +16,11 @@ pub mod feature_ids {
     pub const BATTERY_STATUS: u16 = 0x1000;
     pub const BATTERY_VOLTAGE: u16 = 0x1001;
     pub const UNIFIED_BATTERY: u16 = 0x1004;
-    /// HID++ 1.0 电量寄存器（PRD 协议附录）。
-    pub const HIDPP1_BATTERY_REGISTER: u8 = 0x0D;
+    /// HID++ 1.0 电量寄存器：0x0D（真实百分比）与 0x07（粗略档位）。
+    pub const HIDPP1_REG_BATTERY_CHARGE: u8 = 0x0D;
+    pub const HIDPP1_REG_BATTERY_STATUS: u8 = 0x07;
+    /// HID++ 1.0 读子地址（参考实现实证：req = 0x8100 | reg → byte2=0x81，byte3=reg）。
+    pub const HIDPP1_READ_SUB: u8 = 0x81;
 }
 
 /// 单台设备解析出的 feature_id → feature_index 映射。
@@ -52,14 +55,16 @@ pub enum QueryCommand {
     GetProtocolVersion,
     /// IFeatureSet fn0：按 feature_id 取 index。
     GetFeatureIndex { feature_id: u16 },
-    /// UNIFIED_BATTERY(0x1004) fn0。
+    /// UNIFIED_BATTERY(0x1004) fn1 getStatus：[电量, 档位, 充电状态, 外接电源]。
     GetBatteryUnified,
-    /// BATTERY_STATUS(0x1000) fn0。
+    /// BATTERY_STATUS(0x1000) fn0：[电量, 下一档, 充电状态]。
     GetBatteryStatus,
-    /// BATTERY_VOLTAGE(0x1001) fn0。
+    /// BATTERY_VOLTAGE(0x1001) fn0：[电压高, 电压低, 标志]。
     GetBatteryVoltage,
-    /// HID++ 1.0 设备：读电量寄存器 0x0D。
+    /// HID++ 1.0 设备：读电量寄存器 0x0D（真实百分比）。
     ReadHidpp1Register0x0D,
+    /// HID++ 1.0 设备：读电量寄存器 0x07（粗略档位，0x0D 不可用时的回退）。
+    ReadHidpp1Register0x07,
     /// HID Power Descriptor 回退：不在帧层编码，由传输层用 HID 特性报表读取。
     ReadHidPowerDescriptor,
 }
@@ -69,6 +74,12 @@ impl QueryCommand {
     ///
     /// 蓝图契约 `encode(&QueryCommand) -> Vec<u8>` 的落地形：feature_index
     /// 是每设备动态解析结果，必须随调用传入（见 docs/decisions.md D-02）。
+    ///
+    /// v0.2.0 协议实证修正（红队 #2/#3，蓝队 A2/A3/A4）：
+    /// - HID++ 2.0 的所有 feature 调用一律走 **长帧**（0x11，20 字节）；
+    /// - UNIFIED_BATTERY 的电量查询是 **fn1 getStatus**（fn0 是 GetCapabilities）；
+    /// - HID++ 1.0 寄存器读必须经 **0x81 子地址**寻址：byte2=0x81，byte3=寄存器号
+    ///   （寄存器号复用 sw_id 字段位，使传输层 sw_id 回显匹配对 1.0 响应同样成立）。
     pub fn encode_for(
         &self,
         device_index: u8,
@@ -90,16 +101,20 @@ impl QueryCommand {
                 "feature index not resolved for device",
             ))
         }
+        fn hidpp1_read(device_index: u8, reg: u8) -> Frame {
+            // byte2=0x81（读子地址），byte3=寄存器号（复用 sw_id 位）。
+            Frame::new_short(device_index, feature_ids::HIDPP1_READ_SUB, 0x00, reg, [0, 0, 0])
+        }
 
         let frame = match self {
             QueryCommand::GetProtocolVersion => {
                 require_query(feature_ids::IROOT)?;
-                Frame::new_short(
+                Frame::new_long(
                     device_index,
                     FeatureTable::iroot_index(),
                     0x01,
                     sw_id,
-                    [0, 0, 0],
+                    [0; 16],
                 )
             }
             QueryCommand::GetFeatureIndex { feature_id } => {
@@ -107,38 +122,39 @@ impl QueryCommand {
                 // 不依赖任何已解析 index（否则无法自举）。
                 require_query(feature_ids::IROOT)?;
                 require_query(*feature_id)?;
-                Frame::new_short(
+                Frame::new_long(
                     device_index,
                     FeatureTable::iroot_index(),
                     0x00,
                     sw_id,
-                    [(feature_id >> 8) as u8, (feature_id & 0xFF) as u8, 0],
+                    [
+                        (feature_id >> 8) as u8,
+                        (feature_id & 0xFF) as u8,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ],
                 )
             }
             QueryCommand::GetBatteryUnified => {
                 require_query(feature_ids::UNIFIED_BATTERY)?;
                 let idx = resolve(features, feature_ids::UNIFIED_BATTERY)?;
-                Frame::new_short(device_index, idx, 0x00, sw_id, [0, 0, 0])
+                // fn1 getStatus（fn0 是 GetCapabilities，不返回电量）。
+                Frame::new_long(device_index, idx, 0x01, sw_id, [0; 16])
             }
             QueryCommand::GetBatteryStatus => {
                 require_query(feature_ids::BATTERY_STATUS)?;
                 let idx = resolve(features, feature_ids::BATTERY_STATUS)?;
-                Frame::new_short(device_index, idx, 0x00, sw_id, [0, 0, 0])
+                Frame::new_long(device_index, idx, 0x00, sw_id, [0; 16])
             }
             QueryCommand::GetBatteryVoltage => {
                 require_query(feature_ids::BATTERY_VOLTAGE)?;
                 let idx = resolve(features, feature_ids::BATTERY_VOLTAGE)?;
-                Frame::new_short(device_index, idx, 0x00, sw_id, [0, 0, 0])
+                Frame::new_long(device_index, idx, 0x00, sw_id, [0; 16])
             }
             QueryCommand::ReadHidpp1Register0x0D => {
-                // HID++ 1.0：byte2 即寄存器地址，无 feature 表可查。
-                Frame::new_short(
-                    device_index,
-                    feature_ids::HIDPP1_BATTERY_REGISTER,
-                    0x00,
-                    sw_id,
-                    [0, 0, 0],
-                )
+                hidpp1_read(device_index, feature_ids::HIDPP1_REG_BATTERY_CHARGE)
+            }
+            QueryCommand::ReadHidpp1Register0x07 => {
+                hidpp1_read(device_index, feature_ids::HIDPP1_REG_BATTERY_STATUS)
             }
             QueryCommand::ReadHidPowerDescriptor => {
                 return Err(HidppError::NotEncodable(
@@ -165,19 +181,53 @@ mod tests {
 
     #[test]
     fn battery_unified_encodes() {
+        // 0x1004 fn1 getStatus，长帧（蓝队 A4 / 参考实现 feature() 实证）。
         let bytes = QueryCommand::GetBatteryUnified
             .encode_for(0x01, 0x07, &table())
             .expect("encode");
-        assert_eq!(bytes, vec![0x10, 0x01, 0x06, 0x07, 0, 0, 0]);
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[1], 0x01);
+        assert_eq!(bytes[2], 0x06);
+        assert_eq!(bytes[3], 0x17); // fn1 | sw 7
+        assert_eq!(bytes.len(), 20);
     }
 
     #[test]
     fn get_feature_index_encodes_via_iroot() {
-        // IRoot 恒在 index 0，fn0；参数为 feature_id 大端。
+        // IRoot 恒在 index 0，fn0；参数为 feature_id 大端；长帧。
         let bytes = QueryCommand::GetFeatureIndex { feature_id: 0x1004 }
             .encode_for(0x02, 0x03, &table())
             .expect("encode");
-        assert_eq!(bytes, vec![0x10, 0x02, 0x00, 0x03, 0x10, 0x04, 0]);
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[2], 0x00);
+        assert_eq!(bytes[3], 0x03);
+        assert_eq!(bytes[4], 0x10);
+        assert_eq!(bytes[5], 0x04);
+        assert_eq!(bytes.len(), 20);
+    }
+
+    #[test]
+    fn protocol_version_ping_is_long_frame() {
+        let bytes = QueryCommand::GetProtocolVersion
+            .encode_for(0x01, 0x05, &FeatureTable::new())
+            .expect("encode");
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[2], 0x00);
+        assert_eq!(bytes[3], 0x15); // fn1 | sw 5
+        assert_eq!(bytes.len(), 20);
+    }
+
+    #[test]
+    fn hidpp1_registers_encode_with_0x81_sub_addressing() {
+        // 参考实现实证：req = 0x8100 | reg → byte2=0x81，byte3=reg。
+        let d = QueryCommand::ReadHidpp1Register0x0D
+            .encode_for(0x02, 0x0A, &FeatureTable::new())
+            .expect("encode");
+        assert_eq!(d, vec![0x10, 0x02, 0x81, 0x0D, 0x00, 0x00, 0x00]);
+        let s = QueryCommand::ReadHidpp1Register0x07
+            .encode_for(0x02, 0x0A, &FeatureTable::new())
+            .expect("encode");
+        assert_eq!(s, vec![0x10, 0x02, 0x81, 0x07, 0x00, 0x00, 0x00]);
     }
 
     #[test]
