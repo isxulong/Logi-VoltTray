@@ -1,11 +1,13 @@
 {
   "name": "err_01_unknown",
   "kind": "response",
-  "hex": "10 01 FF 07 06 01 00",
+  "hex": "10 01 FF 06 07 01 00",
   "expect": {
     "type": "error",
     "device_index": 1,
+    "family": "hidpp2",
     "feature_index": 6,
     "error_code": 1
-  }
+  },
+  "comment": "v0.2.0 布局修正：2.0 错误帧 byte3=feat 回显(0x06) byte4=fn|sw(0x07) byte5=code(0x01)"
 }
