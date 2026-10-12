@@ -237,6 +237,15 @@ fn response_matches(req: &Frame, resp: &Frame) -> bool {
     dev_hit && resp.feature_index == req.feature_index && resp.sw_id == req.sw_id
 }
 
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,12 +342,4 @@ mod tests {
         assert!(!response_matches(&req, &wrong_feat));
         assert!(!response_matches(&req, &push));
     }
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
