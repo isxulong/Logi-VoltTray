@@ -53,7 +53,8 @@ proptest! {
     #[test]
     fn error_frame_roundtrip(code in 0x01u8..=0x09, dev in any::<u8>(), feat in any::<u8>()) {
         prop_assume!(feat != ERROR_FEATURE_2_0 && feat != ERROR_FEATURE_1_0);
-        let bytes = [0x10, dev, ERROR_FEATURE_2_0, 0, feat, code, 0];
+        // v0.2.0 错误帧布局：byte3=feat 回显，byte4=fn|sw，byte5=code。
+        let bytes = [0x10, dev, ERROR_FEATURE_2_0, feat, 0, code, 0];
         match Frame::decode(&bytes) {
             Err(HidppError::Device { code: got, feature_index, .. }) => {
                 prop_assert_eq!(got.code(), code);
