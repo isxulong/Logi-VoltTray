@@ -1,37 +1,44 @@
-//! 配置 schema（评审 P1-8：7 个键 + v0.2.0 可读性新增 2 键）+ 容错解析 + mtime 热重载。
+//! 配置 schema（v0.3.0 设置体系 M9-M13）+ 容错解析 + mtime 热重载。
 //!
 //! 配置文件：`%APPDATA%\LogiVoltTray\config.toml`（扁平键值，无 section）。
 //! 解析器为扁平 TOML 子集（bool / 整数 / 字符串），见 docs/decisions.md D-07。
-//! 容错规则：未知键 / 非法值 / 越界值 → 回退默认 + 诊断警告，绝不 panic、绝不拒绝启动。
+//! 容错规则：未知键 / 非法值 → 回退默认 + 诊断警告；越界值 → **钳制到边界 +
+//! 警告**（M10：不再重置默认）；绝不 panic、绝不拒绝启动。
 //!
-//! 键位一览（v0.2.0，共 9 键）：
+//! 键位一览（v0.3.0，共 11 键）：
 //! | 键 | 类型 | 默认 | 取值范围 / 说明 |
 //! | --- | --- | --- | --- |
 //! | `autostart` | bool | `false` | 开机自启（写入启动快捷方式） |
-//! | `low_threshold_warn` | int | `20` | 低电量提醒阈值（%），需 > critical |
-//! | `low_threshold_critical` | int | `10` | 严重低电量阈值（%），需 < warn |
-//! | `poll_interval_secs` | int | `60` | `15`–`300`，轮询间隔（秒） |
-//! | `icon_style` | str | `"auto"` | `auto` / `light` / `dark`，图标整体风格 |
+//! | `poll_interval_secs` | int | `60` | `15`–`300`，轮询间隔（越界钳制 + 警告） |
+//! | `icon_style` | str | `"auto"` | `auto`/`light`/`dark`（整体风格提示键，v0.3.0 不参与渲染） |
 //! | `notifications_enabled` | bool | `true` | 低电量通知开关 |
 //! | `notification_silent` | bool | `false` | 通知静默（无提示音） |
-//! | `icon_background` | str | `"dark"` | `transparent` / `light` / `dark`，托盘数字底色（v0.2.0） |
-//! | `icon_font_color` | str | `"auto"` | `"auto"`（按底色自动高对比）或 `"#RRGGBB"`（v0.2.0） |
+//! | `icon_shape` | str | `"rounded"` | `rounded` / `square` / `transparent`（M9） |
+//! | `icon_background` | str | `"dark"` | `light` / `dark` / `"#RRGGBB"`（预设或自定义；`transparent` 迁移到 `icon_shape`，M9） |
+//! | `icon_font_color` | str | `"auto"` | `"auto"` 或 `"#RRGGBB"`（M9） |
+//! | `icon_font_family` | str | `"Segoe UI"` | 系统字体名（渲染时缺失则 GDI 静默回退） |
+//! | `low_threshold` | int | `20` | `5`–`50`，低电提醒阈值（M12 单阈值，越界钳制） |
+//! | `blink_enabled` | bool | `true` | 低电闪烁提醒（M11，可关） |
 //!
-//! v0.2.0 可读性默认组合 = 深色圆角底 + 自动白字：深色与浅色任务栏上均清晰可读
-//! （不再默认无背景黑字）；两项均参与热重载，改配置即时生效（重建图标缓存）。
+//! 废弃键（保留迁移语义）：
+//! - `low_threshold_warn`：迁移为 `low_threshold`（钳 5..=50）+ 警告；
+//! - `low_threshold_critical`：忽略 + 警告（M12 单阈值取代双阈值）。
 
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-pub const DEFAULT_WARN: u8 = 20;
-pub const DEFAULT_CRITICAL: u8 = 10;
 pub const DEFAULT_POLL_SECS: u64 = 60;
 pub const POLL_MIN_SECS: u64 = 15;
 pub const POLL_MAX_SECS: u64 = 300;
+pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
+pub const LOW_THRESHOLD_MIN: u8 = 5;
+pub const LOW_THRESHOLD_MAX: u8 = 50;
+/// 字体颜色与背景对比度下限（M9：<3.0 仅警告，不阻断）。
+pub const CONTRAST_FLOOR: f64 = 3.0;
 
-/// 图标配色策略。
+/// 图标配色策略（v0.2.0 遗留风格键；v0.3.0 不参与渲染决策）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IconStyle {
@@ -50,33 +57,54 @@ impl IconStyle {
     }
 }
 
-/// 托盘图标背景设置（v0.2.0 可读性：真机反馈"无背景黑字不清晰"）。
+/// 托盘图标形状（M9：圆角 / 直角 / 透明无背景）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum IconBackground {
-    /// 完全透明，仅渲染数字（旧版行为，浅色任务栏上黑字可读时可用）。
+pub enum IconShape {
+    /// 圆形 / 圆角底（默认）。
+    Rounded,
+    /// 直角方块底。
+    Square,
+    /// 透明无背景，仅渲染数字。
     Transparent,
-    /// 浅色圆角底（近似白），配深色数字。
+}
+
+impl IconShape {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rounded => "rounded",
+            Self::Square => "square",
+            Self::Transparent => "transparent",
+        }
+    }
+}
+
+/// 托盘图标背景色（M9：预设或自定义 HEX；透明语义移交给 `IconShape`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum IconBackground {
+    /// 浅色底（近似白），配深色数字。
     Light,
-    /// 深色圆角底（近似黑），配浅色数字——默认：深浅两种任务栏上都可读。
+    /// 深色底（近似黑），配浅色数字——默认。
     Dark,
+    /// 自定义底色（#RRGGBB）。
+    Custom(RgbColor),
 }
 
 impl IconBackground {
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
-            Self::Transparent => "transparent",
-            Self::Light => "light",
-            Self::Dark => "dark",
+            Self::Light => "light".to_string(),
+            Self::Dark => "dark".to_string(),
+            Self::Custom(c) => c.to_hex(),
         }
     }
 
-    /// 背景填充 RGB（Transparent 时渲染层不填充）。
-    pub fn rgb(self) -> Option<(u8, u8, u8)> {
+    /// 背景填充 RGB（渲染层在 `IconShape::Transparent` 时不使用）。
+    pub fn rgb(self) -> (u8, u8, u8) {
         match self {
-            Self::Transparent => None,
-            Self::Light => Some((0xF2, 0xF2, 0xF2)),
-            Self::Dark => Some((0x1F, 0x1F, 0x1F)),
+            Self::Light => (0xF2, 0xF2, 0xF2),
+            Self::Dark => (0x1F, 0x1F, 0x1F),
+            Self::Custom(c) => (c.r, c.g, c.b),
         }
     }
 }
@@ -109,12 +137,12 @@ impl RgbColor {
     }
 }
 
-/// 电量字体颜色设置（v0.2.0 可读性）。
+/// 电量字体颜色设置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IconFontColor {
     /// 自动：按电量档位着色（正常/警告/严重），正常档颜色依背景取高对比。
     Auto,
-    /// 固定色：覆盖正常/警告/严重档，未知(?)保持灰。
+    /// 固定色：覆盖正常/警告/严重档，未知(?)与灰显(--)保持灰。
     Fixed(RgbColor),
 }
 
@@ -127,41 +155,81 @@ impl IconFontColor {
     }
 }
 
-/// 配置（P1-8：7 键 + v0.2.0 新增 2 键）。
+// ---------- 对比度 / 提亮纯函数（M9 对比度警告、M11 闪烁提亮用） ----------
+
+/// WCAG 相对亮度。
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    let ch = |v: u8| {
+        let s = v as f64 / 255.0;
+        if s <= 0.039_28 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+}
+
+/// WCAG 对比度（1..=21）。
+pub fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// 字色对背景是否可读（M9：对比度 ≥ 3.0；不足仅警告不阻断）。
+pub fn contrast_ok(font: (u8, u8, u8), bg: (u8, u8, u8)) -> bool {
+    contrast_ratio(font, bg) >= CONTRAST_FLOOR
+}
+
+/// 提亮（M11 闪烁：背景提亮约 40%，透明底时提亮字色）。
+pub fn brighten((r, g, b): (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
+    let f = |v: u8| -> u8 { ((v as f64 * (1.0 + factor)).min(255.0) + 0.5) as u8 };
+    (f(r), f(g), f(b))
+}
+
+/// 配置（v0.3.0：11 键 + 废弃迁移）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// 开机自启（HKCU Run 单值）。
     pub autostart: bool,
-    /// 低电提醒阈值（%），默认 20。
-    pub low_threshold_warn: u8,
-    /// 严重低电阈值（%），默认 10，必须 < warn。
-    pub low_threshold_critical: u8,
-    /// 轮询间隔（秒），默认 60，范围 15..=300。
+    /// 轮询间隔（秒），默认 60，范围 15..=300（越界钳制 + 警告）。
     pub poll_interval_secs: u64,
-    /// 图标配色：auto/light/dark。
+    /// 整体风格提示键（v0.2.0 遗留，v0.3.0 不参与渲染）。
     pub icon_style: IconStyle,
     /// 通知总开关。
     pub notifications_enabled: bool,
     /// 静默通知（无声音）。
     pub notification_silent: bool,
-    /// 托盘图标背景：transparent/light/dark，默认 dark（深浅任务栏均可读）。
+    /// 托盘图标形状：圆角 / 直角 / 透明，默认圆角（M9）。
+    pub icon_shape: IconShape,
+    /// 托盘图标背景色：light / dark / #RRGGBB，默认 dark（M9）。
     pub icon_background: IconBackground,
-    /// 电量字体颜色：auto（按电量档位）或 "#RRGGBB"，默认 auto。
+    /// 电量字体颜色：auto（按电量档位）或 "#RRGGBB"，默认 auto（M9）。
     pub icon_font_color: IconFontColor,
+    /// 电量字体：系统字体名，默认 "Segoe UI"（M9；缺失时 GDI 静默回退）。
+    pub icon_font_family: String,
+    /// 低电提醒阈值（%），默认 20，范围 5..=50（M12 单阈值）。
+    pub low_threshold: u8,
+    /// 低电闪烁提醒开关，默认开（M11）。
+    pub blink_enabled: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             autostart: false,
-            low_threshold_warn: DEFAULT_WARN,
-            low_threshold_critical: DEFAULT_CRITICAL,
             poll_interval_secs: DEFAULT_POLL_SECS,
             icon_style: IconStyle::Auto,
             notifications_enabled: true,
             notification_silent: false,
+            icon_shape: IconShape::Rounded,
             icon_background: IconBackground::Dark,
             icon_font_color: IconFontColor::Auto,
+            icon_font_family: "Segoe UI".to_string(),
+            low_threshold: DEFAULT_LOW_THRESHOLD,
+            blink_enabled: true,
         }
     }
 }
@@ -226,6 +294,9 @@ impl Config {
             })
         };
 
+        let mut saw_low_threshold = false;
+        let mut migrated_warn_threshold: Option<u64> = None;
+
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
             if line.is_empty() {
@@ -246,16 +317,16 @@ impl Config {
             };
             match (key, &value) {
                 ("autostart", Value::Bool(b)) => cfg.autostart = *b,
-                ("low_threshold_warn", Value::Int(n)) if *n <= 100 => {
-                    cfg.low_threshold_warn = *n as u8
-                }
-                ("low_threshold_critical", Value::Int(n)) if *n <= 100 => {
-                    cfg.low_threshold_critical = *n as u8
-                }
-                ("poll_interval_secs", Value::Int(n))
-                    if (POLL_MIN_SECS..=POLL_MAX_SECS).contains(n) =>
-                {
-                    cfg.poll_interval_secs = *n
+                ("poll_interval_secs", Value::Int(n)) => {
+                    // M10：越界钳制到 [15, 300] + 警告（不再重置默认）。
+                    let clamped = (*n).clamp(POLL_MIN_SECS, POLL_MAX_SECS);
+                    if clamped != *n {
+                        warn(
+                            key,
+                            &format!("out of range; clamped {n} -> {clamped}"),
+                        );
+                    }
+                    cfg.poll_interval_secs = clamped;
                 }
                 ("icon_style", Value::Str(s)) => match s.as_str() {
                     "auto" => cfg.icon_style = IconStyle::Auto,
@@ -265,12 +336,30 @@ impl Config {
                 },
                 ("notifications_enabled", Value::Bool(b)) => cfg.notifications_enabled = *b,
                 ("notification_silent", Value::Bool(b)) => cfg.notification_silent = *b,
-                ("icon_background", Value::Str(s)) => match s.as_str() {
-                    "transparent" => cfg.icon_background = IconBackground::Transparent,
-                    "light" => cfg.icon_background = IconBackground::Light,
-                    "dark" => cfg.icon_background = IconBackground::Dark,
-                    _ => warn(key, "unknown icon_background; default kept"),
+                ("icon_shape", Value::Str(s)) => match s.as_str() {
+                    "rounded" => cfg.icon_shape = IconShape::Rounded,
+                    "square" => cfg.icon_shape = IconShape::Square,
+                    "transparent" => cfg.icon_shape = IconShape::Transparent,
+                    _ => warn(key, "unknown icon_shape; default kept"),
                 },
+                ("icon_background", Value::Str(s)) => {
+                    if s.eq_ignore_ascii_case("transparent") {
+                        // v0.2.0 透明语义迁移到 icon_shape（M9）。
+                        cfg.icon_shape = IconShape::Transparent;
+                        warn(
+                            key,
+                            "\"transparent\" moved to icon_shape; icon_shape set to transparent",
+                        );
+                    } else if s == "light" {
+                        cfg.icon_background = IconBackground::Light;
+                    } else if s == "dark" {
+                        cfg.icon_background = IconBackground::Dark;
+                    } else if let Some(c) = RgbColor::parse_hex(s) {
+                        cfg.icon_background = IconBackground::Custom(c);
+                    } else {
+                        warn(key, "invalid icon_background (light/dark/#RRGGBB); default kept");
+                    }
+                }
                 ("icon_font_color", Value::Str(s)) => {
                     if s.eq_ignore_ascii_case("auto") {
                         cfg.icon_font_color = IconFontColor::Auto;
@@ -283,56 +372,88 @@ impl Config {
                         );
                     }
                 }
+                ("icon_font_family", Value::Str(s)) => {
+                    let name = s.trim();
+                    if name.is_empty() {
+                        warn(key, "empty font name; default kept");
+                    } else {
+                        cfg.icon_font_family = name.to_string();
+                    }
+                }
+                ("low_threshold", Value::Int(n)) => {
+                    saw_low_threshold = true;
+                    let clamped = (*n).clamp(LOW_THRESHOLD_MIN as u64, LOW_THRESHOLD_MAX as u64);
+                    if clamped != *n {
+                        warn(key, &format!("out of range; clamped {n} -> {clamped}"));
+                    }
+                    cfg.low_threshold = clamped as u8;
+                }
+                ("blink_enabled", Value::Bool(b)) => cfg.blink_enabled = *b,
+                // 废弃键（M12 单阈值取代双阈值）。
+                ("low_threshold_warn", Value::Int(n)) if *n <= 100 => {
+                    migrated_warn_threshold = Some(*n);
+                    warn(key, "deprecated; use low_threshold (value migrated)");
+                }
+                ("low_threshold_warn", _) => {
+                    warn(key, "deprecated and invalid; ignored");
+                }
+                ("low_threshold_critical", _) => {
+                    warn(key, "deprecated (single low_threshold); ignored");
+                }
                 (
                     "autostart"
-                    | "low_threshold_warn"
-                    | "low_threshold_critical"
                     | "poll_interval_secs"
                     | "icon_style"
                     | "notifications_enabled"
                     | "notification_silent"
+                    | "icon_shape"
                     | "icon_background"
-                    | "icon_font_color",
+                    | "icon_font_color"
+                    | "icon_font_family"
+                    | "low_threshold"
+                    | "blink_enabled",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
                 (other, _) => warn(other, "unknown key; ignored"),
             }
         }
 
-        // 跨键校验：critical 必须严格小于 warn（评审 P1-8）。
-        if cfg.low_threshold_critical >= cfg.low_threshold_warn {
-            warn(
-                "low_threshold_critical",
-                "must be < low_threshold_warn; both reset to defaults",
-            );
-            cfg.low_threshold_warn = DEFAULT_WARN;
-            cfg.low_threshold_critical = DEFAULT_CRITICAL;
+        // 废弃键迁移：显式 low_threshold 优先，否则取 warn 阈值（M12）。
+        if !saw_low_threshold {
+            if let Some(w) = migrated_warn_threshold {
+                let clamped = w.clamp(LOW_THRESHOLD_MIN as u64, LOW_THRESHOLD_MAX as u64);
+                cfg.low_threshold = clamped as u8;
+            }
         }
         (cfg, warnings)
     }
 
-    /// 序列化为扁平 TOML（供首次运行生成默认配置）。
+    /// 序列化为扁平 TOML（首次运行生成默认配置 / 设置窗口持久化用）。
     pub fn to_toml(&self) -> String {
         format!(
             "# Logi VoltTray 配置（扁平键值；未知键会被忽略并产生诊断警告）\n\
              autostart = {}\n\
-             low_threshold_warn = {}\n\
-             low_threshold_critical = {}\n\
              poll_interval_secs = {}\n\
              icon_style = \"{}\"\n\
              notifications_enabled = {}\n\
              notification_silent = {}\n\
+             icon_shape = \"{}\"\n\
              icon_background = \"{}\"\n\
-             icon_font_color = \"{}\"\n",
+             icon_font_color = \"{}\"\n\
+             icon_font_family = \"{}\"\n\
+             low_threshold = {}\n\
+             blink_enabled = {}\n",
             self.autostart,
-            self.low_threshold_warn,
-            self.low_threshold_critical,
             self.poll_interval_secs,
             self.icon_style.name(),
             self.notifications_enabled,
             self.notification_silent,
+            self.icon_shape.name(),
             self.icon_background.name(),
             self.icon_font_color.name(),
+            self.icon_font_family,
+            self.low_threshold,
+            self.blink_enabled,
         )
     }
 
@@ -389,82 +510,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_review_schema() {
+    fn defaults_match_v030_schema() {
         let c = Config::default();
-        assert_eq!(c.low_threshold_warn, 20);
-        assert_eq!(c.low_threshold_critical, 10);
+        assert!(!c.autostart);
         assert_eq!(c.poll_interval_secs, 60);
         assert_eq!(c.icon_style, IconStyle::Auto);
         assert!(c.notifications_enabled);
         assert!(!c.notification_silent);
-        assert!(!c.autostart);
+        assert_eq!(c.icon_shape, IconShape::Rounded);
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
+        assert_eq!(c.icon_font_family, "Segoe UI");
+        assert_eq!(c.low_threshold, 20);
+        assert!(c.blink_enabled);
     }
 
     #[test]
     fn parse_full_document() {
         let (c, w) = Config::parse(
-            "autostart = true\nlow_threshold_warn = 25\nlow_threshold_critical = 5\n\
-             poll_interval_secs = 30\nicon_style = \"dark\"\nnotifications_enabled = false\n\
-             notification_silent = true\nicon_background = \"light\"\n\
-             icon_font_color = \"#0A6CFF\"\n",
+            "autostart = true\npoll_interval_secs = 30\nicon_style = \"dark\"\n\
+             notifications_enabled = false\nnotification_silent = true\n\
+             icon_shape = \"square\"\nicon_background = \"#0A6CFF\"\n\
+             icon_font_color = \"#FFD21F\"\nicon_font_family = \"Consolas\"\n\
+             low_threshold = 30\nblink_enabled = false\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.autostart);
-        assert_eq!(c.low_threshold_warn, 25);
-        assert_eq!(c.low_threshold_critical, 5);
         assert_eq!(c.poll_interval_secs, 30);
         assert_eq!(c.icon_style, IconStyle::Dark);
         assert!(!c.notifications_enabled);
         assert!(c.notification_silent);
-        assert_eq!(c.icon_background, IconBackground::Light);
+        assert_eq!(c.icon_shape, IconShape::Square);
         assert_eq!(
-            c.icon_font_color,
-            IconFontColor::Fixed(RgbColor {
+            c.icon_background,
+            IconBackground::Custom(RgbColor {
                 r: 0x0A,
                 g: 0x6C,
                 b: 0xFF
             })
         );
+        assert_eq!(
+            c.icon_font_color,
+            IconFontColor::Fixed(RgbColor {
+                r: 0xFF,
+                g: 0xD2,
+                b: 0x1F
+            })
+        );
+        assert_eq!(c.icon_font_family, "Consolas");
+        assert_eq!(c.low_threshold, 30);
+        assert!(!c.blink_enabled);
     }
 
     #[test]
     fn unknown_keys_warn_not_fail() {
-        let (c, w) = Config::parse("evil_key = true\nlow_threshold_warn = 30\n");
-        assert_eq!(c.low_threshold_warn, 30);
+        let (c, w) = Config::parse("evil_key = true\nlow_threshold = 30\n");
+        assert_eq!(c.low_threshold, 30);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].key, "evil_key");
     }
 
     #[test]
     fn invalid_values_fall_back_with_warning() {
-        let (c, w) = Config::parse(
-            "low_threshold_warn = 999\npoll_interval_secs = 5\nicon_style = \"neon\"\n",
-        );
-        assert_eq!(c.low_threshold_warn, DEFAULT_WARN);
-        assert_eq!(c.poll_interval_secs, DEFAULT_POLL_SECS);
+        let (c, w) = Config::parse("icon_style = \"neon\"\nicon_shape = \"hex\"\n");
         assert_eq!(c.icon_style, IconStyle::Auto);
-        assert_eq!(w.len(), 3);
+        assert_eq!(c.icon_shape, IconShape::Rounded);
+        assert_eq!(w.len(), 2);
     }
 
     #[test]
-    fn icon_readability_keys_parse_and_fall_back() {
-        // 合法取值（大小写不敏感 hex、auto）。
-        let (c, w) =
-            Config::parse("icon_background = \"transparent\"\nicon_font_color = \"auto\"\n");
+    fn out_of_range_values_clamp_with_warning() {
+        // M10/M12：越界钳制到边界 + 警告（不重置默认）。
+        let (c, w) = Config::parse(
+            "poll_interval_secs = 5\nlow_threshold = 80\nicon_font_family = \"  \"\n",
+        );
+        assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
+        assert_eq!(c.low_threshold, LOW_THRESHOLD_MAX);
+        assert_eq!(c.icon_font_family, "Segoe UI");
+        assert_eq!(w.len(), 3);
+        assert!(w.iter().any(|x| x.key == "poll_interval_secs"));
+        assert!(w.iter().any(|x| x.key == "low_threshold"));
+    }
+
+    #[test]
+    fn legacy_keys_migrate() {
+        // v0.2.0 双阈值 → v0.3.0 单阈值：warn 值迁移（显式 low_threshold 优先）。
+        let (c, w) = Config::parse("low_threshold_warn = 25\nlow_threshold_critical = 10\n");
+        assert_eq!(c.low_threshold, 25);
+        assert_eq!(w.len(), 2);
+        assert!(w.iter().all(|x| x.key.starts_with("low_threshold_")));
+
+        let (c, _) = Config::parse("low_threshold_warn = 25\nlow_threshold = 40\n");
+        assert_eq!(c.low_threshold, 40); // 新键优先
+
+        // warn 值超界 → 钳 5..=50。
+        let (c, _) = Config::parse("low_threshold_warn = 3\n");
+        assert_eq!(c.low_threshold, LOW_THRESHOLD_MIN);
+    }
+
+    #[test]
+    fn legacy_transparent_background_migrates_to_shape() {
+        let (c, w) = Config::parse("icon_background = \"transparent\"\n");
+        assert_eq!(c.icon_shape, IconShape::Transparent);
+        // 背景保默认 dark（透明时不渲染背景）。
+        assert_eq!(c.icon_background, IconBackground::Dark);
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn icon_color_options_parse_and_fall_back() {
+        let (c, w) = Config::parse("icon_background = \"light\"\nicon_font_color = \"auto\"\n");
         assert!(w.is_empty(), "{w:?}");
-        assert_eq!(c.icon_background, IconBackground::Transparent);
+        assert_eq!(c.icon_background, IconBackground::Light);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
 
-        // 非法取值回退默认 + 警告。
-        let (c, w) =
-            Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
+        let (c, w) = Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
         assert_eq!(w.len(), 2);
 
-        // 小写 hex 同样接受，roundtrip 后保持。
         let (c, w) = Config::parse("icon_font_color = \"#ff00aa\"\n");
         assert!(w.is_empty());
         assert_eq!(
@@ -486,19 +650,11 @@ mod tests {
     }
 
     #[test]
-    fn critical_must_be_below_warn() {
-        let (c, w) = Config::parse("low_threshold_warn = 10\nlow_threshold_critical = 20\n");
-        assert_eq!(c.low_threshold_warn, DEFAULT_WARN);
-        assert_eq!(c.low_threshold_critical, DEFAULT_CRITICAL);
-        assert!(w.iter().any(|x| x.key == "low_threshold_critical"));
-    }
-
-    #[test]
     fn comments_and_malformed_lines_tolerated() {
         let (c, w) = Config::parse(
-            "# comment\n\nlow_threshold_warn = 15 # inline\n[section]\ngarbage line\n",
+            "# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n",
         );
-        assert_eq!(c.low_threshold_warn, 15);
+        assert_eq!(c.low_threshold, 15);
         assert_eq!(w.len(), 2); // section + garbage
     }
 
@@ -506,11 +662,31 @@ mod tests {
     fn toml_roundtrip() {
         let c = Config {
             autostart: true,
-            low_threshold_warn: 22,
+            icon_shape: IconShape::Square,
+            low_threshold: 35,
+            icon_background: IconBackground::Custom(RgbColor {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            }),
+            icon_font_family: "Arial".into(),
             ..Config::default()
         };
         let (back, w) = Config::parse(&c.to_toml());
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn contrast_and_brighten_math() {
+        // 黑白对比 ≈ 21；同色对比 = 1。
+        let black_white = contrast_ratio((0, 0, 0), (255, 255, 255));
+        assert!((black_white - 21.0).abs() < 0.01, "{black_white}");
+        assert!((contrast_ratio((10, 10, 10), (10, 10, 10)) - 1.0).abs() < 1e-9);
+        assert!(contrast_ok((255, 255, 255), (0x1F, 0x1F, 0x1F)));
+        assert!(!contrast_ok((0x30, 0x30, 0x30), (0x1F, 0x1F, 0x1F)));
+        // 提亮 40%：0x1F→~44 (0x2C)；封顶 255。
+        assert_eq!(brighten((0x1F, 0x1F, 0x1F), 0.4), (0x2C, 0x2C, 0x2C));
+        assert_eq!(brighten((255, 200, 0), 0.4), (255, 255, 0));
     }
 }
