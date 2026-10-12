@@ -321,10 +321,7 @@ impl Config {
                     // M10：越界钳制到 [15, 300] + 警告（不再重置默认）。
                     let clamped = (*n).clamp(POLL_MIN_SECS, POLL_MAX_SECS);
                     if clamped != *n {
-                        warn(
-                            key,
-                            &format!("out of range; clamped {n} -> {clamped}"),
-                        );
+                        warn(key, &format!("out of range; clamped {n} -> {clamped}"));
                     }
                     cfg.poll_interval_secs = clamped;
                 }
@@ -357,7 +354,10 @@ impl Config {
                     } else if let Some(c) = RgbColor::parse_hex(s) {
                         cfg.icon_background = IconBackground::Custom(c);
                     } else {
-                        warn(key, "invalid icon_background (light/dark/#RRGGBB); default kept");
+                        warn(
+                            key,
+                            "invalid icon_background (light/dark/#RRGGBB); default kept",
+                        );
                     }
                 }
                 ("icon_font_color", Value::Str(s)) => {
@@ -624,7 +624,8 @@ mod tests {
         assert_eq!(c.icon_background, IconBackground::Light);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
 
-        let (c, w) = Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
+        let (c, w) =
+            Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
         assert_eq!(w.len(), 2);
@@ -651,9 +652,8 @@ mod tests {
 
     #[test]
     fn comments_and_malformed_lines_tolerated() {
-        let (c, w) = Config::parse(
-            "# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n",
-        );
+        let (c, w) =
+            Config::parse("# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n");
         assert_eq!(c.low_threshold, 15);
         assert_eq!(w.len(), 2); // section + garbage
     }

@@ -138,9 +138,7 @@ impl AppCore {
 
     /// 指定设备当前是否处于低电触发状态（M11 托盘闪烁判定用）。
     pub fn is_low_battery(&self, id: &str) -> bool {
-        self.lowbats
-            .get(id)
-            .is_some_and(|t| t.is_active())
+        self.lowbats.get(id).is_some_and(|t| t.is_active())
     }
 
     /// 记录一次失败（gone=true 表示设备消失）。
