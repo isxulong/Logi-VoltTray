@@ -3,9 +3,9 @@
 //! 帧布局（PRD 协议附录）：
 //! - 短帧 7 字节：`[0x10, dev, feat, func<<4|sw_id, p0, p1, p2]`
 //! - 长帧 20 字节：`[0x11, dev, feat, func<<4|sw_id, p0 .. p15]`
-//! - 错误帧：feat = 0xFF（2.0）或 0x8F（1.0），`p0` = 原 feature，`p1` = 错误码。
+//! - 错误帧：feat = 0xFF（2.0）或 0x8F（1.0），布局两族不同，见 `decode`。
 
-use crate::error::{DeviceErrorCode, HidppError, MalformedKind};
+use crate::error::{DeviceErrorCode, ErrorFamily, HidppError, MalformedKind};
 
 pub const REPORT_SHORT: u8 = 0x10;
 pub const REPORT_LONG: u8 = 0x11;
@@ -128,9 +128,22 @@ impl Frame {
         let feature_index = rest[1];
         let fsw = rest[2];
         if feature_index == ERROR_FEATURE_2_0 || feature_index == ERROR_FEATURE_1_0 {
+            // 错误帧布局随协议族不同（蓝队 A5/A6 实证，0 基字节位）：
+            // - 2.0：[rp, dev, 0xFF, feature, func_sw, code, ...] → feature 回显在 byte3，code 在 byte5
+            // - 1.0：[rp, dev, 0x8F, sub, addr, code, 0] → sub/addr 回显在 byte3/byte4，code 在 byte5
+            let family = if feature_index == ERROR_FEATURE_2_0 {
+                ErrorFamily::Hidpp2
+            } else {
+                ErrorFamily::Hidpp1
+            };
+            let echoed = match family {
+                ErrorFamily::Hidpp2 => rest[2],
+                ErrorFamily::Hidpp1 => rest[3],
+            };
             return Err(HidppError::Device {
                 device_index,
-                feature_index: rest[3],
+                family,
+                feature_index: echoed,
                 code: DeviceErrorCode::from_code(rest[4]),
             });
         }
@@ -172,18 +185,21 @@ mod tests {
 
     #[test]
     fn error_frame_2_0_decodes_to_device_error() {
-        // feat=0xFF, p0=原 feature 0x05, p1=错误码 0x06
+        // 蓝队 A5 实证布局：[rp, dev, 0xFF, feature, func_sw, code, ...]
+        // feature 回显 0x05 在 byte3，错误码 0x06 在 byte5。
         let bytes = [
-            0x11, 0x01, 0xFF, 0x00, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0x11, 0x01, 0xFF, 0x05, 0x17, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let err = Frame::decode(&bytes).expect_err("must be device error");
         match err {
             HidppError::Device {
                 device_index,
+                family,
                 feature_index,
                 code,
             } => {
                 assert_eq!(device_index, 0x01);
+                assert_eq!(family, ErrorFamily::Hidpp2);
                 assert_eq!(feature_index, 0x05);
                 assert_eq!(code, DeviceErrorCode::InvalidFeatureIndex);
             }
@@ -193,16 +209,20 @@ mod tests {
 
     #[test]
     fn error_frame_1_0_decodes_to_device_error() {
-        let bytes = [0x10, 0x02, 0x8F, 0x00, 0x0D, 0x02, 0x00];
+        // 蓝队 A6 / 参考实现测试实证：[0x10, dev, 0x8F, 0x81, 0x0D, code, 0]
+        let bytes = [0x10, 0x02, 0x8F, 0x81, 0x0D, 0x08, 0x00];
         let err = Frame::decode(&bytes).expect_err("must be device error");
         match err {
             HidppError::Device {
-                code,
+                device_index,
+                family,
                 feature_index,
-                ..
+                code,
             } => {
-                assert_eq!(code, DeviceErrorCode::InvalidArgument);
-                assert_eq!(feature_index, 0x0D);
+                assert_eq!(device_index, 0x02);
+                assert_eq!(family, ErrorFamily::Hidpp1);
+                assert_eq!(feature_index, 0x0D); // 寄存器地址回显
+                assert_eq!(code, DeviceErrorCode::Busy); // 1.0 语义：未知设备/休眠
             }
             other => panic!("unexpected error: {other:?}"),
         }
