@@ -70,13 +70,15 @@ impl Curve {
             let (hi_mv, hi_pct) = pair[0];
             let (lo_mv, lo_pct) = pair[1];
             if mv <= hi_mv && mv >= lo_mv {
-                let span_mv = (hi_mv - lo_mv) as u32;
+                let span_mv = (hi_mv - lo_mv) as i32;
                 if span_mv == 0 {
                     return hi_pct;
                 }
                 let span_pct = hi_pct as i32 - lo_pct as i32;
                 let off = (mv - lo_mv) as i32;
-                let pct = lo_pct as i32 + span_pct * off / span_mv as i32;
+                // 四舍五入（v0.2.0：真机 13 锚点曲线 4019mV → 84% 而非 83%，
+                // 参考实现 round() 实证）。半进位：±span_mv 再除 2×span_mv。
+                let pct = lo_pct as i32 + (span_pct * off * 2 + span_mv) / (span_mv * 2);
                 return pct.clamp(0, 100) as u8;
             }
         }
@@ -125,5 +127,30 @@ mod tests {
     #[test]
     fn unknown_curve_is_none() {
         assert_eq!(percent_from_mv("nope", 3700), None);
+    }
+
+    #[test]
+    fn liion_logi_matches_reference_anchors() {
+        // 参考实现真机 13 锚点曲线（fixtures/battery_map_cases.json）。
+        assert_eq!(percent_from_mv("li-ion-logi", 4186), Some(100));
+        assert_eq!(percent_from_mv("li-ion-logi", 5000), Some(100));
+        assert_eq!(percent_from_mv("li-ion-logi", 4019), Some(84));
+        assert_eq!(percent_from_mv("li-ion-logi", 3989), Some(80));
+        assert_eq!(percent_from_mv("li-ion-logi", 3811), Some(50));
+        assert_eq!(percent_from_mv("li-ion-logi", 3646), Some(5));
+        assert_eq!(percent_from_mv("li-ion-logi", 3579), Some(2));
+        assert_eq!(percent_from_mv("li-ion-logi", 3500), Some(0));
+        assert_eq!(percent_from_mv("li-ion-logi", 3000), Some(0));
+    }
+
+    #[test]
+    fn liion_logi_monotonic_non_increasing_mv() {
+        // 毫伏升 → 百分比不降（红队：曲线必须单调）。
+        let mut last = 0u8;
+        for mv in (3500..=4200).step_by(7) {
+            let p = percent_from_mv("li-ion-logi", mv).expect("curve");
+            assert!(p >= last, "not monotonic at {mv}mV: {p} < {last}");
+            last = p;
+        }
     }
 }
