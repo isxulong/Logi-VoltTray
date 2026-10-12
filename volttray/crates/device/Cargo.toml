@@ -8,3 +8,7 @@ license.workspace = true
 [dependencies]
 volttray-protocol = { path = "../protocol" }
 volttray-transport = { path = "../transport" }
+
+# 仅测试用：消费 fixtures/battery_map_cases.json 黄金用例（tests/battery_map.rs）。
+[dev-dependencies]
+serde_json = "1.0"
