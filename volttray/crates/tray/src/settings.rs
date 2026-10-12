@@ -18,8 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use volttray_app::config::{
     contrast_ok, contrast_ratio, Config, IconBackground, IconFontColor, IconShape, RgbColor,
-    CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX,
-    LOW_THRESHOLD_MIN,
+    CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -29,19 +28,18 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, TBM_SETRANGE, TBM_SETPOS,
-    TBM_SETTICFREQ, TBS_AUTOTICKS, BST_CHECKED, BST_UNCHECKED,
+    InitCommonControlsEx, BST_CHECKED, BST_UNCHECKED, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX,
+    TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CB_ADDSTRING, CB_FINDSTRINGEXACT, CB_GETCOUNT,
-    CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_SETCURSEL, CBS_DROPDOWNLIST, CBN_SELCHANGE,
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, EN_CHANGE,
-    ES_AUTOHSCROLL, GetDlgItem, GetWindowTextW, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HICON,
-    HMENU, IMAGE_BITMAP, IsWindow, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowTextW,
-    SetWindowLongPtrW, ShowWindow, STM_SETIMAGE, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY, WM_SETFONT, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetDlgItem, GetWindowLongPtrW, GetWindowTextW,
+    IsWindow, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
+    ShowWindow, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CBN_SELCHANGE, CBS_DROPDOWNLIST,
+    CB_ADDSTRING, CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
+    CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HCURSOR,
+    HICON, HMENU, IMAGE_BITMAP, STM_SETIMAGE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY, WM_SETFONT, WNDCLASSW,
+    WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::icon::{font_rgb, render_text_bitmap, IconColor};
@@ -124,7 +122,12 @@ impl Ctx {
 }
 
 /// 打开（或前置）设置窗口。`preview_text` 为预览数字（如当前电量文本）。
-pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &PathBuf, dark_theme: bool, preview_text: &str) {
+pub fn open_settings(
+    arc: &Arc<RwLock<Config>>,
+    path: &PathBuf,
+    dark_theme: bool,
+    preview_text: &str,
+) {
     let existing = SETTINGS_HWND.load(Ordering::SeqCst);
     if existing != 0 {
         let hwnd = HWND(existing as *mut core::ffi::c_void);
@@ -195,12 +198,7 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &PathBuf, dark_theme: bool
     }
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let ctx = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Ctx;
     match msg {
         WM_CREATE => {
@@ -326,40 +324,378 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
     let hfont = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
 
     // 分组框（BUTTON + BS_GROUPBOX）。
-    create_ctl(hwnd, "BUTTON", Some("外观"), ws(BS_GROUPBOX), WINDOW_EX_STYLE(0), 8, 4, 482, 232, 0, hinst, hfont);
-    create_ctl(hwnd, "BUTTON", Some("刷新"), ws(BS_GROUPBOX), WINDOW_EX_STYLE(0), 8, 244, 482, 64, 0, hinst, hfont);
-    create_ctl(hwnd, "BUTTON", Some("低电提醒"), ws(BS_GROUPBOX), WINDOW_EX_STYLE(0), 8, 316, 482, 108, 0, hinst, hfont);
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("外观"),
+        ws(BS_GROUPBOX),
+        WINDOW_EX_STYLE(0),
+        8,
+        4,
+        482,
+        232,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("刷新"),
+        ws(BS_GROUPBOX),
+        WINDOW_EX_STYLE(0),
+        8,
+        244,
+        482,
+        64,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("低电提醒"),
+        ws(BS_GROUPBOX),
+        WINDOW_EX_STYLE(0),
+        8,
+        316,
+        482,
+        108,
+        0,
+        hinst,
+        hfont,
+    );
 
     // —— 外观 ——
-    create_ctl(hwnd, "STATIC", Some("形状"), ws(0), WINDOW_EX_STYLE(0), 20, 32, 44, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "COMBOBOX", None, ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0), WINDOW_EX_STYLE(0), 76, 28, 180, 220, IDC_SHAPE, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("背景色"), ws(0), WINDOW_EX_STYLE(0), 20, 64, 52, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "COMBOBOX", None, ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0), WINDOW_EX_STYLE(0), 76, 60, 110, 200, IDC_BG, hinst, hfont);
-    create_ctl(hwnd, "EDIT", None, ws(ES_AUTOHSCROLL as u32), WS_EX_CLIENTEDGE, 196, 60, 70, 22, IDC_BG_HEX, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("字体"), ws(0), WINDOW_EX_STYLE(0), 20, 96, 44, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "COMBOBOX", None, ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0), WINDOW_EX_STYLE(0), 76, 92, 180, 240, IDC_FONT_FAMILY, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("字体颜色"), ws(0), WINDOW_EX_STYLE(0), 20, 128, 52, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "COMBOBOX", None, ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0), WINDOW_EX_STYLE(0), 76, 124, 110, 200, IDC_FONT_COLOR, hinst, hfont);
-    create_ctl(hwnd, "EDIT", None, ws(ES_AUTOHSCROLL as u32), WS_EX_CLIENTEDGE, 196, 124, 70, 22, IDC_FONT_HEX, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("预览"), ws(0), WINDOW_EX_STYLE(0), 20, 160, 44, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "STATIC", None, ws(SS_BITMAP), WINDOW_EX_STYLE(0), 76, 152, PREVIEW_PX, PREVIEW_PX, IDC_PREVIEW, hinst, hfont);
-    create_ctl(hwnd, "BUTTON", Some("恢复默认"), ws(0), WINDOW_EX_STYLE(0), 290, 152, 100, 26, IDC_RESET_APPEAR, hinst, hfont);
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("形状"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        32,
+        44,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        76,
+        28,
+        180,
+        220,
+        IDC_SHAPE,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("背景色"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        64,
+        52,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        76,
+        60,
+        110,
+        200,
+        IDC_BG,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "EDIT",
+        None,
+        ws(ES_AUTOHSCROLL as u32),
+        WS_EX_CLIENTEDGE,
+        196,
+        60,
+        70,
+        22,
+        IDC_BG_HEX,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("字体"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        96,
+        44,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        76,
+        92,
+        180,
+        240,
+        IDC_FONT_FAMILY,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("字体颜色"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        128,
+        52,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        76,
+        124,
+        110,
+        200,
+        IDC_FONT_COLOR,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "EDIT",
+        None,
+        ws(ES_AUTOHSCROLL as u32),
+        WS_EX_CLIENTEDGE,
+        196,
+        124,
+        70,
+        22,
+        IDC_FONT_HEX,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("预览"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        160,
+        44,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        None,
+        ws(SS_BITMAP),
+        WINDOW_EX_STYLE(0),
+        76,
+        152,
+        PREVIEW_PX,
+        PREVIEW_PX,
+        IDC_PREVIEW,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("恢复默认"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        152,
+        100,
+        26,
+        IDC_RESET_APPEAR,
+        hinst,
+        hfont,
+    );
 
     // —— 刷新 ——
-    create_ctl(hwnd, "STATIC", Some("轮询间隔"), ws(0), WINDOW_EX_STYLE(0), 20, 272, 60, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "COMBOBOX", None, ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0), WINDOW_EX_STYLE(0), 96, 268, 180, 200, IDC_INTERVAL, hinst, hfont);
-    create_ctl(hwnd, "BUTTON", Some("恢复默认"), ws(0), WINDOW_EX_STYLE(0), 290, 266, 100, 26, IDC_RESET_REFRESH, hinst, hfont);
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("轮询间隔"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        272,
+        60,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        96,
+        268,
+        180,
+        200,
+        IDC_INTERVAL,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("恢复默认"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        266,
+        100,
+        26,
+        IDC_RESET_REFRESH,
+        hinst,
+        hfont,
+    );
 
     // —— 低电提醒 ——
-    create_ctl(hwnd, "BUTTON", Some("低电时图标闪烁提醒"), ws(BS_AUTOCHECKBOX), WINDOW_EX_STYLE(0), 20, 344, 180, 22, IDC_BLINK, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("低电阈值"), ws(0), WINDOW_EX_STYLE(0), 20, 380, 60, 20, 0, hinst, hfont);
-    create_ctl(hwnd, "msctls_trackbar32", None, ws(TBS_AUTOTICKS), WINDOW_EX_STYLE(0), 96, 376, 180, 32, IDC_SLIDER, hinst, hfont);
-    create_ctl(hwnd, "STATIC", Some("20%"), ws(0), WINDOW_EX_STYLE(0), 290, 380, 50, 20, IDC_THRESH_VAL, hinst, hfont);
-    create_ctl(hwnd, "BUTTON", Some("恢复默认"), ws(0), WINDOW_EX_STYLE(0), 290, 340, 100, 26, IDC_RESET_LOW, hinst, hfont);
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("低电时图标闪烁提醒"),
+        ws(BS_AUTOCHECKBOX),
+        WINDOW_EX_STYLE(0),
+        20,
+        344,
+        180,
+        22,
+        IDC_BLINK,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("低电阈值"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        380,
+        60,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "msctls_trackbar32",
+        None,
+        ws(TBS_AUTOTICKS),
+        WINDOW_EX_STYLE(0),
+        96,
+        376,
+        180,
+        32,
+        IDC_SLIDER,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("20%"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        380,
+        50,
+        20,
+        IDC_THRESH_VAL,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("恢复默认"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        340,
+        100,
+        26,
+        IDC_RESET_LOW,
+        hinst,
+        hfont,
+    );
 
     // —— 底部 ——
-    create_ctl(hwnd, "BUTTON", Some("恢复全部默认"), ws(0), WINDOW_EX_STYLE(0), 16, 436, 120, 26, IDC_RESET_ALL, hinst, hfont);
-    create_ctl(hwnd, "STATIC", None, ws(0), WINDOW_EX_STYLE(0), 16, 470, 466, 20, IDC_STATUS, hinst, hfont);
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("恢复全部默认"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        16,
+        436,
+        120,
+        26,
+        IDC_RESET_ALL,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        None,
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        16,
+        470,
+        466,
+        20,
+        IDC_STATUS,
+        hinst,
+        hfont,
+    );
 
     // 组合框内容。
     let shape = GetDlgItem(Some(hwnd), IDC_SHAPE).unwrap_or_default();
@@ -493,8 +829,12 @@ fn combo_current_text(combo: HWND) -> String {
 fn combo_find_exact(combo: HWND, text: &str) -> i32 {
     let v = wide(text);
     unsafe {
-        SendMessageW!(combo, CB_FINDSTRINGEXACT, WPARAM(0xFFFF_FFFF), LPARAM(v.as_ptr() as isize))
-            as i32
+        SendMessageW!(
+            combo,
+            CB_FINDSTRINGEXACT,
+            WPARAM(0xFFFF_FFFF),
+            LPARAM(v.as_ptr() as isize)
+        ) as i32
     }
 }
 
@@ -546,7 +886,10 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     let mut bgra = vec![0u8; n * 4];
     let cell = (PREVIEW_PX / 6).max(1);
     for i in 0..n {
-        let (py, px) = ((i / PREVIEW_PX as usize) as i32, (i % PREVIEW_PX as usize) as i32);
+        let (py, px) = (
+            (i / PREVIEW_PX as usize) as i32,
+            (i % PREVIEW_PX as usize) as i32,
+        );
         let checker = if ((px / cell) + (py / cell)) % 2 == 0 {
             (0xEEu32, 0xEE, 0xEE)
         } else {
@@ -665,11 +1008,20 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         SendMessageW!(
             blink,
             BM_SETCHECK,
-            WPARAM(if cfg.blink_enabled { BST_CHECKED.0 as usize } else { BST_UNCHECKED.0 as usize }),
+            WPARAM(if cfg.blink_enabled {
+                BST_CHECKED.0 as usize
+            } else {
+                BST_UNCHECKED.0 as usize
+            }),
             LPARAM(0)
         );
         let slider = ctl(hwnd, IDC_SLIDER);
-        SendMessageW!(slider, TBM_SETPOS, WPARAM(1), LPARAM(cfg.low_threshold as isize));
+        SendMessageW!(
+            slider,
+            TBM_SETPOS,
+            WPARAM(1),
+            LPARAM(cfg.low_threshold as isize)
+        );
         let tv = format!("{}%", cfg.low_threshold);
         let v = wide(&tv);
         let _ = SetWindowTextW(ctl(hwnd, IDC_THRESH_VAL), PCWSTR(v.as_ptr()));
@@ -771,9 +1123,8 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             }
         }
         IDC_BLINK if clicked => {
-            let checked = unsafe {
-                SendMessageW!(ctl(hwnd, IDC_BLINK), BM_GETCHECK, WPARAM(0), LPARAM(0))
-            };
+            let checked =
+                unsafe { SendMessageW!(ctl(hwnd, IDC_BLINK), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
             cfg.blink_enabled = checked == BST_CHECKED.0 as isize;
             touched = true;
         }
