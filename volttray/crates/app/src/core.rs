@@ -616,10 +616,8 @@ mod tests {
     fn record_success_clears_stale_state() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let now = Instant::now();
-        // Connected → 成功 → Online
-        let mut d = dev("a", 1);
-        d.set_state(DeviceState::Connected);
-        core.upsert_device(d);
+        // Connected → 成功 → Online（Device::new 默认 Connected，dev() 预设 Online）
+        core.upsert_device(Device::new("a".into(), "Mouse a", LinkKind::Bolt, 1, false));
         assert_eq!(core.entries()[0].device.state, DeviceState::Connected);
         core.record_success("a", reading(50, false), now);
         assert_eq!(core.entries()[0].device.state, DeviceState::Online);
