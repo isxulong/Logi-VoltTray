@@ -1,0 +1,15 @@
+{
+  "name": "ref_unified_fn1_85_charging",
+  "kind": "response",
+  "hex": "11 01 06 15 55 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 17,
+    "device_index": 1,
+    "feature_index": 6,
+    "function": 1,
+    "sw_id": 5,
+    "params_hex": "55 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00"
+  },
+  "comment": "85% 充电中；真机应答为 fn1（fn0 是 GetCapabilities，语义不同）"
+}
