@@ -398,12 +398,13 @@ mod tests {
 
     #[test]
     fn voltage_mapping_bit7_charging() {
+        // 0x105A = 4186mV（li-ion-logi 满电锚点）→ 100%；0x0F64=3940mV 实为 73%。
         assert_eq!(
-            map_battery_voltage(&[0x0F, 0x64, 0x80], "li-ion-logi"),
+            map_battery_voltage(&[0x10, 0x5A, 0x80], "li-ion-logi"),
             Ok((100, true))
         );
         assert_eq!(
-            map_battery_voltage(&[0x0F, 0x64, 0x00], "li-ion-logi"),
+            map_battery_voltage(&[0x10, 0x5A, 0x00], "li-ion-logi"),
             Ok((100, false))
         );
         assert_eq!(
