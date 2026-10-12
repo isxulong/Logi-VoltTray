@@ -29,3 +29,11 @@
 | D-23 | 「？」改为可定位：BatteryUnknown 诊断事件带 8 类原因码（no_battery_features / query_timeout / error_response / malformed_response / mapping_failure / curve_missing / io_error / device_gone），随脱敏导出可见 | 修复要求 B：真机问号必须可归因，而非仅显示 ? |
 | D-24 | 可读性默认组合 = 深色圆角底（#1F1F1F）+ auto 字色（深底→白字）；新增 `icon_background`（transparent/light/dark，默认 dark）与 `icon_font_color`（auto 或 #RRGGBB，默认 auto）两键；Gray（未知/离线）恒灰字，Fixed 字色不覆盖 Gray | 真机反馈「无背景黑字不清晰」：单黑字无法同时满足深浅任务栏；底色+字色组合由配置保证两端可读，透明底保留给自选用户 |
 | D-25 | 黄金样例采纳边界：蓝队 B2 原稿短帧与其自身 A4 及参考实现矛盾→按参考实现改长帧；B4（接收器名 0x2B5）未实现不采；clean_name 空串按 P1-5 回退「未知设备」、0x00 后填充按读名长度截断（两处偏差记录于 tests/battery_map.rs 头注） | 采纳边界=协议与测试实证；样本内部矛盾以参考实现源码为准 |
+
+| D-26 | 设备名「?」根因 = 槽位名分隔符 U+00B7「·」不在消毒白名单被替换为「?」；修复：白名单加「·」+ 回退名改「{base} · 槽位 {slot}」 | 真机菜单截图「USB Receiver ?1」实证；sanitize 单测 `middle_dot_separator_kept` 锁定 |
+| D-27 | 真实设备名来源链：HID++ 2.0 DEVICE_NAME(0x0005) fn0 总长 + fn1 分片（滤 0x00、分片不满槽即结束），回退接收器配对名寄存器 0x2B5（Unifying p0=0x40+dev-1 / Bolt p0=0x60+dev 两变体）；全链失败用 D-26 回退名，不出裸「?」 | 蓝队设备名实证条目 + 参考实现 read_name/receiver_device_name；name.rs 6 组桩回放测试 |
+| D-28 | 设置入口 = 裸 Win32 单页非模态窗口（外观/刷新/低电提醒三组 + 每组恢复默认 + 全局恢复全部），菜单「设置…」打开；单实例（重复打开只前置）、即时生效（无确定/取消）、关闭即销毁 | 产品方案 #7695737931205495999 裁决（窗口形态）；复用诊断面板裸 Win32 技术路径 |
+| D-29 | GUI ↔ TOML 双向一致：设置窗口写共享 `Arc<RwLock<Config>>` + 整份 `to_toml` 落盘；菜单开关写 Arc 字段 + 单键 `persist_kv`（键缺失自动追加）；外部 TOML 改动走既有 mtime 热重载 | 产品方案「谁改都生效」；修正 v0.2.0 仅 TOML 单键改写、core 同步滞后的缺口 |
+| D-30 | 低电闪烁 1Hz = 500ms WM_TIMER 翻相位，常态 ↔ 提亮约 40% 交替；触发/解除由单阈值 LowBatteryTracker（连续 2 次读数、解除阈值+5 迟滞、充电即复位）；点击托盘本次停闪、低电解除后重新武装；菜单与设置窗口均可关 | 产品方案 M11；pump 状态机实现，IO 侧只产 Alert |
+| D-31 | M12 单阈值 `low_threshold`（5..=50，默认 20，滑块步进 5）取代 v0.2.0 双阈值：红档 = 用户阈值、黄档固定 50；旧键 `low_threshold_warn` 迁移合并、`low_threshold_critical` 忽略；`icon_background = "transparent"` 旧值迁移为 `icon_shape = "transparent"` | 产品方案 M12 + 配置 schema v0.3.0（11 键）；容错回退与钳制保留 |
+| D-32 | 双接收器 P1-1 本轮不动：channels 已按 (pid, path 标签) 分组，多接收器展示聚合改动面超出「顺手修」范围，记录留待下轮 | 任务三约束：不为它扩大本轮范围 |
