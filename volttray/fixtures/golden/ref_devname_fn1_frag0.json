@@ -1,0 +1,15 @@
+{
+  "name": "ref_devname_fn1_frag0",
+  "kind": "response",
+  "hex": "10 01 03 15 4D 58 20",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 1,
+    "feature_index": 3,
+    "function": 1,
+    "sw_id": 5,
+    "params_hex": "4D 58 20"
+  },
+  "comment": "分片读取，p0=已读长度"
+}
