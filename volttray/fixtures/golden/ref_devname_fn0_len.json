@@ -1,0 +1,15 @@
+{
+  "name": "ref_devname_fn0_len",
+  "kind": "response",
+  "hex": "10 01 03 05 0B 00 00",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 1,
+    "feature_index": 3,
+    "function": 0,
+    "sw_id": 5,
+    "params_hex": "0B 00 00"
+  },
+  "comment": "设备名总长 11"
+}
