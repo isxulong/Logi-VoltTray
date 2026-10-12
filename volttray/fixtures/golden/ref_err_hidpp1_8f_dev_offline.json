@@ -1,0 +1,13 @@
+{
+  "name": "ref_err_hidpp1_8f_dev_offline",
+  "kind": "response",
+  "hex": "10 01 8F 81 0D 08 00",
+  "expect": {
+    "type": "error",
+    "device_index": 1,
+    "family": "hidpp1",
+    "feature_index": 13,
+    "error_code": 8
+  },
+  "comment": "HID++1.0 错误码 0x08 语义=UNKNOWN_DEVICE(设备不在线/休眠)，非 2.0 的 Busy"
+}
