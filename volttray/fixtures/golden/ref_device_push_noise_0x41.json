@@ -1,0 +1,15 @@
+{
+  "name": "ref_device_push_noise_0x41",
+  "kind": "response",
+  "hex": "10 01 41 00 01 01 01",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 1,
+    "feature_index": 65,
+    "function": 0,
+    "sw_id": 0,
+    "params_hex": "01 01 01"
+  },
+  "comment": "设备主动通知；应答匹配必须按 sub+addr 回显过滤，不得误当应答"
+}
