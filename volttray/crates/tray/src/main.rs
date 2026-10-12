@@ -195,7 +195,13 @@ mod imp {
         let raw_name = read_device_name(&mut t, slot, &features, is_hidpp1)
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| slot_name(info, slot));
-        let dev = Device::new(id.clone(), &raw_name, classify_pid(info.pid), slot, is_hidpp1);
+        let dev = Device::new(
+            id.clone(),
+            &raw_name,
+            classify_pid(info.pid),
+            slot,
+            is_hidpp1,
+        );
         let name = dev.name.clone();
         let now = Instant::now();
         if let Ok(mut c) = core.lock() {
@@ -662,7 +668,11 @@ mod imp {
         // 活跃 = 开 && 展示设备处于低电触发态 && 未被点击停闪；解除后重新武装。
         state.blink_phase = !state.blink_phase;
         let low_active = shown_device(state).is_some_and(|d| {
-            !d.gray && core.lock().map(|c| c.is_low_battery(&d.id)).unwrap_or(false)
+            !d.gray
+                && core
+                    .lock()
+                    .map(|c| c.is_low_battery(&d.id))
+                    .unwrap_or(false)
         });
         if low_active != state.low_active {
             state.low_active = low_active;
@@ -698,12 +708,7 @@ mod imp {
                     .and_then(|d| d.percent)
                     .map(|p| icon_text(Some(p), false))
                     .unwrap_or_else(|| "50".to_string());
-                crate::settings::open_settings(
-                    cfg_arc,
-                    cfg_path,
-                    *cur_dark,
-                    &preview,
-                );
+                crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, &preview);
             } else if e.id == ids.diag {
                 export_diag(observer);
             } else if e.id == ids.blink {
