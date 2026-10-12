@@ -20,7 +20,13 @@ pub struct MenuIds {
 }
 
 fn device_row_text(dev: &DeviceSnapshot) -> String {
-    let status = if dev.gray {
+    // D-33：休眠是合法状态——显示最后已知电量并注明休眠，绝不显示「未读取/未知」。
+    let status = if dev.state == "sleeping" {
+        match dev.percent {
+            Some(p) => format!("{p}% 休眠中"),
+            None => "休眠中 · 电量未知".to_string(),
+        }
+    } else if dev.gray {
         "离线".to_string()
     } else {
         match dev.percent {
