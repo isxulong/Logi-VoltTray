@@ -15,6 +15,8 @@ mod icon;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
+mod rawinput;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod single;
@@ -39,10 +41,14 @@ mod imp {
     use volttray_app::aumid;
     use volttray_app::autostart;
     use volttray_app::config::{IconBackground, IconFontColor, IconShape};
-    use volttray_app::{Alert, AppCore, Config, ConfigWatcher, Observer, SharedObserver, Snapshot};
-    use volttray_device::battery::probe_battery;
+    use volttray_app::{
+        Alert, AppCore, Config, ConfigWatcher, Observer, PollDecision, SharedObserver, Snapshot,
+        TimeoutOutcome,
+    };
+    use volttray_device::battery::{probe_battery, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake};
     use volttray_device::name::read_device_name;
+    use volttray_device::state::DeviceState;
     use volttray_device::{classify_pid, Device};
     use volttray_protocol::FeatureTable;
     use volttray_transport::channel::{HidChannel, IoError};
@@ -67,6 +73,9 @@ mod imp {
 
     enum IoCmd {
         RefreshNow,
+        /// 被动唤醒信号（D-33）：系统层观测到罗技鼠标活动（Raw Input）。
+        /// 仅装填一次唤醒探测资格，不直接发查询。
+        WakeSignal,
         Shutdown,
     }
 
@@ -105,7 +114,9 @@ mod imp {
         index: u8,
         features: FeatureTable,
         is_hidpp1: bool,
-        failures: u32,
+        /// 非超时类硬失败连击（v0.3.1 语义：查询超时走休眠路径、不注销；
+        /// 仅 I/O / 映射类持续失败沿用 3 连败注销，注销后靠重枚举重新注册）。
+        hard_failures: u32,
     }
 
     struct ChannelState {
@@ -222,7 +233,7 @@ mod imp {
             index: slot,
             features,
             is_hidpp1,
-            failures: 0,
+            hard_failures: 0,
         })
     }
 
@@ -308,7 +319,8 @@ mod imp {
                 }
             }
 
-            // 轮询一轮：逐通道逐槽位探测电量。
+            // 轮询一轮：逐通道逐槽位探测电量（D-33：休眠槽位一律 Skip——
+            // 零主动查询；唯一裁决点 AppCore::poll_decision，app 层单测覆盖）。
             let now = Instant::now();
             let mut alerts: Vec<(String, String)> = Vec::new();
             {
@@ -320,6 +332,18 @@ mod imp {
                     let mut i = 0;
                     while i < ch_state.slots.len() {
                         let s = &mut ch_state.slots[i];
+                        // 休眠且无唤醒资格：本轮绝不向该设备发任何 HID++ 查询。
+                        if core.poll_decision(&s.id, now) == PollDecision::Skip {
+                            i += 1;
+                            continue;
+                        }
+                        // 唤醒探测开始：消耗唤醒资格并进入冷却（D-33）。
+                        let sleeping = core.entries().iter().any(|e| {
+                            e.device.id == s.id && e.device.state == DeviceState::Sleeping
+                        });
+                        if sleeping {
+                            core.begin_wake_probe(&s.id, now);
+                        }
                         let mut t = Transport::new(
                             ch_state.shared.clone(),
                             SharedObserver(observer.clone()),
@@ -328,7 +352,7 @@ mod imp {
                             probe_battery(&mut t, &s.id, s.index, &s.features, CURVE, s.is_hidpp1);
                         match reading {
                             Ok(r) => {
-                                s.failures = 0;
+                                s.hard_failures = 0;
                                 if let Some(a) = core.record_success(&s.id, r, now) {
                                     let name = core
                                         .entries()
@@ -340,11 +364,27 @@ mod imp {
                                 }
                                 i += 1;
                             }
-                            Err(_) => {
-                                s.failures += 1;
-                                let gone = s.failures >= 3;
-                                core.record_failure(&s.id, gone);
-                                if gone {
+                            Err(reason) => match reason {
+                                // 查询超时 = 疑似休眠：连击 2 次暂停轮询（不注销、
+                                // 不重试——对休眠中的鼠标发查询才是真费电，D-33）。
+                                UnknownReason::QueryTimeout => {
+                                    if core.record_timeout(&s.id) == TimeoutOutcome::EnteredSleep {
+                                        if let Ok(mut o) = observer.lock() {
+                                            o.push(DiagEvent::new(
+                                                Layer::App,
+                                                DiagKind::StateChange {
+                                                    id: s.id.clone(),
+                                                    from: "online".into(),
+                                                    to: "sleeping".into(),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                    i += 1;
+                                }
+                                // 接收器报告设备消失：立即注销（不等 3 次）。
+                                UnknownReason::DeviceGone => {
+                                    core.record_failure(&s.id, true);
                                     let gone_slot = ch_state.slots.remove(i);
                                     if let Ok(mut o) = observer.lock() {
                                         o.push(DiagEvent::new(
@@ -352,10 +392,26 @@ mod imp {
                                             DiagKind::DeviceLost { id: gone_slot.id },
                                         ));
                                     }
-                                } else {
-                                    i += 1;
                                 }
-                            }
+                                // 其它持续失败（I/O / 映射 / 特性缺失等）：沿用
+                                // 3 连败注销，靠重枚举重新注册（原 v0.2.0 语义）。
+                                _ => {
+                                    s.hard_failures += 1;
+                                    let gone = s.hard_failures >= 3;
+                                    core.record_failure(&s.id, gone);
+                                    if gone {
+                                        let gone_slot = ch_state.slots.remove(i);
+                                        if let Ok(mut o) = observer.lock() {
+                                            o.push(DiagEvent::new(
+                                                Layer::App,
+                                                DiagKind::DeviceLost { id: gone_slot.id },
+                                            ));
+                                        }
+                                    } else {
+                                        i += 1;
+                                    }
+                                }
+                            },
                         }
                     }
                 }
@@ -399,7 +455,7 @@ mod imp {
                 }
             }
 
-            // 分片睡眠，响应立即刷新 / 退出。
+            // 分片睡眠，响应立即刷新 / 唤醒信号 / 退出。
             let interval = match core.lock() {
                 Ok(c) => c.poll_interval(),
                 Err(_) => Duration::from_secs(60),
@@ -408,6 +464,16 @@ mod imp {
             while Instant::now() < deadline {
                 match cmd.recv_timeout(Duration::from_millis(200)) {
                     Ok(IoCmd::RefreshNow) => continue 'outer,
+                    // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
+                    // 恢复延迟取决于用户动鼠标的那一刻，而不是轮询周期。
+                    Ok(IoCmd::WakeSignal) => {
+                        if let Ok(mut c) = core.lock() {
+                            for id in c.sleeping_ids() {
+                                c.note_wake_signal(&id);
+                            }
+                        }
+                        continue 'outer;
+                    }
                     Ok(IoCmd::Shutdown) => return,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -559,6 +625,11 @@ mod imp {
             let _ = SetTimer(None, 1, 500, None);
         }
 
+        // D-33 被动唤醒：注册鼠标 Raw Input（message-only 窗口，INPUTSINK）。
+        // 失败则退化为仅正常轮询节奏——绝不主动保活（不向休眠设备发查询）。
+        let _raw_input = crate::rawinput::install();
+        let mut last_wake_sent = Instant::now() - Duration::from_secs(10);
+
         // 5. 消息泵：500ms 定时器驱动事件归并。
         let mut msg = MSG::default();
         unsafe {
@@ -579,6 +650,16 @@ mod imp {
                         &exe,
                         &mut ids,
                     );
+                } else if msg.message == WM_INPUT {
+                    // D-33 被动唤醒：系统层观测到罗技鼠标活动（移动/点击
+                    // 本就产生射频流量，属用户行为零额外成本）→ 通知 IO 线程
+                    // 装填一次唤醒探测资格。2s 合并防 WM_INPUT 风暴。
+                    if rawinput::is_logitech_mouse_input(msg.lparam)
+                        && last_wake_sent.elapsed() >= Duration::from_secs(2)
+                    {
+                        last_wake_sent = Instant::now();
+                        let _ = cmd_tx.send(IoCmd::WakeSignal);
+                    }
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -803,7 +884,10 @@ mod imp {
             Some(d) => (d.percent, d.gray),
             None => (None, false),
         };
-        let text = icon_text(percent, gray);
+        // D-33：休眠 = 灰显但保留最后已知电量数字。gray 只作用于颜色档；
+        // 若把文本也打成 "--"，用户会误以为「未读取」——正是本次要修的症状。
+        let sleeping = show.is_some_and(|d| d.state == "sleeping");
+        let text = icon_text(percent, gray && !sleeping);
         let color = match percent {
             Some(p) => IconColor::for_percent(p, gray, state.low_threshold),
             None => IconColor::Default,
@@ -815,6 +899,12 @@ mod imp {
             let _ = tray.set_icon(Some(ic));
         }
         let tip = match show {
+            Some(d) if d.state == "sleeping" => {
+                format!(
+                    "Logi VoltTray — {} {}（休眠中 · 最后已知电量）",
+                    d.name, text
+                )
+            }
             Some(d) => format!("Logi VoltTray — {} {}", d.name, text),
             None => "Logi VoltTray".to_string(),
         };
