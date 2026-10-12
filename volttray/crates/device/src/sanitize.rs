@@ -11,7 +11,11 @@ pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 pub const FALLBACK_DEVICE_NAME: &str = "未知设备";
 
 fn is_allowed(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '+' | '.' | '(' | ')' | '[' | ']' | '/')
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            ' ' | '-' | '_' | '+' | '.' | '(' | ')' | '[' | ']' | '/' | '·'
+        )
 }
 
 pub fn device_name(raw: &str) -> String {
@@ -64,6 +68,13 @@ mod tests {
     fn whitelist_replacement() {
         assert_eq!(device_name("Mouse<Pro>"), "Mouse?Pro?");
         assert_eq!(device_name("K860\tKeyboard"), "K860 Keyboard");
+    }
+
+    #[test]
+    fn middle_dot_separator_kept() {
+        // v0.3.0 根因回归：槽位名分隔符 U+00B7（·）曾被消毒白名单替换成「?」。
+        assert_eq!(device_name("USB Receiver · 槽位 1"), "USB Receiver · 槽位 1");
+        assert_eq!(device_name("MX ·2"), "MX ·2");
     }
 
     #[test]
