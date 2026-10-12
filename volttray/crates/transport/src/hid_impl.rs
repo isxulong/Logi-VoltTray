@@ -189,7 +189,7 @@ pub fn enumerate_channels(api: &hidapi::HidApi) -> Vec<ChannelInfo> {
             continue; // 非 HID++ 报文口（充电状态 LED 等）不碰。
         }
         let tag = path_tag(d.path());
-        let key = (d.product_id(), tag);
+        let key = (d.product_id(), tag.clone());
         let entry = grouped.entry(key).or_insert_with(|| ChannelInfo {
             pid: d.product_id(),
             tag: String::new(),
