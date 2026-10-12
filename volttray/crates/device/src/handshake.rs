@@ -26,11 +26,12 @@ pub enum Handshake {
     NoResponse,
 }
 
-/// 握手探测的电量 feature 全集（顺序即策略链顺序）。
-pub const PROBED_FEATURES: [u16; 3] = [
+/// 握手探测的 feature 全集（顺序即策略链顺序；0x0005 设备名 v0.3.0 新增）。
+pub const PROBED_FEATURES: [u16; 4] = [
     feature_ids::UNIFIED_BATTERY,
     feature_ids::BATTERY_STATUS,
     feature_ids::BATTERY_VOLTAGE,
+    feature_ids::DEVICE_NAME,
 ];
 
 /// 把 IRoot ping 阶段的设备错误帧分类为握手结论（红队差异 F5 的实证规则）。
@@ -135,12 +136,14 @@ mod tests {
             Ok(long_resp(0x01, 0x00, 0x02, 0x06)), // 0x1004 → 6
             Ok(long_resp(0x01, 0x00, 0x03, 0x00)), // 0x1000 → 不支持(0)
             Ok(long_resp(0x01, 0x00, 0x04, 0x05)), // 0x1001 → 5
+            Ok(long_resp(0x01, 0x00, 0x05, 0x03)), // 0x0005 → 3（设备名）
         ]);
         match handshake(&mut t, 0x01) {
             Handshake::Hidpp2(table) => {
                 assert_eq!(table.get(0x1004), Some(6));
                 assert_eq!(table.get(0x1000), None);
                 assert_eq!(table.get(0x1001), Some(5));
+                assert_eq!(table.get(0x0005), Some(3));
             }
             other => panic!("{other:?}"),
         }
