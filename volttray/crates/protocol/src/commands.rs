@@ -13,12 +13,16 @@ use std::collections::BTreeMap;
 pub mod feature_ids {
     pub const IROOT: u16 = 0x0000;
     pub const IFEATURESET: u16 = 0x0001;
+    /// DEVICE_NAME(0x0005)：fn0=名字总长、fn1=按偏移分片读取（蓝队设备名条目实证）。
+    pub const DEVICE_NAME: u16 = 0x0005;
     pub const BATTERY_STATUS: u16 = 0x1000;
     pub const BATTERY_VOLTAGE: u16 = 0x1001;
     pub const UNIFIED_BATTERY: u16 = 0x1004;
     /// HID++ 1.0 电量寄存器：0x0D（真实百分比）与 0x07（粗略档位）。
     pub const HIDPP1_REG_BATTERY_CHARGE: u8 = 0x0D;
     pub const HIDPP1_REG_BATTERY_STATUS: u8 = 0x07;
+    /// HID++ 1.0 接收器信息寄存器 0x2B5：配对设备名（dev 1..=6；蓝队 B4 / 参考实现实证）。
+    pub const HIDPP1_REG_RECEIVER_INFO: u16 = 0x02B5;
     /// HID++ 1.0 读子地址（参考实现实证：req = 0x8100 | reg → byte2=0x81，byte3=reg）。
     pub const HIDPP1_READ_SUB: u8 = 0x81;
 }
@@ -65,6 +69,13 @@ pub enum QueryCommand {
     ReadHidpp1Register0x0D,
     /// HID++ 1.0 设备：读电量寄存器 0x07（粗略档位，0x0D 不可用时的回退）。
     ReadHidpp1Register0x07,
+    /// DEVICE_NAME(0x0005) fn0：名字总长（字节）。
+    GetDeviceNameLength,
+    /// DEVICE_NAME(0x0005) fn1：按偏移分片读取名字（参数 p0=已读偏移）。
+    GetDeviceNameChunk { offset: u8 },
+    /// 接收器信息寄存器 0x2B5：读配对设备名（仅 device_index=0xFF；参数两变体：
+    /// Unifying (0x40+dev-1, 0) / Bolt (0x60+dev, 1)，dev=1..=6）。
+    ReadReceiverRegister0x2B5 { p0: u8, p1: u8 },
     /// HID Power Descriptor 回退：不在帧层编码，由传输层用 HID 特性报表读取。
     ReadHidPowerDescriptor,
 }
@@ -175,6 +186,28 @@ impl QueryCommand {
             QueryCommand::ReadHidpp1Register0x07 => {
                 hidpp1_read(device_index, feature_ids::HIDPP1_REG_BATTERY_STATUS)
             }
+            QueryCommand::GetDeviceNameLength => {
+                require_query(feature_ids::DEVICE_NAME)?;
+                let idx = resolve(features, feature_ids::DEVICE_NAME)?;
+                Frame::new_long(device_index, idx, 0x00, sw_id, [0; 16])
+            }
+            QueryCommand::GetDeviceNameChunk { offset } => {
+                require_query(feature_ids::DEVICE_NAME)?;
+                let idx = resolve(features, feature_ids::DEVICE_NAME)?;
+                let mut params = [0u8; 16];
+                params[0] = offset;
+                Frame::new_long(device_index, idx, 0x01, sw_id, params)
+            }
+            QueryCommand::ReadReceiverRegister0x2B5 { p0, p1 } => {
+                // 接收器寄存器走 device_index=0xFF（调用方传入值即应为 0xFF）。
+                // req = 0x8100 | 0x2B5 → byte2=0x83、byte3=0xB5（D-16 同构：
+                // byte3 低半字节 5 即 sw 回显位，故 sw 恒为 5，忽略传入 sw_id）。
+                require_query(feature_ids::HIDPP1_REG_RECEIVER_INFO)?;
+                let mut params = [0u8; 16];
+                params[0] = p0;
+                params[1] = p1;
+                Frame::new_long(0xFF, 0x83, 0x0B, 0x05, params)
+            }
             QueryCommand::ReadHidPowerDescriptor => {
                 return Err(HidppError::NotEncodable(
                     "HID power descriptor is read via HID feature report at transport layer",
@@ -264,5 +297,46 @@ mod tests {
             .encode_for(0x01, 0x01, &table())
             .expect_err("must fail");
         assert!(matches!(err, HidppError::NotEncodable(_)));
+    }
+
+    #[test]
+    fn device_name_commands_encode() {
+        // DEVICE_NAME fn0 / fn1：长帧，feature index 从表解析，fn1 参数 p0=偏移。
+        let mut t = table();
+        t.insert(feature_ids::DEVICE_NAME, 3);
+        let len = QueryCommand::GetDeviceNameLength
+            .encode_for(0x01, 0x05, &t)
+            .expect("encode");
+        assert_eq!(len[0], 0x11);
+        assert_eq!(len[1], 0x01);
+        assert_eq!(len[2], 0x03);
+        assert_eq!(len[3], 0x05); // fn0 | sw 5
+        assert_eq!(len.len(), 20);
+        let chunk = QueryCommand::GetDeviceNameChunk { offset: 7 }
+            .encode_for(0x01, 0x05, &t)
+            .expect("encode");
+        assert_eq!(chunk[3], 0x15); // fn1 | sw 5
+        assert_eq!(chunk[4], 7);
+        // 未解析 DEVICE_NAME → NotEncodable。
+        let err = QueryCommand::GetDeviceNameLength
+            .encode_for(0x01, 0x05, &table())
+            .expect_err("must fail");
+        assert!(matches!(err, HidppError::NotEncodable(_)));
+    }
+
+    #[test]
+    fn receiver_register_0x2b5_encodes() {
+        // req = 0x8100|0x2B5 → byte2=0x83、byte3=0xB5；dev=0xFF；参数 p0/p1。
+        // sw 回显位恒为 5（byte3 低半字节），与传入 sw_id 无关（D-30）。
+        let bytes = QueryCommand::ReadReceiverRegister0x2B5 { p0: 0x41, p1: 0 }
+            .encode_for(0xFF, 0x01, &FeatureTable::new())
+            .expect("encode");
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[1], 0xFF);
+        assert_eq!(bytes[2], 0x83);
+        assert_eq!(bytes[3], 0xB5);
+        assert_eq!(bytes[4], 0x41);
+        assert_eq!(bytes[5], 0x00);
+        assert_eq!(bytes.len(), 20);
     }
 }
