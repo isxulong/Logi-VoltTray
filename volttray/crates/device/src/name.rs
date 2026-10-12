@@ -175,10 +175,11 @@ mod tests {
         fn emit(&mut self, _e: DiagEvent) {}
     }
 
-    fn stub(
-        reads: Vec<Result<Vec<u8>, IoError>>,
-    ) -> (Transport<Stub, Sink>, Rc<RefCell<Vec<Vec<u8>>>>) {
-        let writes = Rc::new(RefCell::new(Vec::new()));
+    type Writes = Rc<RefCell<Vec<Vec<u8>>>>;
+    type StubTransport = Transport<Stub, Sink>;
+
+    fn stub(reads: Vec<Result<Vec<u8>, IoError>>) -> (StubTransport, Writes) {
+        let writes: Writes = Rc::new(RefCell::new(Vec::new()));
         let t = Transport::new(
             Stub {
                 reads: reads.into(),
@@ -202,8 +203,8 @@ mod tests {
         let (mut t, _writes) = stub(vec![
             Ok(vec![0x10, 0x01, 0x03, 0x01, 0x0B, 0x00, 0x00]),
             Ok(vec![
-                0x11, 0x01, 0x03, 0x12, b'M', b'X', b' ', b'M', b'a', b's', b't', b'e', b'r', b' ',
-                b'3', 0, 0, 0, 0, 0,
+                0x11, 0x01, 0x03, 0x12, b'M', b'X', b' ', b'M', b'a', b's', b't', b'e', b'r',
+                b' ', b'3', 0, 0, 0, 0, 0,
             ]),
         ]);
         let name = read_device_name(&mut t, 0x01, &feature_table(), false);
@@ -238,10 +239,7 @@ mod tests {
             Err(IoError::Timeout),
             Err(IoError::Timeout),
         ]);
-        assert_eq!(
-            read_device_name(&mut t, 0x01, &feature_table(), false),
-            None
-        );
+        assert_eq!(read_device_name(&mut t, 0x01, &feature_table(), false), None);
         // 未解析 DEVICE_NAME（空表）→ 直接走 0x2B5 回退。
         let (mut t2, _w2) = stub(vec![Err(IoError::Timeout), Err(IoError::Timeout)]);
         assert_eq!(
@@ -254,8 +252,8 @@ mod tests {
     fn receiver_register_0x2b5_name() {
         // 黄金样例回放：dev2 Unifying 变体 p0=0x41 → "MX Keys"。
         let (mut t, writes) = stub(vec![Ok(vec![
-            0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'K', b'e', b'y', b's', 0, 0, 0, 0, 0, 0, 0,
-            0, 0,
+            0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'K', b'e', b'y', b's', 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
         ])]);
         assert_eq!(
             read_device_name(&mut t, 0x02, &FeatureTable::new(), true).as_deref(),
@@ -272,8 +270,8 @@ mod tests {
         let (mut t, writes) = stub(vec![
             Err(IoError::Timeout),
             Ok(vec![
-                0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'E', b'r', b'g', b'o', 0, 0, 0, 0, 0, 0,
-                0, 0, 0,
+                0x11, 0xFF, 0x83, 0xB5, b'M', b'X', b' ', b'E', b'r', b'g', b'o', 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
             ]),
         ]);
         assert_eq!(
@@ -283,10 +281,7 @@ mod tests {
         assert_eq!(&writes.borrow()[1][4..6], &[0x62, 0x01]);
         // dev=7 超出配对范围 → 不发任何请求。
         let (mut t2, w2) = stub(vec![]);
-        assert_eq!(
-            read_device_name(&mut t2, 0x07, &FeatureTable::new(), true),
-            None
-        );
+        assert_eq!(read_device_name(&mut t2, 0x07, &FeatureTable::new(), true), None);
         assert!(w2.borrow().is_empty());
     }
 
@@ -296,10 +291,7 @@ mod tests {
         let (mut t, _writes) = stub(vec![Ok(vec![
             0x11, 0xFF, 0x83, 0xB5, b' ', b'?', b'!', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ])]);
-        assert_eq!(
-            read_device_name(&mut t, 0x02, &FeatureTable::new(), true),
-            None
-        );
+        assert_eq!(read_device_name(&mut t, 0x02, &FeatureTable::new(), true), None);
     }
 
     #[test]
