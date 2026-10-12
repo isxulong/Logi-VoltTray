@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+# fmt 自动回推需要写权限（github-actions[bot] 提交格式化结果）
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,7 +30,23 @@ jobs:
         with:
           workspaces: volttray
 
-      - name: fmt
+      # 自动格式化并回推：cargo fmt 修平差异后提交回 main（HEAD:main 推送避免 detached HEAD 问题），
+      # 无差异则跳过；随后 fmt --check 作为最终守卫
+      - name: fmt (auto-fix)
+        shell: bash
+        run: |
+          cargo fmt --all
+          if git diff --quiet; then
+            echo "fmt clean, nothing to push"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "style: apply cargo fmt (CI auto-fix)"
+            git push origin HEAD:main
+          fi
+
+      - name: fmt --check
         run: cargo fmt --all -- --check
 
       # 可复现构建（评审 P0-2）：Cargo.lock 已入库，clippy/test/build 一律 --locked
