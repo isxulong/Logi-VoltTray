@@ -616,8 +616,10 @@ mod tests {
     fn record_success_clears_stale_state() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let now = Instant::now();
-        core.upsert_device(dev("a", 1));
         // Connected → 成功 → Online
+        let mut d = dev("a", 1);
+        d.set_state(DeviceState::Connected);
+        core.upsert_device(d);
         assert_eq!(core.entries()[0].device.state, DeviceState::Connected);
         core.record_success("a", reading(50, false), now);
         assert_eq!(core.entries()[0].device.state, DeviceState::Online);
