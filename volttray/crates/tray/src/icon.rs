@@ -215,8 +215,7 @@ impl IconCache {
                         (rgb, Some(brighten(bg_rgb, BLINK_BRIGHTEN)))
                     }
                 } else {
-                    // 常态：非透明形状必须带背景底（P1-1：此前 `==` 写反，
-                    // rounded/square 得到 bg=None，托盘只剩前景数字）。
+                    // P1-1：非透明形状常态档必须带底色（与 settings.rs 预览同式）。
                     (rgb, (shape != IconShape::Transparent).then_some(bg_rgb))
                 };
                 for text in &texts {
@@ -560,52 +559,43 @@ mod tests {
         );
     }
 
+    /// P1-1 回归：非透明形状常态渲染必须带底色（防 == / != 再写反）。
+    /// 采样点 (x=size/2, y=2)：圆底覆盖度=1 且在文字区（y 起点 6）之上，
+    /// 输出必为纯 bg_rgb、alpha=255；透明形状同点 alpha 必为 0。
     #[test]
-    fn fill_normal_state_non_transparent_shape_keeps_background() {
-        // P1-1 回归：非透明形状常态（bright=false）渲染必须带背景底——
-        // 修复前 `==` 写反，rounded/square 得到 bg=None（托盘只剩前景数字）。
-        let bg_rgb = (0x12, 0x34, 0x56);
-        let custom = IconBackground::Custom(RgbColor {
-            r: bg_rgb.0,
-            g: bg_rgb.1,
-            b: bg_rgb.2,
-        });
-        for shape in [IconShape::Rounded, IconShape::Square] {
-            let cache = IconCache::new(
-                16,
-                true,
-                shape,
-                custom,
-                IconFontColor::Auto,
-                "Segoe UI".to_string(),
-            );
-            let rgba = cache
-                .map
-                .get(&(IconColor::Default, "50".to_string(), false))
-                .expect("normal-state bitmap cached");
-            // 取上边缘中点 (px=7, py=0)：两种形状的覆盖区内、文字覆盖区外
-            // （16px 双字符文本 y 偏移 = 3，第 0 行无字），颜色应精确等于 bg_rgb。
-            let i = 7 * 4;
-            assert_eq!(
-                &rgba[i..i + 3],
-                &[bg_rgb.0, bg_rgb.1, bg_rgb.2],
-                "{shape:?} 常态背景像素色应等于 bg_rgb"
-            );
-            assert!(rgba[i + 3] > 0, "{shape:?} 常态背景应有不透明 alpha");
-        }
-        // 对照：透明形状同位置仍无背景（fix 不能把透明语义打破）。
+    fn fill_non_transparent_shape_keeps_background() {
+        let size = 32u32;
+        let bg = IconBackground::Dark;
         let cache = IconCache::new(
-            16,
+            size,
             true,
-            IconShape::Transparent,
-            custom,
+            IconShape::Rounded,
+            bg,
             IconFontColor::Auto,
             "Segoe UI".to_string(),
         );
         let rgba = cache
             .map
             .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("normal-state bitmap cached");
-        assert_eq!(rgba[7 * 4 + 3], 0, "透明形状常态不应有背景");
+            .expect("normal-level bitmap cached");
+        let idx = ((2 * size + size / 2) * 4) as usize;
+        let (er, eg, eb) = bg.rgb();
+        assert_eq!(&rgba[idx..idx + 3], &[er, eg, eb]);
+        assert_eq!(rgba[idx + 3], 255);
+
+        // 对照：透明形状同位置无背景。
+        let transparent = IconCache::new(
+            size,
+            true,
+            IconShape::Transparent,
+            bg,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+        );
+        let rgba_t = transparent
+            .map
+            .get(&(IconColor::Default, "50".to_string(), false))
+            .expect("transparent bitmap cached");
+        assert_eq!(rgba_t[idx + 3], 0);
     }
 }

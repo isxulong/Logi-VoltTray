@@ -1163,9 +1163,10 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         IDC_RESET_ALL if clicked => {
             *cfg = Config::default();
-            // P2-3：reset-all 连同注册表自启项一起回到默认（此前只重置 TOML，
-            // 注册表与配置分叉）。注册表失败不阻断其余重置（尽力而为）。
-            let _ = autostart::sync(cfg.autostart);
+            // P2-3：注册表自启态与默认值对齐，避免 TOML 与 HKCU Run 键分叉。
+            let exe =
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("volttray-tray.exe"));
+            let _ = autostart::sync(cfg.autostart, &exe);
             touched = true;
             resync = true;
         }

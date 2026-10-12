@@ -447,23 +447,18 @@ mod imp {
                     c.swap_config(cfg);
                 }
                 if let Ok(mut o) = observer.lock() {
-                    // P2-1：钳制/迁移警告不再静默丢弃——有警告走 ConfigReloaded
-                    //（警告级事件），无警告保持原 Info 级。
-                    if warnings.is_empty() {
-                        o.push(DiagEvent::new(
-                            Layer::App,
-                            DiagKind::Info {
-                                message: "config reloaded".into(),
-                            },
-                        ));
+                    // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
+                    // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
+                    let kind = if warnings.is_empty() {
+                        DiagKind::Info {
+                            message: "config reloaded".into(),
+                        }
                     } else {
-                        o.push(DiagEvent::new(
-                            Layer::App,
-                            DiagKind::ConfigReloaded {
-                                warnings: warnings.iter().map(|w| w.to_string()).collect(),
-                            },
-                        ));
-                    }
+                        DiagKind::ConfigReloaded {
+                            warnings: warnings.iter().map(|w| w.to_string()).collect(),
+                        }
+                    };
+                    o.push(DiagEvent::new(Layer::App, kind));
                 }
             }
 
@@ -576,16 +571,14 @@ mod imp {
 
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
-        // P2-1：启动加载的钳制/迁移警告同样进诊断流（与热重载同口径）。
-        if !load_warnings.is_empty() {
-            if let Ok(mut o) = observer.lock() {
-                o.push(DiagEvent::new(
-                    Layer::App,
-                    DiagKind::ConfigReloaded {
-                        warnings: load_warnings.iter().map(|w| w.to_string()).collect(),
-                    },
-                ));
-            }
+        // P2-1：启动加载的钳制/未知键警告进入诊断流（M9 AC3）。
+        if let Ok(mut o) = observer.lock() {
+            o.push(DiagEvent::new(
+                Layer::App,
+                DiagKind::ConfigReloaded {
+                    warnings: load_warnings.iter().map(|w| w.to_string()).collect(),
+                },
+            ));
         }
         // 共享配置同时喂 AppCore 与设置窗口（GUI ↔ TOML 双向一致，M9/M10）。
         let core = Arc::new(Mutex::new(AppCore::new(config_arc.clone())));
@@ -722,9 +715,7 @@ mod imp {
 
         // 共享配置对账（GUI ↔ TOML 双向一致）：设置窗口直接写共享配置、外部
         // TOML 改动经热重载 swap_config——任何一侧变化都落到 GUI 镜像。
-        // P2-3：镜像补齐 autostart / notification_silent 两键；autostart 目标态
-        // 取出后在锁外同步注册表（注册表副作用不进锁内）。
-        let (cfg_changed, autostart_target) = match core.lock() {
+        let cfg_changed = match core.lock() {
             Ok(c) => {
                 let cfg = c.config();
                 let changed = cfg.icon_shape != state.icon_shape
@@ -734,10 +725,8 @@ mod imp {
                     || cfg.poll_interval_secs != state.poll_secs
                     || cfg.blink_enabled != state.blink_enabled
                     || cfg.low_threshold != state.low_threshold
-                    || cfg.autostart != state.autostart_on
-                    || cfg.notification_silent != state.silent;
-                let autostart_target =
-                    (cfg.autostart != state.autostart_on).then_some(cfg.autostart);
+                    || cfg.notification_silent != state.silent
+                    || cfg.autostart != state.autostart_on;
                 if changed {
                     state.icon_shape = cfg.icon_shape;
                     state.icon_bg = cfg.icon_background;
@@ -747,38 +736,23 @@ mod imp {
                     state.blink_enabled = cfg.blink_enabled;
                     state.low_threshold = cfg.low_threshold;
                     state.silent = cfg.notification_silent;
+                    // P2-3：自启键纳入镜像（M13 AC1）——TOML/设置侧改动同步注册表；
+                    // 注册表写失败时保留旧镜像值，下个 tick 重试。
+                    if cfg.autostart != state.autostart_on {
+                        let ok = if cfg.autostart {
+                            autostart::enable(exe).is_ok()
+                        } else {
+                            autostart::disable().is_ok()
+                        };
+                        if ok {
+                            state.autostart_on = cfg.autostart;
+                        }
+                    }
                 }
-                (changed, autostart_target)
+                changed
             }
-            Err(_) => (false, None),
+            Err(_) => false,
         };
-        // autostart 配置侧变化（TOML 热重载 / 设置窗口写入）→ 同步注册表与菜单勾选态。
-        if let Some(on) = autostart_target {
-            let applied = if on {
-                autostart::enable(exe).is_ok()
-            } else {
-                autostart::disable().is_ok()
-            };
-            if applied {
-                state.autostart_on = on;
-            } else {
-                // 注册表写入失败：共享配置回写真实勾选态（与菜单开关失败处理同口径），
-                // 避免镜像与注册表持续分叉、每 tick 重试。
-                if let Ok(mut guard) = cfg_arc.write() {
-                    guard.autostart = state.autostart_on;
-                }
-                persist_bool(cfg_path, "autostart", state.autostart_on);
-                if let Ok(mut o) = observer.lock() {
-                    o.push(DiagEvent::new(
-                        Layer::Tray,
-                        DiagKind::Alert {
-                            level: "warn".into(),
-                            message: format!("autostart sync to {on} failed; config reverted"),
-                        },
-                    ));
-                }
-            }
-        }
         if cfg_changed {
             snap_changed = true;
         }
