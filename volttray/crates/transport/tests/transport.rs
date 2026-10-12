@@ -158,7 +158,8 @@ fn missing_report_id_is_normalized() {
 #[test]
 fn device_error_frame_propagates_as_protocol_error() {
     let mut ch = StubChannel::new();
-    ch.push_read(Ok(vec![0x10, 0x01, 0xFF, 0x07, 0x06, 0x06, 0x00])); // ERR_INVALID_FEATURE_INDEX
+    // v0.2.0 错误帧布局：byte3=feat 回显(0x06) byte4=fn|sw(0x07) byte5=code(0x06)
+    ch.push_read(Ok(vec![0x10, 0x01, 0xFF, 0x06, 0x07, 0x06, 0x00])); // ERR_INVALID_FEATURE_INDEX
     let mut t = Transport::new(ch, VecSink::default());
     let err = t.request(&req_frame(), None).expect_err("must fail");
     match err {
