@@ -59,7 +59,7 @@ fn table() -> FeatureTable {
 fn mapping_functions() {
     assert_eq!(map_unified_battery(&[0x50, 0x00, 0x01]), Some((80, true)));
     assert_eq!(map_unified_battery(&[0x2D, 0x00, 0x00]), Some((45, false)));
-    assert_eq!(map_unified_battery(&[0x65, 0x00, 0x00]), None); // >100 拒绝
+    assert_eq!(map_unified_battery(&[0x65, 0x00, 0x00]), Some((100, false))); // >100 钳制到 100（v0.2.0）
     assert_eq!(map_battery_status(&[0x5A, 0x80]), Some((90, true)));
     assert_eq!(map_battery_status(&[0x0A, 0x00]), Some((10, false)));
     assert_eq!(
