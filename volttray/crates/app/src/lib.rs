@@ -17,6 +17,9 @@ pub use config::{
     IconFontColor, IconShape, IconStyle, RgbColor, CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD,
     DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS,
 };
-pub use core::{guarded, AppCore, DeviceSnapshot, Snapshot, GRAY_AFTER, POLL_CHARGING};
+pub use core::{
+    guarded, AppCore, DeviceSnapshot, PollDecision, Snapshot, TimeoutOutcome, GRAY_AFTER,
+    POLL_CHARGING, SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN,
+};
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
