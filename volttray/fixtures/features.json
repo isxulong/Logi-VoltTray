@@ -5,6 +5,7 @@
     { "id": 1, "name": "IFeatureSet", "kind": "query", "sensitive_params": [] },
     { "id": 5, "name": "DeviceName", "kind": "query", "sensitive_params": [] },
     { "id": 7, "name": "DeviceSerialInfo", "kind": "query", "sensitive_params": [0, 1, 2, 3] },
+    { "id": 693, "name": "HIDPP1_REG_RECEIVER_INFO", "kind": "query", "sensitive_params": [] },
     { "id": 4096, "name": "BATTERY_STATUS", "kind": "query", "sensitive_params": [] },
     { "id": 4097, "name": "BATTERY_VOLTAGE", "kind": "query", "sensitive_params": [] },
     { "id": 4100, "name": "UNIFIED_BATTERY", "kind": "query", "sensitive_params": [] },
