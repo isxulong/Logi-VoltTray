@@ -1,6 +1,10 @@
 name: build-logi-volttray
 on:
   push:
+    paths:
+      # 仅参考 Python 实现变更时才跑（v0.3.0 P3-3：主工程走 rust CI，此构建不再全量触发）
+      - "logi_*.py"
+      - ".github/workflows/build-logi.yml"
   workflow_dispatch:
 
 jobs:
