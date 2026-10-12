@@ -68,7 +68,8 @@ fn error_codes_roundtrip() {
 
 #[test]
 fn long_frame_error_variant() {
-    let mut bytes = vec![0x11, 0x09, 0xFF, 0x21, 0x04, 0x08];
+    // v0.2.0 错误帧布局：byte3=feat 回显(0x04) byte4=fn|sw(0x21) byte5=code(0x08 Busy)。
+    let mut bytes = vec![0x11, 0x09, 0xFF, 0x04, 0x21, 0x08];
     bytes.extend_from_slice(&[0u8; 14]);
     let err = Frame::decode(&bytes).expect_err("device error");
     match err {
