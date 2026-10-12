@@ -3,7 +3,7 @@
 //! 与传输层解耦：本模块只维护状态与纯逻辑决策，全部桩上可测。
 
 use crate::config::Config;
-use crate::debounce::{Alert, ThresholdDebouncer};
+use crate::debounce::{Alert, LowBatteryTracker};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ pub struct Snapshot {
 pub struct AppCore {
     config: Arc<RwLock<Config>>,
     entries: Vec<DeviceEntry>,
-    debouncers: HashMap<String, ThresholdDebouncer>,
+    lowbats: HashMap<String, LowBatteryTracker>,
     snap_seq: u64,
 }
 
@@ -77,7 +77,7 @@ impl AppCore {
         AppCore {
             config,
             entries: Vec::new(),
-            debouncers: HashMap::new(),
+            lowbats: HashMap::new(),
             snap_seq: 0,
         }
     }
@@ -108,14 +108,14 @@ impl AppCore {
 
     pub fn remove_device(&mut self, id: &str) {
         self.entries.retain(|e| e.device.id != id);
-        self.debouncers.remove(id);
+        self.lowbats.remove(id);
     }
 
     pub fn entries(&self) -> &[DeviceEntry] {
         &self.entries
     }
 
-    /// 记录一次成功电量读取；返回阈值去抖后应发的告警（若有）。
+    /// 记录一次成功电量读取；返回去抖后应发的低电告警（若有）。
     pub fn record_success(
         &mut self,
         id: &str,
@@ -127,10 +127,20 @@ impl AppCore {
         entry.gray_alerted = false;
         entry.device.battery = Some(reading);
         let cfg = self.config();
-        let deb = self.debouncers.entry(id.to_string()).or_insert_with(|| {
-            ThresholdDebouncer::new(cfg.low_threshold_warn, cfg.low_threshold_critical)
-        });
-        deb.update(reading.percent, reading.charging)
+        let tracker = self
+            .lowbats
+            .entry(id.to_string())
+            .or_insert_with(|| LowBatteryTracker::new(cfg.low_threshold));
+        // 阈值热更新（设置窗口 / TOML 改动均经共享配置生效）。
+        tracker.set_threshold(cfg.low_threshold);
+        tracker.update(reading.percent, reading.charging)
+    }
+
+    /// 指定设备当前是否处于低电触发状态（M11 托盘闪烁判定用）。
+    pub fn is_low_battery(&self, id: &str) -> bool {
+        self.lowbats
+            .get(id)
+            .is_some_and(|t| t.is_active())
     }
 
     /// 记录一次失败（gone=true 表示设备消失）。
@@ -315,8 +325,40 @@ mod tests {
         assert_eq!(core.record_success("a", reading(19, false), now), None);
         assert_eq!(
             core.record_success("a", reading(18, false), now),
-            Some(Alert::Warn(18))
+            Some(Alert::LowBattery(18))
         );
+        assert!(core.is_low_battery("a"));
+    }
+
+    #[test]
+    fn low_threshold_hot_update_via_shared_config() {
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let mut core = AppCore::new(cfg.clone());
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(30, false), now);
+        core.record_success("a", reading(30, false), now);
+        assert!(!core.is_low_battery("a")); // 30 > 默认阈值 20
+        let mut next = Config::default();
+        next.low_threshold = 35;
+        core.swap_config(next);
+        assert_eq!(
+            core.record_success("a", reading(30, false), now),
+            Some(Alert::LowBattery(30))
+        );
+        assert!(core.is_low_battery("a"));
+    }
+
+    #[test]
+    fn charging_stops_low_battery_state() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(10, false), now);
+        core.record_success("a", reading(10, false), now);
+        assert!(core.is_low_battery("a"));
+        core.record_success("a", reading(10, true), now);
+        assert!(!core.is_low_battery("a"));
     }
 
     #[test]
