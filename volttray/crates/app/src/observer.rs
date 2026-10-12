@@ -112,6 +112,7 @@ pub fn mask_event(event: &mut DiagEvent) {
         | DiagKind::DeviceLost { .. }
         | DiagKind::StateChange { .. }
         | DiagKind::BatteryUpdate { .. }
+        | DiagKind::BatteryUnknown { .. }
         | DiagKind::ConfigReloaded { .. }
         | DiagKind::Alert { .. }
         | DiagKind::Info { .. } => {}
