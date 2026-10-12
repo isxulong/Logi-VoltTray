@@ -8,13 +8,38 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use volttray_device::battery::BatteryReading;
-use volttray_device::state::DeviceState;
+use volttray_device::state::{mark_online, DeviceState};
 use volttray_device::Device;
 
 /// 灰显派生窗口（PRD M2：90s 无成功响应）。
 pub const GRAY_AFTER: Duration = Duration::from_secs(90);
 /// 充电时的轮询间隔（蓝图：15s）。
 pub const POLL_CHARGING: Duration = Duration::from_secs(15);
+/// 连续多少次查询超时判定设备进入休眠（D-33：超时 = 疑似休眠，
+/// 暂停主动轮询而不是累计失败注销——对休眠中的鼠标发查询才是真费电）。
+pub const SLEEP_AFTER_TIMEOUTS: u32 = 2;
+/// 唤醒探测冷却：一次唤醒信号至多触发一次探测；探测失败后须等待
+/// 新的唤醒信号、且距上次探测 ≥ 该间隔，避免唤醒信号风暴变成高频查询。
+pub const WAKE_PROBE_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// 轮询决策（D-33「休眠期零主动查询」的唯一裁决点：
+/// Skip = 本轮绝不向该设备发出任何 HID++ 查询）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollDecision {
+    Probe,
+    Skip,
+}
+
+/// `record_timeout` 的结果（IO 线程据此发 StateChange 诊断事件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutOutcome {
+    /// 仍在线，已连续 N 次超时（未达休眠阈值）。
+    Counting(u32),
+    /// 本次超时使设备进入休眠（Online → Sleeping）。
+    EnteredSleep,
+    /// 已处于休眠（唤醒探测再次超时，保持休眠、不计失败）。
+    AlreadySleeping,
+}
 
 /// 单台设备的运行时台账。
 #[derive(Debug, Clone)]
@@ -22,6 +47,12 @@ pub struct DeviceEntry {
     pub device: Device,
     pub last_success: Option<Instant>,
     gray_alerted: bool,
+    /// 连续查询超时次数（成功即清零；D-33）。
+    timeout_streak: u32,
+    /// 收到唤醒信号、等待一次唤醒探测（D-33 被动唤醒）。
+    wake_armed: bool,
+    /// 最近一次唤醒探测的时刻（冷却窗口判定）。
+    last_wake_probe: Option<Instant>,
 }
 
 impl DeviceEntry {
@@ -30,6 +61,9 @@ impl DeviceEntry {
             device,
             last_success: None,
             gray_alerted: false,
+            timeout_streak: 0,
+            wake_armed: false,
+            last_wake_probe: None,
         }
     }
 
@@ -39,6 +73,12 @@ impl DeviceEntry {
             Some(t) => now.duration_since(t) >= GRAY_AFTER,
             None => false,
         }
+    }
+
+    /// 展示用灰显（D-33）：90s 派生灰，或休眠中——休眠显示最后一次
+    /// 已知电量并灰显，不显示成「未读取 / 未知」。
+    pub fn display_gray(&self, now: Instant) -> bool {
+        self.device.state == DeviceState::Sleeping || self.is_gray(now)
     }
 }
 
@@ -116,6 +156,10 @@ impl AppCore {
     }
 
     /// 记录一次成功电量读取；返回去抖后应发的低电告警（若有）。
+    ///
+    /// D-33：成功即恢复——超时连击清零、唤醒臂解除，状态经 `mark_online`
+    /// 迁回 Online（覆盖 Sleeping 唤醒恢复、以及重新注册时台账里残留的
+    /// Disconnected / Connected 旧态——v0.3.0 的 upsert 会保留旧 state）。
     pub fn record_success(
         &mut self,
         id: &str,
@@ -125,6 +169,10 @@ impl AppCore {
         let entry = self.entries.iter_mut().find(|e| e.device.id == id)?;
         entry.last_success = Some(now);
         entry.gray_alerted = false;
+        entry.timeout_streak = 0;
+        entry.wake_armed = false;
+        entry.last_wake_probe = None;
+        entry.device.state = mark_online(entry.device.state);
         entry.device.battery = Some(reading);
         let cfg = self.config();
         let tracker = self
@@ -141,10 +189,83 @@ impl AppCore {
         self.lowbats.get(id).is_some_and(|t| t.is_active())
     }
 
+    /// 记录一次查询超时（D-33）：连续 `SLEEP_AFTER_TIMEOUTS` 次超时 →
+    /// Online → Sleeping，此后 `poll_decision` 一律 Skip（零主动查询），
+    /// 直到被动唤醒信号到达。休眠中的再次超时（唤醒探测失败）保持休眠。
+    pub fn record_timeout(&mut self, id: &str) -> TimeoutOutcome {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) else {
+            return TimeoutOutcome::Counting(0);
+        };
+        entry.timeout_streak = entry.timeout_streak.saturating_add(1);
+        match entry.device.state {
+            DeviceState::Sleeping => TimeoutOutcome::AlreadySleeping,
+            DeviceState::Online if entry.timeout_streak >= SLEEP_AFTER_TIMEOUTS => {
+                entry.device.set_state(DeviceState::Sleeping);
+                entry.wake_armed = false;
+                entry.last_wake_probe = None;
+                TimeoutOutcome::EnteredSleep
+            }
+            // Connected / Disconnected 下只计数、不改态
+            //（Disconnected 由 gone 路径管理，GrayedOut 不落库）。
+            _ => TimeoutOutcome::Counting(entry.timeout_streak),
+        }
+    }
+
+    /// 被动唤醒信号（D-33）：系统层观测到鼠标活动（Raw Input）→ 给休眠
+    /// 设备装填一次唤醒探测资格。在线设备忽略（正常轮询节奏不变）。
+    pub fn note_wake_signal(&mut self, id: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
+            if entry.device.state == DeviceState::Sleeping {
+                entry.wake_armed = true;
+            }
+        }
+    }
+
+    /// 当前处于休眠的设备 id 列表（IO 线程收到唤醒信号后批量装填用）。
+    pub fn sleeping_ids(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|e| e.device.state == DeviceState::Sleeping)
+            .map(|e| e.device.id.clone())
+            .collect()
+    }
+
+    /// 一次唤醒探测开始（D-33）：消耗唤醒资格并进入冷却——本次探测
+    /// 无论成败，都要等下一个唤醒信号 + 冷却窗口过后才会再探测。
+    pub fn begin_wake_probe(&mut self, id: &str, now: Instant) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
+            entry.wake_armed = false;
+            entry.last_wake_probe = Some(now);
+        }
+    }
+
+    /// 本轮是否向该设备发查询（D-33 零主动查询裁决点）：
+    /// 非休眠一律 Probe；休眠设备仅当「唤醒资格已装填且已过冷却」才 Probe
+    /// 一次，其余一律 Skip——休眠期间绝不发出主动查询。
+    pub fn poll_decision(&self, id: &str, now: Instant) -> PollDecision {
+        let Some(entry) = self.entries.iter().find(|e| e.device.id == id) else {
+            return PollDecision::Probe;
+        };
+        if entry.device.state != DeviceState::Sleeping {
+            return PollDecision::Probe;
+        }
+        let cooled = entry
+            .last_wake_probe
+            .is_none_or(|t| now.duration_since(t) >= WAKE_PROBE_COOLDOWN);
+        if entry.wake_armed && cooled {
+            PollDecision::Probe
+        } else {
+            PollDecision::Skip
+        }
+    }
+
     /// 记录一次失败（gone=true 表示设备消失）。
     pub fn record_failure(&mut self, id: &str, gone: bool) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
             if gone && entry.device.state != DeviceState::Disconnected {
+                entry.timeout_streak = 0;
+                entry.wake_armed = false;
+                entry.last_wake_probe = None;
                 let to = DeviceState::Disconnected;
                 entry.device.set_state(to);
             }
@@ -166,7 +287,10 @@ impl AppCore {
     /// 默认展示设备（决策 D-08，蓝图缺口的就地裁决）：
     /// 在「有电量、未充电、未灰显」的设备中取电量最低者；无候选则
     /// 放宽到「有电量、未灰显」取最低；仍无 → None（图标显示 "?"）。
+    /// D-33：休眠设备保留展示资格（显示最后一次已知电量、灰显），
+    /// 不被 90s 派生灰显排除——否则唯一设备休眠后图标又回退「?」。
     pub fn default_display_index(&self, now: Instant) -> Option<usize> {
+        let eligible = |e: &DeviceEntry| e.device.state == DeviceState::Sleeping || !e.is_gray(now);
         let pick_min = |pred: &dyn Fn(&DeviceEntry) -> bool| -> Option<usize> {
             self.entries
                 .iter()
@@ -179,9 +303,9 @@ impl AppCore {
         pick_min(&|e| {
             e.device.battery.is_some()
                 && !e.device.battery.is_some_and(|b| b.charging)
-                && !e.is_gray(now)
+                && eligible(e)
         })
-        .or_else(|| pick_min(&|e| e.device.battery.is_some() && !e.is_gray(now)))
+        .or_else(|| pick_min(&|e| e.device.battery.is_some() && eligible(e)))
     }
 
     /// 下一次轮询间隔：充电中 15s，否则按配置。
@@ -213,7 +337,7 @@ impl AppCore {
                     charging: e.device.battery.is_some_and(|b| b.charging),
                     link: e.device.link.name().to_string(),
                     state: e.device.state.name().to_string(),
-                    gray: e.is_gray(now),
+                    gray: e.display_gray(now),
                     source: e.device.battery.map(|b| b.source.name().to_string()),
                 })
                 .collect(),
@@ -369,5 +493,161 @@ mod tests {
         assert!(r.is_err());
         let ok = guarded("fine", || {});
         assert!(ok.is_ok());
+    }
+
+    // —— D-33 休眠/唤醒状态机（被动、零额外耗电）——
+
+    fn sleeping_core(id: &str) -> (AppCore, Instant) {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev(id, 1));
+        core.record_success(id, reading(66, false), now);
+        // 连续 SLEEP_AFTER_TIMEOUTS 次查询超时 → 进入休眠。
+        assert_eq!(core.record_timeout(id), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout(id), TimeoutOutcome::EnteredSleep);
+        (core, now)
+    }
+
+    /// 连续查询超时 → Online → Sleeping；再次超时保持休眠（不 panic）。
+    #[test]
+    fn consecutive_timeouts_enter_sleep() {
+        let (mut core, _now) = sleeping_core("a");
+        let e = &core.entries()[0];
+        assert_eq!(e.device.state, DeviceState::Sleeping);
+        assert_eq!(core.record_timeout("a"), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
+    }
+
+    /// 核心断言：休眠期间零主动查询——任意多个轮询 tick 全部 Skip。
+    #[test]
+    fn zero_queries_while_sleeping() {
+        let (core, now) = sleeping_core("a");
+        for tick in 0u64..100 {
+            let t = now + Duration::from_secs(60 * tick);
+            assert_eq!(
+                core.poll_decision("a", t),
+                PollDecision::Skip,
+                "tick {tick}: 休眠中不得发出主动查询"
+            );
+        }
+    }
+
+    /// 唤醒信号 → 装填一次探测资格；探测开始即消耗并进入冷却；
+    /// 冷却过后没有新信号仍然 Skip（不得自行恢复主动轮询）。
+    #[test]
+    fn wake_signal_arms_exactly_one_probe() {
+        let (mut core, now) = sleeping_core("a");
+        // 无信号：Skip。
+        assert_eq!(core.poll_decision("a", now), PollDecision::Skip);
+        // 被动事件（系统观测到鼠标活动）→ 一次探测资格。
+        core.note_wake_signal("a");
+        assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
+        // 探测开始：资格消耗 + 冷却开始。
+        core.begin_wake_probe("a", now);
+        assert_eq!(core.poll_decision("a", now), PollDecision::Skip);
+        // 冷却窗口内即使再来信号也不立即探测（防信号风暴 = 变相高频查询）。
+        core.note_wake_signal("a");
+        let within = now + WAKE_PROBE_COOLDOWN - Duration::from_secs(1);
+        assert_eq!(core.poll_decision("a", within), PollDecision::Skip);
+        // 冷却过后、且持有新信号资格 → 再探测一次。
+        let after = now + WAKE_PROBE_COOLDOWN;
+        assert_eq!(core.poll_decision("a", after), PollDecision::Probe);
+        // 若没有新信号，冷却过后依然 Skip。
+        core.begin_wake_probe("a", after);
+        let later = after + WAKE_PROBE_COOLDOWN + Duration::from_secs(3600);
+        assert_eq!(core.poll_decision("a", later), PollDecision::Skip);
+    }
+
+    /// 休眠 → 唤醒探测成功 → Online，恢复正常轮询节奏。
+    #[test]
+    fn wake_probe_success_restores_online() {
+        let (mut core, now) = sleeping_core("a");
+        core.note_wake_signal("a");
+        assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
+        core.begin_wake_probe("a", now);
+        core.record_success("a", reading(70, false), now);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Online);
+        assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
+        assert_eq!(core.sleeping_ids(), Vec::<String>::new());
+    }
+
+    /// 休眠 → 唤醒探测超时 → 保持休眠，等待下一次唤醒信号（不注销、
+    /// 不自行重试——对休眠鼠标发查询才是真费电）。
+    #[test]
+    fn wake_probe_timeout_stays_sleeping() {
+        let (mut core, now) = sleeping_core("a");
+        core.note_wake_signal("a");
+        core.begin_wake_probe("a", now);
+        assert_eq!(core.record_timeout("a"), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
+        let later = now + Duration::from_secs(3600);
+        assert_eq!(core.poll_decision("a", later), PollDecision::Skip);
+    }
+
+    /// 休眠展示：最后一次已知电量 + 灰显 + state=sleeping，
+    /// 不显示成「未读取/未知」；默认展示设备资格保留（唯一设备休眠
+    /// 时图标仍显示最后已知值，不回退「?」）。
+    #[test]
+    fn sleeping_shows_last_known_percent_grayed() {
+        let (mut core, now) = sleeping_core("a");
+        let much_later = now + GRAY_AFTER + Duration::from_secs(600);
+        let snap = core.snapshot(much_later);
+        assert_eq!(snap.devices[0].percent, Some(66));
+        assert_eq!(snap.devices[0].state, "sleeping");
+        assert!(snap.devices[0].gray, "休眠应灰显");
+        assert_eq!(
+            snap.default_device,
+            Some(0),
+            "休眠设备保留展示资格（显示最后已知电量）"
+        );
+    }
+
+    /// 休眠不触发「90s 设备离线」告警（休眠是合法状态，不是丢失）。
+    #[test]
+    fn sleeping_does_not_fire_gray_alert() {
+        let (mut core, now) = sleeping_core("a");
+        let much_later = now + GRAY_AFTER + Duration::from_secs(600);
+        assert!(core.newly_gray(much_later).is_empty());
+    }
+
+    /// 台账残留旧态修复：Disconnected / Connected 的设备一旦读数成功，
+    /// 一律经 mark_online 迁回 Online（v0.3.0 upsert 保留旧 state 的滞留 bug）。
+    #[test]
+    fn record_success_clears_stale_state() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        // Connected → 成功 → Online
+        assert_eq!(core.entries()[0].device.state, DeviceState::Connected);
+        core.record_success("a", reading(50, false), now);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Online);
+        // Disconnected（gone 路径）→ 重新注册后成功 → Online
+        core.record_failure("a", true);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Disconnected);
+        core.record_success("a", reading(50, false), now);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Online);
+    }
+
+    /// 休眠中通道报 DeviceGone → Disconnected（接收器拔出等真消失）。
+    #[test]
+    fn sleeping_device_gone_disconnects() {
+        let (mut core, _now) = sleeping_core("a");
+        core.record_failure("a", true);
+        assert_eq!(core.entries()[0].device.state, DeviceState::Disconnected);
+    }
+
+    /// 单次超时（未达阈值）不改态、不停轮询——瞬态抖动不动休眠。
+    #[test]
+    fn single_timeout_keeps_polling() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), now);
+        assert_eq!(core.record_timeout("a"), TimeoutOutcome::Counting(1));
+        assert_eq!(core.entries()[0].device.state, DeviceState::Online);
+        assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
+        // 成功后连击清零。
+        core.record_success("a", reading(51, false), now);
+        assert_eq!(core.record_timeout("a"), TimeoutOutcome::Counting(1));
     }
 }
