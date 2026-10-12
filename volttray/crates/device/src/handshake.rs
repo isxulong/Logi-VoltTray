@@ -9,7 +9,8 @@
 //! 成功则逐个 GetFeatureIndex 解析 0x1004 / 0x1000 / 0x1001。超时按 NoResponse 处理。
 
 use volttray_protocol::commands::{feature_ids, QueryCommand};
-use volttray_protocol::{ErrorFamily, FeatureTable, HidppError};
+use volttray_protocol::error::ErrorFamily;
+use volttray_protocol::{FeatureTable, HidppError};
 use volttray_transport::channel::HidChannel;
 use volttray_transport::events::EventSink;
 use volttray_transport::{Transport, TransportError};
@@ -129,10 +130,10 @@ mod tests {
     #[test]
     fn hidpp2_resolves_feature_table() {
         let mut t = stub(vec![
-            long_resp(0x01, 0x00, 0x11, 0x02), // protocol 2.0
-            long_resp(0x01, 0x00, 0x02, 0x06), // 0x1004 → 6
-            long_resp(0x01, 0x00, 0x03, 0x00), // 0x1000 → 不支持(0)
-            long_resp(0x01, 0x00, 0x04, 0x05), // 0x1001 → 5
+            Ok(long_resp(0x01, 0x00, 0x11, 0x02)), // protocol 2.0
+            Ok(long_resp(0x01, 0x00, 0x02, 0x06)), // 0x1004 → 6
+            Ok(long_resp(0x01, 0x00, 0x03, 0x00)), // 0x1000 → 不支持(0)
+            Ok(long_resp(0x01, 0x00, 0x04, 0x05)), // 0x1001 → 5
         ]);
         match handshake(&mut t, 0x01) {
             Handshake::Hidpp2(table) => {
