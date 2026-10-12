@@ -1,0 +1,5 @@
+# PRD 5.7 免安装免运行时分发：MSVC 目标静态链接 CRT，
+# 消除 VCRUNTIME140.dll 运行时依赖（发布物仅依赖系统自带 DLL）。
+# 仅作用于 x86_64-pc-windows-msvc，不影响 ubuntu nightly 骨架 job。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
