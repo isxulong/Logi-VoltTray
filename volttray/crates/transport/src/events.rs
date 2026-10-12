@@ -54,6 +54,12 @@ pub enum DiagKind {
         charging: bool,
         source: String,
     },
+    /// 电量未知（D-20）：8 类原因码定位「？」根因，供脱敏诊断导出。
+    BatteryUnknown {
+        id: String,
+        reason: String,
+        detail: String,
+    },
     ConfigReloaded {
         warnings: Vec<String>,
     },
