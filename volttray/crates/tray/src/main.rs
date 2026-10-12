@@ -58,6 +58,7 @@ mod imp {
 
     use crate::icon::{dpi_bucket_size, icon_text, system_dark_theme, IconCache, IconColor};
     use crate::menu::build_menu;
+    use crate::rawinput;
     use crate::single::{acquire, SingleInstance};
     use crate::toast;
 
@@ -654,7 +655,7 @@ mod imp {
                     // D-33 被动唤醒：系统层观测到罗技鼠标活动（移动/点击
                     // 本就产生射频流量，属用户行为零额外成本）→ 通知 IO 线程
                     // 装填一次唤醒探测资格。2s 合并防 WM_INPUT 风暴。
-                    if rawinput::is_logitech_mouse_input(msg.lparam)
+                    if rawinput::is_logitech_mouse_input(msg.lParam)
                         && last_wake_sent.elapsed() >= Duration::from_secs(2)
                     {
                         last_wake_sent = Instant::now();
