@@ -1,0 +1,15 @@
+{
+  "name": "ref_status_fn0_30_plugged",
+  "kind": "response",
+  "hex": "10 02 04 05 1E 14 03",
+  "expect": {
+    "type": "frame",
+    "report": 16,
+    "device_index": 2,
+    "feature_index": 4,
+    "function": 0,
+    "sw_id": 5,
+    "params_hex": "1E 14 03"
+  },
+  "comment": "30%，state=3 接电源未充电"
+}
