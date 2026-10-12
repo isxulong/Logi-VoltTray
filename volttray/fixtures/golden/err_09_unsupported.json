@@ -1,11 +1,13 @@
 {
   "name": "err_09_unsupported",
   "kind": "response",
-  "hex": "10 01 FF 07 06 09 00",
+  "hex": "10 01 FF 06 07 09 00",
   "expect": {
     "type": "error",
     "device_index": 1,
+    "family": "hidpp2",
     "feature_index": 6,
     "error_code": 9
-  }
+  },
+  "comment": "v0.2.0 布局修正：2.0 错误帧 byte3=feat 回显(0x06) byte4=fn|sw(0x07) byte5=code(0x09)"
 }
