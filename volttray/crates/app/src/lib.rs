@@ -13,13 +13,10 @@ pub mod debounce;
 pub mod observer;
 
 pub use config::{
-    brighten, contrast_ok, contrast_ratio, Config, ConfigWarning, ConfigWatcher,
-    IconBackground, IconFontColor, IconShape, IconStyle, RgbColor, CONTRAST_FLOOR,
-    DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
-    POLL_MAX_SECS, POLL_MIN_SECS,
+    brighten, contrast_ok, contrast_ratio, Config, ConfigWarning, ConfigWatcher, IconBackground,
+    IconFontColor, IconShape, IconStyle, RgbColor, CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD,
+    DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS,
 };
 pub use core::{guarded, AppCore, DeviceSnapshot, Snapshot, GRAY_AFTER, POLL_CHARGING};
-pub use debounce::{
-    Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS,
-};
+pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};

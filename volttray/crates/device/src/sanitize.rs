@@ -73,7 +73,10 @@ mod tests {
     #[test]
     fn middle_dot_separator_kept() {
         // v0.3.0 根因回归：槽位名分隔符 U+00B7（·）曾被消毒白名单替换成「?」。
-        assert_eq!(device_name("USB Receiver · 槽位 1"), "USB Receiver · 槽位 1");
+        assert_eq!(
+            device_name("USB Receiver · 槽位 1"),
+            "USB Receiver · 槽位 1"
+        );
         assert_eq!(device_name("MX ·2"), "MX ·2");
     }
 
