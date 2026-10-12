@@ -60,7 +60,7 @@ fn mapping_functions() {
     assert_eq!(map_unified_battery(&[0x50, 0x00, 0x01]), Some((80, true)));
     assert_eq!(map_unified_battery(&[0x2D, 0x00, 0x00]), Some((45, false)));
     assert_eq!(map_unified_battery(&[0x65, 0x00, 0x00]), Some((100, false))); // >100 钳制到 100（v0.2.0）
-    // v0.2.0：[percent, nextLevel, state]，state∈{1,2} 为充电中。
+                                                                              // v0.2.0：[percent, nextLevel, state]，state∈{1,2} 为充电中。
     assert_eq!(map_battery_status(&[0x5A, 0x00, 0x01]), Some((90, true)));
     assert_eq!(map_battery_status(&[0x0A, 0x00, 0x00]), Some((10, false)));
     assert_eq!(
