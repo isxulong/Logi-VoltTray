@@ -4,7 +4,27 @@
 
 use core::fmt;
 
-/// HID++ 设备错误帧中的错误码（2.0 与 1.0 错误帧共用 0x01..=0x09 语义）。
+/// 错误帧所属协议族。同一错误码在两族中的语义不同（红队差异 F5）：
+/// - Hidpp1：0x08 = UNKNOWN_DEVICE（设备休眠/离线）
+/// - Hidpp2：0x08 = Busy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorFamily {
+    /// 0x8F 错误帧（HID++ 1.0）。
+    Hidpp1,
+    /// 0xFF 错误帧（HID++ 2.0）。
+    Hidpp2,
+}
+
+impl ErrorFamily {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hidpp1 => "hidpp1",
+            Self::Hidpp2 => "hidpp2",
+        }
+    }
+}
+
+/// HID++ 设备错误帧中的错误码（基线语义按 HID++ 2.0；1.0 语义差异见 [`ErrorFamily`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceErrorCode {
     /// 0x01
@@ -95,8 +115,10 @@ pub enum MalformedKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HidppError {
     /// 设备返回的错误帧（feature 0xFF 为 2.0，0x8F 为 1.0）。
+    /// `feature_index` 为被拒 feature 的回显（2.0）或寄存器地址回显（1.0）。
     Device {
         device_index: u8,
+        family: ErrorFamily,
         feature_index: u8,
         code: DeviceErrorCode,
     },
@@ -109,15 +131,18 @@ pub enum HidppError {
 impl fmt::Display for HidppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Device { device_index, feature_index, code } => write!(
+            Self::Device { device_index, family, feature_index, code } => write!(
                 f,
-                "device error: dev=0x{device_index:02X} feat=0x{feature_index:02X} code={} (0x{:02X})",
+                "device error: dev=0x{device_index:02X} family={} feat=0x{feature_index:02X} code={} (0x{:02X})",
+                family.name(),
                 code.name(),
                 code.code()
             ),
             Self::Malformed(kind) => match kind {
                 MalformedKind::EmptyFrame => write!(f, "malformed frame: empty input"),
-                MalformedKind::BadReportId(id) => write!(f, "malformed frame: bad report id 0x{id:02X}"),
+                MalformedKind::BadReportId(id) => {
+                    write!(f, "malformed frame: bad report id 0x{id:02X}")
+                }
                 MalformedKind::BadLength { report, expected, actual } => write!(
                     f,
                     "malformed frame: report 0x{report:02X} expects {expected} bytes, got {actual}"
