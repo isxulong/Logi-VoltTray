@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use volttray_protocol::commands::QueryCommand;
-use volttray_protocol::error::{DeviceErrorCode, HidppError, MalformedKind};
+use volttray_protocol::error::{DeviceErrorCode, ErrorFamily, HidppError, MalformedKind};
 use volttray_protocol::frame::Frame;
 use volttray_protocol::FeatureTable;
 
@@ -46,7 +46,7 @@ fn golden_samples_all_pass() {
         .collect();
     files.sort();
     assert!(
-        files.len() >= 20,
+        files.len() >= 40,
         "golden sample count too low: {}",
         files.len()
     );
@@ -114,6 +114,7 @@ fn check_response(fname: &str, sample: &Sample) {
             match err {
                 HidppError::Device {
                     device_index,
+                    family,
                     feature_index,
                     code,
                 } => {
@@ -122,6 +123,10 @@ fn check_response(fname: &str, sample: &Sample) {
                         expect["device_index"].as_u64().unwrap() as u8,
                         "{fname} dev"
                     );
+                    // v0.2.0：错误帧家族是红队差异 F5 的核心——同码不同义。
+                    if let Some(want) = expect["family"].as_str() {
+                        assert_eq!(family.name(), want, "{fname} family");
+                    }
                     assert_eq!(
                         feature_index,
                         expect["feature_index"].as_u64().unwrap() as u8,
@@ -192,6 +197,7 @@ fn check_request(fname: &str, sample: &Sample) {
         "GetBatteryStatus" => QueryCommand::GetBatteryStatus,
         "GetBatteryVoltage" => QueryCommand::GetBatteryVoltage,
         "ReadHidpp1Register0x0D" => QueryCommand::ReadHidpp1Register0x0D,
+        "ReadHidpp1Register0x07" => QueryCommand::ReadHidpp1Register0x07,
         other => panic!("{fname}: unknown command {other}"),
     };
     let mut table = FeatureTable::new();
