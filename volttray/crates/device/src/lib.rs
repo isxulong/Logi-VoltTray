@@ -5,6 +5,7 @@
 
 pub mod battery;
 pub mod handshake;
+pub mod name;
 pub mod sanitize;
 pub mod state;
 
