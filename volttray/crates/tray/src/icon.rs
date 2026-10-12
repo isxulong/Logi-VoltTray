@@ -371,41 +371,80 @@ mod tests {
     fn auto_font_resolves_against_background() {
         // 默认出厂组合：深色底 + 正常档白字 → 深浅任务栏均可读。
         assert_eq!(
-            font_rgb(IconColor::Default, true, IconBackground::Dark, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Default,
+                true,
+                IconBackground::Dark,
+                IconFontColor::Auto
+            ),
             (0xFF, 0xFF, 0xFF)
         );
         assert_eq!(
-            font_rgb(IconColor::Default, false, IconBackground::Dark, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Default,
+                false,
+                IconBackground::Dark,
+                IconFontColor::Auto
+            ),
             (0xFF, 0xFF, 0xFF)
         );
         // 浅色底配深字。
         assert_eq!(
-            font_rgb(IconColor::Default, true, IconBackground::Light, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Default,
+                true,
+                IconBackground::Light,
+                IconFontColor::Auto
+            ),
             (0x1B, 0x1B, 0x1B)
         );
         // 透明底回退主题对比（旧版行为）。
         assert_eq!(
-            font_rgb(IconColor::Default, true, IconBackground::Transparent, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Default,
+                true,
+                IconBackground::Transparent,
+                IconFontColor::Auto
+            ),
             (0xFF, 0xFF, 0xFF)
         );
         assert_eq!(
-            font_rgb(IconColor::Default, false, IconBackground::Transparent, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Default,
+                false,
+                IconBackground::Transparent,
+                IconFontColor::Auto
+            ),
             (0x1B, 0x1B, 0x1B)
         );
         // 警告/严重档不随背景变化。
         assert_eq!(
-            font_rgb(IconColor::Yellow, false, IconBackground::Dark, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Yellow,
+                false,
+                IconBackground::Dark,
+                IconFontColor::Auto
+            ),
             (0xFF, 0xD2, 0x1F)
         );
         assert_eq!(
-            font_rgb(IconColor::Red, false, IconBackground::Light, IconFontColor::Auto),
+            font_rgb(
+                IconColor::Red,
+                false,
+                IconBackground::Light,
+                IconFontColor::Auto
+            ),
             (0xE8, 0x11, 0x23)
         );
     }
 
     #[test]
     fn fixed_color_overrides_levels_but_not_gray() {
-        let fixed = IconFontColor::Fixed(RgbColor { r: 0x0A, g: 0x6C, b: 0xFF });
+        let fixed = IconFontColor::Fixed(RgbColor {
+            r: 0x0A,
+            g: 0x6C,
+            b: 0xFF,
+        });
         assert_eq!(
             font_rgb(IconColor::Default, false, IconBackground::Light, fixed),
             (0x0A, 0x6C, 0xFF)

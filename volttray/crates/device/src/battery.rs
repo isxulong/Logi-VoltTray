@@ -127,10 +127,7 @@ pub enum VoltageMapError {
 }
 
 /// 映射：BATTERY_VOLTAGE fn0 → [mv_hi, mv_lo, flags]，bit7=充电中。
-pub fn map_battery_voltage(
-    params: &[u8],
-    curve: &str,
-) -> Result<(u8, bool), VoltageMapError> {
+pub fn map_battery_voltage(params: &[u8], curve: &str) -> Result<(u8, bool), VoltageMapError> {
     if params.len() < 3 {
         return Err(VoltageMapError::BadParams);
     }
@@ -174,7 +171,10 @@ pub fn map_hidpp1_register_0x07(params: &[u8]) -> Option<(u8, bool)> {
         return None;
     }
     let level_code = params[0];
-    let percent = ROUGH_LEVEL.iter().find(|(c, _)| *c == level_code).map(|(_, p)| *p)?;
+    let percent = ROUGH_LEVEL
+        .iter()
+        .find(|(c, _)| *c == level_code)
+        .map(|(_, p)| *p)?;
     let byte = params[1];
     let charging = byte & 0x21 == 0x21;
     Some((percent, charging))
@@ -366,10 +366,9 @@ fn classify_transport_error(err: &TransportError) -> (UnknownReason, String) {
             UnknownReason::MalformedResponse,
             format!("malformed: {kind:?}"),
         ),
-        TransportError::Protocol(HidppError::NotEncodable(what)) => (
-            UnknownReason::NoBatteryFeatures,
-            (*what).to_string(),
-        ),
+        TransportError::Protocol(HidppError::NotEncodable(what)) => {
+            (UnknownReason::NoBatteryFeatures, (*what).to_string())
+        }
     }
 }
 
@@ -426,7 +425,10 @@ mod tests {
         // 0x90 + 0% → 满电。
         assert_eq!(map_hidpp1_register_0x0d(&[0, 0, 0x90]), Some((100, false)));
         // >100 按 255 折算：255→100、200→78。
-        assert_eq!(map_hidpp1_register_0x0d(&[255, 0, 0x00]), Some((100, false)));
+        assert_eq!(
+            map_hidpp1_register_0x0d(&[255, 0, 0x00]),
+            Some((100, false))
+        );
         assert_eq!(map_hidpp1_register_0x0d(&[200, 0, 0x00]), Some((78, false)));
         assert_eq!(map_hidpp1_register_0x0d(&[70, 0]), None);
     }

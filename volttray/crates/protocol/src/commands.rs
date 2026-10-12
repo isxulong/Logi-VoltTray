@@ -103,7 +103,13 @@ impl QueryCommand {
         }
         fn hidpp1_read(device_index: u8, reg: u8) -> Frame {
             // byte2=0x81（读子地址），byte3=寄存器号（复用 sw_id 位）。
-            Frame::new_short(device_index, feature_ids::HIDPP1_READ_SUB, 0x00, reg, [0, 0, 0])
+            Frame::new_short(
+                device_index,
+                feature_ids::HIDPP1_READ_SUB,
+                0x00,
+                reg,
+                [0, 0, 0],
+            )
         }
 
         let frame = match self {
@@ -130,7 +136,20 @@ impl QueryCommand {
                     [
                         (feature_id >> 8) as u8,
                         (feature_id & 0xFF) as u8,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
                     ],
                 )
             }

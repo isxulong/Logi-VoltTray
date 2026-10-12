@@ -300,14 +300,8 @@ mod imp {
                             ch_state.shared.clone(),
                             SharedObserver(observer.clone()),
                         );
-                        let reading = probe_battery(
-                            &mut t,
-                            &s.id,
-                            s.index,
-                            &s.features,
-                            CURVE,
-                            s.is_hidpp1,
-                        );
+                        let reading =
+                            probe_battery(&mut t, &s.id, s.index, &s.features, CURVE, s.is_hidpp1);
                         match reading {
                             Ok(r) => {
                                 s.failures = 0;
@@ -331,9 +325,7 @@ mod imp {
                                     if let Ok(mut o) = observer.lock() {
                                         o.push(DiagEvent::new(
                                             Layer::App,
-                                            DiagKind::DeviceLost {
-                                                id: gone_slot.id,
-                                            },
+                                            DiagKind::DeviceLost { id: gone_slot.id },
                                         ));
                                     }
                                 } else {

@@ -21,8 +21,8 @@
 use serde_json::Value;
 
 use volttray_device::battery::{
-    clamp_pct, map_battery_status, map_battery_voltage, map_hidpp1_register_0x0d,
-    map_hidpp1_register_0x07, map_unified_battery,
+    clamp_pct, map_battery_status, map_battery_voltage, map_hidpp1_register_0x07,
+    map_hidpp1_register_0x0d, map_unified_battery,
 };
 use volttray_device::sanitize;
 use volttray_protocol::voltage;
@@ -64,7 +64,11 @@ fn liion_logi_voltage_curve_cases() {
     assert!(points.len() >= 13, "li-ion-logi anchors: {}", points.len());
     // 锚点必须与 fixtures/voltage_curves.json 里的 li-ion-logi 完全一致。
     for (mv, pct) in &points {
-        assert_eq!(voltage::percent_from_mv("li-ion-logi", *mv), Some(*pct), "{mv}mV");
+        assert_eq!(
+            voltage::percent_from_mv("li-ion-logi", *mv),
+            Some(*pct),
+            "{mv}mV"
+        );
     }
     // 真机读数用例。
     for case in sec["cases"].as_array().expect("cases array") {
@@ -106,7 +110,9 @@ fn clamp_pct_cases() {
 #[test]
 fn battery_path_cases() {
     let root = root();
-    let cases = root["battery_paths"].as_array().expect("battery_paths array");
+    let cases = root["battery_paths"]
+        .as_array()
+        .expect("battery_paths array");
     assert!(cases.len() >= 15, "battery path cases: {}", cases.len());
     for case in cases {
         let source = case["source"].as_str().expect("source");

@@ -232,8 +232,8 @@ fn normalize_read(raw: &[u8]) -> Vec<u8> {
 /// 响应回显匹配：设备号（含蓝牙 `^0xFF` 变体）+ byte2（feature/子地址）+ byte3 低位
 /// （sw_id，1.0 语义下即寄存器号）。推送通知（sw_id=0 / 非回显 feature）不匹配。
 fn response_matches(req: &Frame, resp: &Frame) -> bool {
-    let dev_hit = resp.device_index == req.device_index
-        || resp.device_index == (req.device_index ^ 0xFF);
+    let dev_hit =
+        resp.device_index == req.device_index || resp.device_index == (req.device_index ^ 0xFF);
     dev_hit && resp.feature_index == req.feature_index && resp.sw_id == req.sw_id
 }
 
@@ -286,8 +286,7 @@ mod tests {
         let mut t = tx(vec![
             vec![0x10, 0x01, 0x41, 0x00, 0x0A, 0x00, 0x00], // 推送通知
             vec![
-                0x11, 0x01, 0x06, 0x15, 0x50, 0x05, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0,
+                0x11, 0x01, 0x06, 0x15, 0x50, 0x05, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ], // 真实应答
         ]);
         let req = [

@@ -277,7 +277,10 @@ impl Config {
                     } else if let Some(c) = RgbColor::parse_hex(s) {
                         cfg.icon_font_color = IconFontColor::Fixed(c);
                     } else {
-                        warn(key, r#"invalid icon_font_color (expect "auto" or "#RRGGBB"); default kept"#);
+                        warn(
+                            key,
+                            r##"invalid icon_font_color (expect "auto" or "#RRGGBB"); default kept"##,
+                        );
                     }
                 }
                 (
@@ -418,7 +421,11 @@ mod tests {
         assert_eq!(c.icon_background, IconBackground::Light);
         assert_eq!(
             c.icon_font_color,
-            IconFontColor::Fixed(RgbColor { r: 0x0A, g: 0x6C, b: 0xFF })
+            IconFontColor::Fixed(RgbColor {
+                r: 0x0A,
+                g: 0x6C,
+                b: 0xFF
+            })
         );
     }
 
@@ -444,17 +451,15 @@ mod tests {
     #[test]
     fn icon_readability_keys_parse_and_fall_back() {
         // 合法取值（大小写不敏感 hex、auto）。
-        let (c, w) = Config::parse(
-            "icon_background = \"transparent\"\nicon_font_color = \"auto\"\n",
-        );
+        let (c, w) =
+            Config::parse("icon_background = \"transparent\"\nicon_font_color = \"auto\"\n");
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.icon_background, IconBackground::Transparent);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
 
         // 非法取值回退默认 + 警告。
-        let (c, w) = Config::parse(
-            "icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n",
-        );
+        let (c, w) =
+            Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
         assert_eq!(w.len(), 2);
@@ -464,7 +469,11 @@ mod tests {
         assert!(w.is_empty());
         assert_eq!(
             c.icon_font_color,
-            IconFontColor::Fixed(RgbColor { r: 0xFF, g: 0x00, b: 0xAA })
+            IconFontColor::Fixed(RgbColor {
+                r: 0xFF,
+                g: 0x00,
+                b: 0xAA
+            })
         );
         let doc2 = Config {
             icon_font_color: c.icon_font_color,
