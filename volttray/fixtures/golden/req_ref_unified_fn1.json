@@ -1,0 +1,17 @@
+{
+  "name": "req_ref_unified_fn1",
+  "kind": "request",
+  "command": "GetBatteryUnified",
+  "device_index": 1,
+  "sw_id": 7,
+  "features": {
+    "1": 1,
+    "4096": 4,
+    "4097": 5,
+    "4100": 6
+  },
+  "expect": {
+    "hex": "11 01 06 17 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+  },
+  "comment": "裁决修正：蓝队原稿短帧与其自身 A4 及 ref logi_hidpp.py:265-269 矛盾，按参考实现源码改长帧"
+}
