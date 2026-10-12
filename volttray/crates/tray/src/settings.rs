@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use volttray_app::autostart;
 use volttray_app::config::{
     contrast_ok, contrast_ratio, Config, IconBackground, IconFontColor, IconShape, RgbColor,
     CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
@@ -1162,6 +1163,9 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         IDC_RESET_ALL if clicked => {
             *cfg = Config::default();
+            // P2-3：reset-all 连同注册表自启项一起回到默认（此前只重置 TOML，
+            // 注册表与配置分叉）。注册表失败不阻断其余重置（尽力而为）。
+            let _ = autostart::sync(cfg.autostart);
             touched = true;
             resync = true;
         }

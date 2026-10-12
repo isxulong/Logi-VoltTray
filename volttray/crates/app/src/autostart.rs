@@ -113,3 +113,14 @@ mod imp {
 }
 
 pub use imp::{disable, enable, is_enabled};
+
+/// 将注册表 Run 值同步到目标状态（幂等）：`on=true` 写入当前 exe、`false` 删除。
+/// 供「以配置为准」的入口调用（P2-3：reset-all / 设置镜像），失败由调用方裁决。
+pub fn sync(on: bool) -> Result<(), String> {
+    if on {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        enable(&exe)
+    } else {
+        disable()
+    }
+}
