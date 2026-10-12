@@ -1,7 +1,8 @@
-//! 托盘右键菜单（PRD M1：≤8 项；P2-3：设备区行不计入 8 项上限）。
+//! 托盘右键菜单（v0.3.0 产品方案 M13：固定项 7 个 ≤ 8；设备区行不计入上限）。
 //!
-//! 固定项（5 项 + 分隔符）：立即刷新 / 诊断面板… / 开机自启 / 静默通知 / 退出。
-//! 设备区：每台设备一行 CheckMenuItem，点击可将其钉为默认展示设备。
+//! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
+//! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 静默通知✓ / 开机自启✓ /
+//! ── / 设置… / 诊断面板… / ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use volttray_app::DeviceSnapshot;
@@ -10,9 +11,11 @@ use volttray_app::DeviceSnapshot;
 pub struct MenuIds {
     pub device_rows: Vec<(MenuId, String)>,
     pub refresh: MenuId,
-    pub diag: MenuId,
-    pub autostart: MenuId,
+    pub blink: MenuId,
     pub silent: MenuId,
+    pub autostart: MenuId,
+    pub settings: MenuId,
+    pub diag: MenuId,
     pub exit: MenuId,
 }
 
@@ -29,10 +32,17 @@ fn device_row_text(dev: &DeviceSnapshot) -> String {
     format!("{} — {}", dev.name, status)
 }
 
+/// 构建菜单。
+///
+/// - `poll_secs`：当前轮询间隔，用于「立即刷新（当前间隔 {n} 秒）」文案（M10 可见可调）；
+/// - `blink`：低电闪烁提醒开关（M11，菜单可直接关）；
+/// - `autostart` / `silent`：沿用 v0.2.0 开关。
 pub fn build_menu(
     devices: &[DeviceSnapshot],
     default_device: Option<&str>,
     pinned: Option<&str>,
+    poll_secs: u64,
+    blink: bool,
     autostart: bool,
     silent: bool,
 ) -> (Menu, MenuIds) {
@@ -49,26 +59,32 @@ pub fn build_menu(
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
-    let refresh = MenuItem::new("立即刷新", true, None);
-    let diag = MenuItem::new("诊断面板…", true, None);
-    let autostart_item = CheckMenuItem::new("开机自启", true, autostart, None);
+    let refresh = MenuItem::new(format!("立即刷新（当前间隔 {poll_secs} 秒）"), true, None);
+    let blink_item = CheckMenuItem::new("低电闪烁提醒", true, blink, None);
     let silent_item = CheckMenuItem::new("静默通知", true, silent, None);
+    let autostart_item = CheckMenuItem::new("开机自启", true, autostart, None);
+    let settings = MenuItem::new("设置…", true, None);
+    let diag = MenuItem::new("诊断面板…", true, None);
     let exit = MenuItem::new("退出", true, None);
 
     let ids = MenuIds {
         device_rows,
         refresh: refresh.id().clone(),
-        diag: diag.id().clone(),
-        autostart: autostart_item.id().clone(),
+        blink: blink_item.id().clone(),
         silent: silent_item.id().clone(),
+        autostart: autostart_item.id().clone(),
+        settings: settings.id().clone(),
+        diag: diag.id().clone(),
         exit: exit.id().clone(),
     };
 
     let _ = menu.append(&refresh);
-    let _ = menu.append(&diag);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&autostart_item);
+    let _ = menu.append(&blink_item);
     let _ = menu.append(&silent_item);
+    let _ = menu.append(&autostart_item);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&settings);
+    let _ = menu.append(&diag);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&exit);
     (menu, ids)
