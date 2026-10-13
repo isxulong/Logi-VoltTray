@@ -35,11 +35,6 @@ impl BlinkState {
         Self::default()
     }
 
-    /// 当前是否处于低电触发状态。
-    pub fn is_low_active(&self) -> bool {
-        self.low_active
-    }
-
     /// 闪烁是否进行中（含「闪烁开关」判定，开关由调用方持有）。
     pub fn is_blinking(&self, enabled: bool) -> bool {
         enabled && self.low_active && !self.ack
