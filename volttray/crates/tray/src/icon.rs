@@ -1094,7 +1094,10 @@ mod tests {
             .chunks_exact(4)
             .position(|px| px[3] == 255)
             .expect("solid glyph pixel expected");
-        let (n, b) = (&normal[solid * 4..solid * 4 + 4], &bright[solid * 4..solid * 4 + 4]);
+        let (n, b) = (
+            &normal[solid * 4..solid * 4 + 4],
+            &bright[solid * 4..solid * 4 + 4],
+        );
         assert_eq!(n[3], 255);
         assert_eq!(b[3], pulse_alpha(255, BLINK_TEXT_ALPHA_PULSE));
         assert_ne!(&n[..3], &b[..3], "text color must also jump");

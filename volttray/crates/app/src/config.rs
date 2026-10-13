@@ -792,7 +792,8 @@ impl Config {
         if !cfg.icon_font_tiers_enabled && cfg.icon_font_color == IconFontColor::Auto {
             cfg.icon_font_tiers_enabled = true;
             if !saw_tier_thresholds && cfg.low_threshold != DEFAULT_FONT_TIER_THRESHOLDS[0] {
-                cfg.icon_font_tier_thresholds = vec![cfg.low_threshold, DEFAULT_FONT_TIER_THRESHOLDS[1]];
+                cfg.icon_font_tier_thresholds =
+                    vec![cfg.low_threshold, DEFAULT_FONT_TIER_THRESHOLDS[1]];
             }
             warnings.push(ConfigWarning {
                 key: "icon_font_tiers_enabled".into(),
@@ -1322,7 +1323,10 @@ mod tests {
         // 往返恒等（含高 8 位为零的全部边界）。
         for c in [0x0000_0000u32, 0x00FF_FFFF, 0x0012_3456, 0x00AB_CDEF] {
             assert_eq!(rgb_to_colorref(colorref_to_rgb(c)), c);
-            assert_eq!(colorref_to_rgb(rgb_to_colorref(colorref_to_rgb(c))), colorref_to_rgb(c));
+            assert_eq!(
+                colorref_to_rgb(rgb_to_colorref(colorref_to_rgb(c))),
+                colorref_to_rgb(c)
+            );
         }
     }
 
@@ -1363,7 +1367,8 @@ mod tests {
         assert!(c.icon_font_tiers_enabled);
         assert_eq!(c.icon_font_tier_thresholds, vec![10, 40]);
         // 勾选关 + 固定色 → 自定义：不启用分档、无迁移警告。
-        let (c, w) = Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n");
+        let (c, w) =
+            Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n");
         assert!(!c.icon_font_tiers_enabled);
         assert!(w.is_empty(), "{w:?}");
         // 勾选开 → 无迁移警告（本来就在分档模式）。
