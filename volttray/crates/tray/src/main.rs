@@ -11,6 +11,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod blink;
+#[cfg(windows)]
 mod icon;
 #[cfg(windows)]
 mod menu;
@@ -512,11 +514,11 @@ mod imp {
         /// 菜单内容签名（v0.3.3 卫生项：P3-1 右键菜单闪烁缓解——内容未变
         /// 不重建菜单，避免菜单打开时反复 set_menu 引发的闪烁）。
         menu_sig: String,
-        /// 低电闪烁状态机（M11）：相位 500ms 翻转 → 1Hz；ack = 用户已点击停闪；
-        /// low_active = 展示设备当前处于低电触发状态。
-        blink_phase: bool,
-        blink_ack: bool,
-        low_active: bool,
+        /// 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，见 blink.rs）。
+        blink: crate::blink::BlinkState,
+        /// 图标文本/背景缩放镜像（v0.3.4 #4，D-48）。
+        icon_text_scale: u8,
+        icon_bg_scale: u8,
     }
 
     impl GuiState {
@@ -537,9 +539,9 @@ mod imp {
                 tier_thresholds: cfg.icon_font_tier_thresholds.clone(),
                 tier_colors: cfg.icon_font_tier_colors.clone(),
                 menu_sig: String::new(),
-                blink_phase: false,
-                blink_ack: false,
-                low_active: false,
+                blink: crate::blink::BlinkState::new(),
+                icon_text_scale: cfg.icon_text_scale,
+                icon_bg_scale: cfg.icon_bg_scale,
             }
         }
     }
@@ -624,6 +626,8 @@ mod imp {
             } else {
                 None
             },
+            cfg.icon_text_scale,
+            cfg.icon_bg_scale,
         );
         let mut cur_size = dpi_bucket_size(dpi);
         let mut cur_dark = dark;
@@ -751,7 +755,9 @@ mod imp {
                     || cfg.autostart != state.autostart_on
                     || cfg.icon_font_tiers_enabled != state.tiers_enabled
                     || cfg.icon_font_tier_thresholds != state.tier_thresholds
-                    || cfg.icon_font_tier_colors != state.tier_colors;
+                    || cfg.icon_font_tier_colors != state.tier_colors
+                    || cfg.icon_text_scale != state.icon_text_scale
+                    || cfg.icon_bg_scale != state.icon_bg_scale;
                 if changed {
                     state.icon_shape = cfg.icon_shape;
                     state.icon_bg = cfg.icon_background;
@@ -764,6 +770,8 @@ mod imp {
                     state.tiers_enabled = cfg.icon_font_tiers_enabled;
                     state.tier_thresholds = cfg.icon_font_tier_thresholds.clone();
                     state.tier_colors = cfg.icon_font_tier_colors.clone();
+                    state.icon_text_scale = cfg.icon_text_scale;
+                    state.icon_bg_scale = cfg.icon_bg_scale;
                     // P2-3：自启键纳入镜像（M13 AC1）——TOML/设置侧改动同步注册表；
                     // 注册表写失败时保留旧镜像值，下个 tick 重试。
                     if cfg.autostart != state.autostart_on {
@@ -828,15 +836,17 @@ mod imp {
                 } else {
                     None
                 },
+                state.icon_text_scale,
+                state.icon_bg_scale,
             );
             *cur_size = size;
             *cur_dark = dark;
             snap_changed = true;
         }
 
-        // 低电闪烁状态机（M11）：500ms tick 翻相位 → 1Hz；
-        // 活跃 = 开 && 展示设备处于低电触发态 && 未被点击停闪；解除后重新武装。
-        state.blink_phase = !state.blink_phase;
+        // 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，逻辑级测试见 blink.rs）：
+        // 500ms tick 翻相位 → 1Hz；活跃 = 开 && 展示设备处于低电触发态 &&
+        // 未被点击停闪；解除后重新武装。提亮帧差异由渲染侧 flash_rgb 保证。
         let low_active = shown_device(state).is_some_and(|d| {
             !d.gray
                 && core
@@ -844,23 +854,18 @@ mod imp {
                     .map(|c| c.is_low_battery(&d.id))
                     .unwrap_or(false)
         });
-        if low_active != state.low_active {
-            state.low_active = low_active;
-            if !low_active {
-                state.blink_ack = false; // 低电解除：重新武装
-            }
+        if state.blink.set_low_active(low_active) {
             snap_changed = true;
         }
-        let blinking = state.blink_enabled && state.low_active && !state.blink_ack;
+        let outcome = state.blink.tick(state.blink_enabled);
 
-        if snap_changed || blinking {
+        if snap_changed || outcome.blinking {
             refresh_ui(tray, state, cache, ids);
         }
 
         // 托盘图标事件：任意点击本次停闪（M11）；菜单左键弹出不在此列。
         while let Ok(e) = TrayIconEvent::receiver().try_recv() {
-            if matches!(e, TrayIconEvent::Click { .. }) && state.low_active && !state.blink_ack {
-                state.blink_ack = true;
+            if matches!(e, TrayIconEvent::Click { .. }) && state.blink.acknowledge_click() {
                 refresh_ui(tray, state, cache, ids);
             }
         }
@@ -1017,8 +1022,7 @@ mod imp {
             None => IconColor::Default,
         };
         // M11：低电闪烁 = 常态与提亮档各 500ms 交替；点击托盘后本次停闪。
-        let bright =
-            state.blink_enabled && state.low_active && !state.blink_ack && state.blink_phase;
+        let bright = state.blink.bright_frame(state.blink_enabled);
         if let Some(ic) = cache.icon_for(color, &text, bright) {
             let _ = tray.set_icon(Some(ic));
         }
