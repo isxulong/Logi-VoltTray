@@ -328,7 +328,7 @@ impl IconCache {
     pub fn icon_for(&self, color: IconColor, text: &str, bright: bool) -> Option<tray_icon::Icon> {
         let rgba = self.map.get(&(color, text.to_string(), bright))?;
         let handle = rgba_to_hicon(rgba, self.size)?;
-        tray_icon::Icon::from_handle(handle).ok()
+        Some(tray_icon::Icon::from_handle(handle))
     }
 }
 
@@ -633,7 +633,7 @@ pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
             hmask
         };
         let info = ICONINFO {
-            fIcon: windows::Win32::Foundation::BOOL(1),
+            fIcon: windows::core::BOOL(1),
             xHotspot: 0,
             yHotspot: 0,
             hbmMask: hmask,
@@ -646,10 +646,9 @@ pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
         }
         let _ = DeleteObject(HGDIOBJ(hcolor.0));
         let _ = DeleteDC(hdc);
-        if hicon.is_invalid() {
-            None
-        } else {
-            Some(hicon.0 as isize)
+        match hicon {
+            Ok(h) if !h.is_invalid() => Some(h.0 as isize),
+            _ => None,
         }
     }
 }
@@ -1112,11 +1111,7 @@ mod tests {
             .get(&(IconColor::Default, "50".to_string(), false))
             .expect("bitmap cached");
         let idx = ((2 * size + size / 2) * 4) as usize;
-        assert_eq!(
-            &rgba[idx..idx + 3],
-            &[255, 0, 0],
-            "bg pixel must be pure red (RGB order)"
-        );
+        assert_eq!(&rgba[idx..idx + 3], &[255, 0, 0], "bg pixel must be pure red (RGB order)");
         assert_eq!(rgba[idx + 3], 255, "bg pixel must be opaque");
         let bgra = premultiplied_bgra_from_rgba(rgba);
         // 预乘 BGRA：B=0, G=0, R=255, A=255（字节序颠倒会变成 [255,0,0,255]）。
@@ -1127,15 +1122,9 @@ mod tests {
     #[test]
     fn premultiplied_bgra_math_and_byte_order() {
         // 纯红不透明：BGRA = [0,0,255,255]。
-        assert_eq!(
-            premultiplied_bgra_from_rgba(&[255, 0, 0, 255]),
-            &[0, 0, 255, 255]
-        );
+        assert_eq!(premultiplied_bgra_from_rgba(&[255, 0, 0, 255]), &[0, 0, 255, 255]);
         // 纯蓝不透明：BGRA = [255,0,0,255]。
-        assert_eq!(
-            premultiplied_bgra_from_rgba(&[0, 0, 255, 255]),
-            &[255, 0, 0, 255]
-        );
+        assert_eq!(premultiplied_bgra_from_rgba(&[0, 0, 255, 255]), &[255, 0, 0, 255]);
         // 半透明：B=(64*128+127)/255=32, G=(128*128+127)/255=64, R=(255*128+127)/255=128。
         assert_eq!(
             premultiplied_bgra_from_rgba(&[255, 128, 64, 128]),
@@ -1161,9 +1150,7 @@ mod tests {
         assert_eq!(mask, &[0x40, 0x00, 0x80, 0x00]);
         // 全不透明 → 掩码全 0（v0.3.3 旧路径逐字节掩码的回归护栏）。
         let solid = vec![255u8; 4 * 4];
-        assert!(and_mask_packed_from_alpha(&solid, 2)
-            .iter()
-            .all(|b| *b == 0));
+        assert!(and_mask_packed_from_alpha(&solid, 2).iter().all(|b| *b == 0));
     }
 
     /// v0.3.4 #4 验收：缩放矩阵（文本 60/100/140 × 背景 60/80/100 × 圆/方）下，
@@ -1177,24 +1164,12 @@ mod tests {
                     for text in ["50", "满"] {
                         let bg = (0x0A, 0x6C, 0xFF);
                         let with_text = render_text_bitmap(
-                            size,
-                            text,
-                            (255, 255, 255),
-                            Some(bg),
-                            shape,
-                            "Segoe UI",
-                            text_scale,
-                            bg_scale,
+                            size, text, (255, 255, 255), Some(bg), shape, "Segoe UI",
+                            text_scale, bg_scale,
                         );
                         let bg_only = render_text_bitmap(
-                            size,
-                            "",
-                            (255, 255, 255),
-                            Some(bg),
-                            shape,
-                            "Segoe UI",
-                            text_scale,
-                            bg_scale,
+                            size, "", (255, 255, 255), Some(bg), shape, "Segoe UI",
+                            text_scale, bg_scale,
                         );
                         // 文字墨迹 = 与纯背景帧的差异像素。
                         let mut ink = Vec::new();
@@ -1209,8 +1184,10 @@ mod tests {
                         let lo = (size as i32 - block) / 2;
                         let hi = lo + block - 1;
                         for i in &ink {
-                            let (py, px) =
-                                ((*i / size as usize) as i32, (*i % size as usize) as i32);
+                            let (py, px) = (
+                                (*i / size as usize) as i32,
+                                (*i % size as usize) as i32,
+                            );
                             assert!(
                                 px >= lo && px <= hi && py >= lo && py <= hi,
                                 "ink at ({px},{py}) outside block [{lo},{hi}]                                  ts={text_scale} bs={bg_scale} shape={shape:?} text={text}"
