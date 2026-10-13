@@ -370,6 +370,7 @@ fn ink_center_shift(src: &[u8], size: i32) -> (i32, i32) {
 /// - v0.3.3 #5：两遍渲染——先按估算位置落字，扫描字形墨迹边界框，
 ///   再平移到水平 + 垂直真正居中（按字形实际 bbox，非行高估算）；
 ///   字体质量用 ANTIALIASED_QUALITY（消除位图字模糊）。
+#[allow(clippy::too_many_arguments)] // 8 参数：渲染管线固有输入，v0.3.4 #4 追加 text_scale/bg_scale
 pub fn render_text_bitmap(
     size: u32,
     text: &str,
@@ -542,7 +543,7 @@ pub fn render_text_bitmap(
 /// GDI/Shell 当作已预乘解释，导致 RGB 被压缩、颜色发灰发暗。
 /// 纯函数，可跨平台单测。
 pub fn premultiplied_bgra_from_rgba(rgba: &[u8]) -> Vec<u8> {
-    debug_assert!(rgba.len() % 4 == 0);
+    debug_assert!(rgba.len().is_multiple_of(4));
     let mut out = vec![0u8; rgba.len()];
     for (o, px) in out.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
         let a = px[3] as u32;
@@ -563,7 +564,7 @@ pub fn premultiplied_bgra_from_rgba(rgba: &[u8]) -> Vec<u8> {
 /// 是 CR1/真机色差的同源根因之一）。纯函数，可跨平台单测。
 pub fn and_mask_packed_from_alpha(rgba: &[u8], size: u32) -> Vec<u8> {
     let size = size as usize;
-    let stride = (size + 15) / 16 * 2;
+    let stride = size.div_ceil(16) * 2;
     let mut mask = vec![0u8; stride * size];
     for y in 0..size {
         for x in 0..size {
