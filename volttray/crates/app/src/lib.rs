@@ -13,12 +13,13 @@ pub mod debounce;
 pub mod observer;
 
 pub use config::{
-    brighten, contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers, Config,
-    ConfigWarning, ConfigWatcher, IconBackground, IconFontColor, IconShape, IconStyle, RgbColor,
-    CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS, DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD,
-    DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX,
-    FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS,
-    TIER_PAD_PALETTE,
+    brighten, contrast_ok, contrast_ratio, flash_rgb, font_tier_for_percent, normalize_font_tiers,
+    normalize_poll_secs, Config, ConfigWarning, ConfigWatcher, IconBackground, IconFontColor,
+    IconShape, IconStyle, RgbColor, CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS,
+    DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS,
+    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX,
+    ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX,
+    LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS, POLL_TIERS_SECS, TIER_PAD_PALETTE,
 };
 pub use core::{
     guarded, AppCore, DeviceSnapshot, PollDecision, Snapshot, TimeoutOutcome, GRAY_AFTER,
