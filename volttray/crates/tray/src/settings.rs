@@ -27,10 +27,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use volttray_app::autostart;
 use volttray_app::config::{
     contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers, Config,
-    IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR,
-    DEFAULT_FONT_TIER_COLORS, DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD,
-    DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX,
-    FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
+    IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS,
+    DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS,
+    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX,
+    LOW_THRESHOLD_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
@@ -44,9 +44,7 @@ use windows::Win32::UI::Controls::{
     TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS,
 };
 // comdlg32（ChooseColorW 等）在 windows crate 的 Controls::Dialogs 子模块。
-use windows::Win32::UI::Controls::Dialogs::{
-    ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW,
-};
+use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetDlgItem, GetWindowLongPtrW, GetWindowTextW,
     IsWindow, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
@@ -54,9 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
     CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HCURSOR,
     HICON, HMENU, IMAGE_BITMAP, STM_SETIMAGE, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY,
-    WM_SETFONT, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW,
-    WS_VISIBLE, WS_VSCROLL,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY, WM_SETFONT,
+    WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WS_VSCROLL,
 };
 
 use crate::icon::{font_rgb, render_text_bitmap, IconColor};
@@ -1554,8 +1552,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 }
                 ths.push(next as u8);
             }
-            let (t2, c2, _) =
-                normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
+            let (t2, c2, _) = normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
             cfg.icon_font_tier_thresholds = t2;
             cfg.icon_font_tier_colors = c2;
             touched = true;

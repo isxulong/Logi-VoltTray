@@ -113,10 +113,12 @@ pub fn normalize_font_tiers(
     colors: Vec<RgbColor>,
 ) -> (Vec<u8>, Vec<RgbColor>, Vec<ConfigWarning>) {
     let mut warnings = Vec::new();
-    let mut warn = |reason: String| warnings.push(ConfigWarning {
-        key: "icon_font_tier_thresholds".into(),
-        reason,
-    });
+    let mut warn = |reason: String| {
+        warnings.push(ConfigWarning {
+            key: "icon_font_tier_thresholds".into(),
+            reason,
+        })
+    };
 
     let tier_count = thresholds.len() + 1;
     if tier_count < FONT_TIER_MIN_TIERS || tier_count > FONT_TIER_MAX_TIERS {
@@ -193,9 +195,7 @@ pub fn normalize_font_tiers(
     if col.len() > tier_count {
         warnings.push(ConfigWarning {
             key: "icon_font_tier_colors".into(),
-            reason: format!(
-                "too many colors; truncated to {tier_count}"
-            ),
+            reason: format!("too many colors; truncated to {tier_count}"),
         });
         col.truncate(tier_count);
     }
@@ -1035,11 +1035,7 @@ mod tests {
         let (ths, _, _) = normalize_font_tiers(vec![99, 5], vec![]);
         assert_eq!(ths, vec![99]);
         // 颜色对齐：不足补调色板、多余截断。
-        let (_, cols, w) = normalize_font_tiers(vec![20, 50], vec![RgbColor {
-            r: 0,
-            g: 0,
-            b: 0,
-        }]);
+        let (_, cols, w) = normalize_font_tiers(vec![20, 50], vec![RgbColor { r: 0, g: 0, b: 0 }]);
         assert_eq!(cols.len(), 3);
         assert!(w.iter().any(|x| x.key == "icon_font_tier_colors"));
         let (_, cols, _) = normalize_font_tiers(
