@@ -8,23 +8,26 @@
 //! - 形状（M9）：rounded 圆底（默认）/ square 直角 / transparent 透明无背景。
 //! - 背景色（M9）：light/dark 预设或 #RRGGBB 自定义；透明语义由形状承担。
 //! - 字体（M9）：系统字体名（默认 Segoe UI），GDI 缺字体时静默回退。
-//! - 闪烁（M11）：低电触发时在常态与「背景提亮 40%」两档间 1Hz 切换；
-//!   透明底改为提亮字色。
+//! - 闪烁（M11）：低电触发时在常态与「提亮帧」两档间 1Hz 切换；
+//!   v0.3.4 #3 提亮帧改用 flash_rgb（向白/向深灰插值），两帧必有可感知差异。
+//! - HICON 构造（v0.3.4 #1 根因修复，详见 rgba_to_hicon 注释）。
 
 use std::collections::HashMap;
 use volttray_app::config::{
-    brighten, contrast_ratio, IconBackground, IconFontColor, IconShape, RgbColor,
+    contrast_ratio, flash_rgb, IconBackground, IconFontColor, IconShape, RgbColor,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DEFAULT_CHARSET, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
+    CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+    SelectObject, SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, HBITMAP, HGDIOBJ, RGBQUAD,
+    TRANSPARENT,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
     REG_VALUE_TYPE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
 /// 图标颜色档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -167,7 +170,7 @@ pub fn system_dark_theme() -> bool {
     }
 }
 
-/// 闪烁时的背景提亮系数（M11：约 +40%）。
+/// 闪烁提亮帧的插值系数（M11：约 40%；v0.3.4 #3 改为 flash_rgb 插值）。
 const BLINK_BRIGHTEN: f64 = 0.4;
 
 /// 预渲染位图缓存：key = (颜色档, 文本, 提亮档)。
@@ -180,6 +183,10 @@ pub struct IconCache {
     font_family: String,
     /// 分档颜色表（v0.3.3 #4）；None = 未启用分档（走 IconColor::ALL）。
     tier_colors: Option<Vec<RgbColor>>,
+    /// 文本大小（% 相对基准字号，D-48，60..=140）。
+    text_scale: u8,
+    /// 背景块大小（% 相对位图内切块，D-48，60..=100）。
+    bg_scale: u8,
     map: HashMap<(IconColor, String, bool), Vec<u8>>,
 }
 
@@ -193,6 +200,8 @@ impl IconCache {
         font: IconFontColor,
         font_family: String,
         tiers: Option<Vec<RgbColor>>,
+        text_scale: u8,
+        bg_scale: u8,
     ) -> Self {
         let mut cache = IconCache {
             size,
@@ -202,6 +211,8 @@ impl IconCache {
             font,
             font_family,
             tier_colors: tiers,
+            text_scale: text_scale.clamp(60, 140),
+            bg_scale: bg_scale.clamp(60, 100),
             map: HashMap::new(),
         };
         cache.fill();
@@ -236,27 +247,37 @@ impl IconCache {
                 tiers,
             );
             for bright in [false, true] {
-                // M11 闪烁：有背景时提亮背景，透明底提亮字色。
+                // M11 闪烁：有背景时提亮背景，透明底提亮字色；
+                // v0.3.4 #3：flash_rgb 保证提亮帧与常态帧必有可见差异。
                 let (fg, bg) = if bright {
                     if shape == IconShape::Transparent {
-                        (brighten(rgb, BLINK_BRIGHTEN), None)
+                        (flash_rgb(rgb, BLINK_BRIGHTEN), None)
                     } else {
-                        (rgb, Some(brighten(bg_rgb, BLINK_BRIGHTEN)))
+                        (rgb, Some(flash_rgb(bg_rgb, BLINK_BRIGHTEN)))
                     }
                 } else {
                     // P1-1：非透明形状常态档必须带底色（与 settings.rs 预览同式）。
                     (rgb, (shape != IconShape::Transparent).then_some(bg_rgb))
                 };
                 for text in &texts {
-                    let rgba = render_text_bitmap(self.size, text, fg, bg, shape, &face);
+                    let rgba = render_text_bitmap(
+                        self.size,
+                        text,
+                        fg,
+                        bg,
+                        shape,
+                        &face,
+                        self.text_scale,
+                        self.bg_scale,
+                    );
                     self.map.insert((color, text.clone(), bright), rgba);
                 }
             }
         }
     }
 
-    /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体 / 分档表）
-    /// 时重建缓存。
+    /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体 / 分档表 /
+    /// 文本与背景缩放）时重建缓存。
     #[allow(clippy::too_many_arguments)]
     pub fn rebuild(
         &mut self,
@@ -267,7 +288,11 @@ impl IconCache {
         font: IconFontColor,
         font_family: String,
         tiers: Option<Vec<RgbColor>>,
+        text_scale: u8,
+        bg_scale: u8,
     ) {
+        let text_scale = text_scale.clamp(60, 140);
+        let bg_scale = bg_scale.clamp(60, 100);
         if size != self.size
             || dark_theme != self.dark_theme
             || shape != self.shape
@@ -275,6 +300,8 @@ impl IconCache {
             || font != self.font
             || font_family != self.font_family
             || tiers != self.tier_colors
+            || text_scale != self.text_scale
+            || bg_scale != self.bg_scale
         {
             self.size = size;
             self.dark_theme = dark_theme;
@@ -283,14 +310,25 @@ impl IconCache {
             self.font = font;
             self.font_family = font_family;
             self.tier_colors = tiers;
+            self.text_scale = text_scale;
+            self.bg_scale = bg_scale;
             self.fill();
         }
     }
 
-    /// 取渲染位图；`bright` = 低电闪烁的提亮档。
+    /// 取渲染图标；`bright` = 低电闪烁的提亮档。
+    ///
+    /// v0.3.4 #1 根因修复：不再用 tray-icon `Icon::from_rgba`（其内部
+    /// `CreateIcon` 以非预乘 32bpp **DDB** 作颜色平面——Win32 只对 DIB 的
+    /// 32bpp alpha 负责且要求预乘，DDB 通道被曲解导致自定义背景色偏差；
+    /// 同时其 AND 掩码按逐像素整字节打包，1bpp 行掩码完全错误）。
+    /// 改为 `rgba_to_hicon`：CreateDIBSection 预乘 BGRA + 规范 1bpp 掩码 +
+    /// CreateIconIndirect，再走公开接口 `Icon::from_handle`（托盘销毁时
+    /// DestroyIcon 由 tray-icon 负责）。
     pub fn icon_for(&self, color: IconColor, text: &str, bright: bool) -> Option<tray_icon::Icon> {
         let rgba = self.map.get(&(color, text.to_string(), bright))?;
-        tray_icon::Icon::from_rgba(rgba.clone(), self.size, self.size).ok()
+        let handle = rgba_to_hicon(rgba, self.size)?;
+        tray_icon::Icon::from_handle(handle).ok()
     }
 }
 
@@ -339,19 +377,33 @@ pub fn render_text_bitmap(
     bg: Option<(u8, u8, u8)>,
     shape: IconShape,
     face: &str,
+    text_scale: u8,
+    bg_scale: u8,
 ) -> Vec<u8> {
     let n = (size * size) as usize;
     let mut rgba = vec![0u8; n * 4];
     let chars: Vec<char> = text.chars().collect();
     let nchars = chars.len() as i32;
     let size_i = size as i32;
-    let font_h = if nchars >= 2 {
+    // v0.3.4 #4（D-48）：文本/背景缩放。100% 档与 v0.3.3 渲染逐字节一致。
+    // ts/bs 先钳制；背景块 block = 位图 × bs%（transparent 恒满幅）；
+    // 文本高度上限 cap = block × 15/16（背景块四周留 1px），超宽再按比例缩。
+    let ts = (text_scale as i32).clamp(60, 140);
+    let bs = (bg_scale as i32).clamp(60, 100);
+    let block = if matches!(shape, IconShape::Transparent) {
+        size_i
+    } else {
+        size_i * bs / 100
+    };
+    let cap = (block * 15 / 16).max(1);
+    let base_h = if nchars >= 2 {
         size_i * 5 / 8
     } else {
         size_i * 3 / 4
     };
+    let mut font_h = (base_h * ts / 100).max(1).min(cap);
     // 数字宽度 ≈ 0.55 × 字高；CJK 宽度 ≈ 1.0 × 字高。
-    let est_w: i32 = chars
+    let mut est_w: i32 = chars
         .iter()
         .map(|c| {
             if c.is_ascii() {
@@ -361,6 +413,11 @@ pub fn render_text_bitmap(
             }
         })
         .sum();
+    if est_w > cap {
+        // 超宽：按 cap/est_w 比例缩字，保证文本不溢出背景块（est_w 与 font_h 成比例，缩后即 cap）。
+        font_h = (font_h * cap / est_w.max(1)).max(1);
+        est_w = cap;
+    }
     let x = ((size_i - est_w) / 2).max(0);
     let y = ((size_i - font_h) / 2).max(0);
     let text_w: Vec<u16> = text.encode_utf16().collect();
@@ -423,7 +480,10 @@ pub fn render_text_bitmap(
             // BGRA → RGBA：取字覆盖度（亮度），与形状底色合成。
             let src = std::slice::from_raw_parts(bits as *const u8, n * 4);
             let cx = (size_i - 1) as f32 / 2.0;
-            let radius = size_i as f32 / 2.0;
+            // v0.3.4 #4：背景块几何基于 block（100% 时与 v0.3.3 相同）。
+            let radius = block as f32 / 2.0;
+            let lo = (size_i - block) / 2;
+            let hi = lo + block - 1;
             for i in 0..n {
                 let (py, px) = ((i / size as usize) as i32, (i % size as usize) as i32);
                 let (bb, gg, rr) = (src[i * 4], src[i * 4 + 1], src[i * 4 + 2]);
@@ -439,7 +499,7 @@ pub fn render_text_bitmap(
                                 (radius + 0.5 - dist).clamp(0.0, 1.0)
                             }
                             IconShape::Square => {
-                                let edge = (px).min(py).min(size_i - 1 - px).min(size_i - 1 - py);
+                                let edge = (px - lo).min(py - lo).min(hi - px).min(hi - py);
                                 (edge as f32 + 0.5).clamp(0.0, 1.0)
                             }
                             IconShape::Transparent => 0.0,
@@ -473,6 +533,125 @@ pub fn render_text_bitmap(
         let _ = DeleteDC(hdc);
     }
     rgba
+}
+
+/// RGBA（直 alpha）→ 预乘 BGRA 字节序（Win32 32bpp DIB 语义）。
+///
+/// v0.3.4 #1 根因修复的一部分：Win32 只对 DIB 的 32bpp alpha 生效，且要求
+/// **预乘**（premultiplied）BGRA——即 `B = B×A/255`。直 alpha 写入会被
+/// GDI/Shell 当作已预乘解释，导致 RGB 被压缩、颜色发灰发暗。
+/// 纯函数，可跨平台单测。
+pub fn premultiplied_bgra_from_rgba(rgba: &[u8]) -> Vec<u8> {
+    debug_assert!(rgba.len() % 4 == 0);
+    let mut out = vec![0u8; rgba.len()];
+    for (o, px) in out.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+        let a = px[3] as u32;
+        // 预乘：四舍五入，a=255 时精确等于原值（纯红 (255,0,0,255) → BGRA [0,0,255,255]）。
+        o[0] = ((px[2] as u32 * a + 127) / 255) as u8;
+        o[1] = ((px[1] as u32 * a + 127) / 255) as u8;
+        o[2] = ((px[0] as u32 * a + 127) / 255) as u8;
+        o[3] = px[3];
+    }
+    out
+}
+
+/// RGBA → 1bpp 逐行 MSB-first 压缩 AND 掩码（CreateIconIndirect 的 hbmMask）。
+///
+/// 行跨度 = ((size + 15) / 16) * 2 字节（DWORD 对齐）。位语义：**1 = 透明**，
+/// 仅在 alpha==0 的像素置 1（掩码只负责全透明区域，半透明交给 alpha 混合；
+/// 全 0 掩码 + 32bpp alpha 是规范组合，v0.3.3 旧路径把掩码错写成逐字节扩展，
+/// 是 CR1/真机色差的同源根因之一）。纯函数，可跨平台单测。
+pub fn and_mask_packed_from_alpha(rgba: &[u8], size: u32) -> Vec<u8> {
+    let size = size as usize;
+    let stride = (size + 15) / 16 * 2;
+    let mut mask = vec![0u8; stride * size];
+    for y in 0..size {
+        for x in 0..size {
+            if rgba[(y * size + x) * 4 + 3] == 0 {
+                mask[y * stride + x / 8] |= 0x80 >> (x % 8);
+            }
+        }
+    }
+    mask
+}
+
+/// RGBA 缓冲 → HICON（v0.3.4 #1 根因修复的核心路径）。
+///
+/// 根因：tray-icon 0.26.1 的 `Icon::from_rgba` 走 `CreateIcon`，把非预乘
+/// 32bpp 数据当 DDB 颜色平面使用，且 AND 掩码按「每像素一字节」错位填充
+/// （规范要求 1bpp 压缩位图）。Win32 语义下 DDB 的 alpha 通道不被尊重，
+/// 导致托盘对 32bpp 图标的 alpha 解释错乱——透明像素污染 RGB、自定义
+/// 背景色被曲解发灰发暗（真机 #1 与质检 CR1 同源）。
+///
+/// 修复：自建规范 HICON——`CreateDIBSection`（32bpp top-down DIB，Win32
+/// 唯一尊重 alpha 的路径）写入预乘 BGRA；`CreateBitmap` 建 1bpp 掩码；
+/// `CreateIconIndirect` 组装。HICON 所有权经 `tray_icon::Icon::from_handle`
+/// 移交给 tray-icon（其 Drop 会 DestroyIcon），本函数返回后两个临时位图
+/// 立即 DeleteObject，不泄漏。
+pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
+    let size_i = size as i32;
+    let n = (size * size) as usize;
+    if rgba.len() != n * 4 {
+        return None;
+    }
+    unsafe {
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size_i,
+                biHeight: -size_i, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [RGBQUAD::default()],
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let Ok(hcolor) = CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        else {
+            let _ = DeleteDC(hdc);
+            return None;
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(hcolor.0));
+            let _ = DeleteDC(hdc);
+            return None;
+        }
+        let bgra = premultiplied_bgra_from_rgba(rgba);
+        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, n * 4);
+        let mask = and_mask_packed_from_alpha(rgba, size);
+        // CreateBitmap 单平面 1bpp：hbmMask 规范形态。
+        let hmask = CreateBitmap(size_i, size_i, 1, 1, Some(mask.as_ptr().cast()));
+        let hmask = if hmask.is_invalid() {
+            HBITMAP::default()
+        } else {
+            hmask
+        };
+        let info = ICONINFO {
+            fIcon: windows::Win32::Foundation::BOOL(1),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: hmask,
+            hbmColor: hcolor,
+        };
+        let hicon = CreateIconIndirect(&info);
+        // 临时位图的所有权在 CreateIconIndirect 复制后即可释放。
+        if !hmask.is_invalid() {
+            let _ = DeleteObject(HGDIOBJ(hmask.0));
+        }
+        let _ = DeleteObject(HGDIOBJ(hcolor.0));
+        let _ = DeleteDC(hdc);
+        if hicon.is_invalid() {
+            None
+        } else {
+            Some(hicon.0 as isize)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -747,6 +926,8 @@ mod tests {
             IconFontColor::Auto,
             "Segoe UI".to_string(),
             None,
+            100,
+            100,
         );
         let rgba = cache
             .map
@@ -766,6 +947,8 @@ mod tests {
             IconFontColor::Auto,
             "Segoe UI".to_string(),
             None,
+            100,
+            100,
         );
         let rgba_t = transparent
             .map
@@ -788,6 +971,8 @@ mod tests {
                 None,
                 IconShape::Transparent,
                 "Segoe UI",
+                100,
+                100,
             );
             let center = ((size - 1) / 2) as i32;
             let mut x0 = i32::MAX;
@@ -837,6 +1022,8 @@ mod tests {
             None,
             IconShape::Transparent,
             "Segoe UI",
+            100,
+            100,
         );
         let partial = rgba
             .chunks_exact(4)
@@ -879,6 +1066,8 @@ mod tests {
             IconFontColor::Auto,
             "Segoe UI".to_string(),
             Some(tiers),
+            100,
+            100,
         );
         for i in 0..3u8 {
             assert!(
@@ -898,5 +1087,119 @@ mod tests {
         assert!(!cache
             .map
             .contains_key(&(IconColor::Red, "50".to_string(), false)));
+    }
+
+    /// v0.3.4 #1 验收：纯红 (255,0,0) 自定义背景，常态渲染位图背景像素
+    /// 主通道必须是 R——同时拦截「字节序颠倒（设红显蓝）」与「alpha 污染
+    /// （发灰发暗）」两类回归；并验证预乘 BGRA 输出字节序正确。
+    #[test]
+    fn pure_red_custom_bg_pixel_is_red() {
+        let size = 32u32;
+        let bg = IconBackground::Custom(RgbColor { r: 255, g: 0, b: 0 });
+        let cache = IconCache::new(
+            size,
+            true,
+            IconShape::Rounded,
+            bg,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let rgba = cache
+            .map
+            .get(&(IconColor::Default, "50".to_string(), false))
+            .expect("bitmap cached");
+        let idx = ((2 * size + size / 2) * 4) as usize;
+        assert_eq!(&rgba[idx..idx + 3], &[255, 0, 0], "bg pixel must be pure red (RGB order)");
+        assert_eq!(rgba[idx + 3], 255, "bg pixel must be opaque");
+        let bgra = premultiplied_bgra_from_rgba(rgba);
+        // 预乘 BGRA：B=0, G=0, R=255, A=255（字节序颠倒会变成 [255,0,0,255]）。
+        assert_eq!(&bgra[idx..idx + 4], &[0, 0, 255, 255]);
+    }
+
+    /// v0.3.4 #1：预乘 + 字节序换算的数学正确性。
+    #[test]
+    fn premultiplied_bgra_math_and_byte_order() {
+        // 纯红不透明：BGRA = [0,0,255,255]。
+        assert_eq!(premultiplied_bgra_from_rgba(&[255, 0, 0, 255]), &[0, 0, 255, 255]);
+        // 纯蓝不透明：BGRA = [255,0,0,255]。
+        assert_eq!(premultiplied_bgra_from_rgba(&[0, 0, 255, 255]), &[255, 0, 0, 255]);
+        // 半透明：B=(64*128+127)/255=32, G=(128*128+127)/255=64, R=(255*128+127)/255=128。
+        assert_eq!(
+            premultiplied_bgra_from_rgba(&[255, 128, 64, 128]),
+            &[32, 64, 128, 128]
+        );
+        // 全透明像素 RGB 归零（alpha 污染回归的护栏）。
+        assert_eq!(premultiplied_bgra_from_rgba(&[255, 0, 0, 0]), &[0, 0, 0, 0]);
+    }
+
+    /// v0.3.4 #1：1bpp MSB-first 压缩掩码。2x2，alpha = [255,0,0,255]：
+    /// 行 0 字节 0 = 0b0100_0000（第 1 像素透明），行 1 字节 = 0b1000_0000。
+    #[test]
+    fn and_mask_packed_msb_first() {
+        let rgba = [
+            255u8, 0, 0, 255, // (0,0) 不透明
+            0, 0, 0, 0, // (1,0) 透明
+            0, 0, 0, 0, // (0,1) 透明
+            255, 0, 0, 255, // (1,1) 不透明
+        ];
+        let mask = and_mask_packed_from_alpha(&rgba, 2);
+        // 行跨度 = ((2+15)/16)*2 = 2 字节；总长 4。
+        assert_eq!(mask.len(), 4);
+        assert_eq!(mask, &[0x40, 0x00, 0x80, 0x00]);
+        // 全不透明 → 掩码全 0（v0.3.3 旧路径逐字节掩码的回归护栏）。
+        let solid = vec![255u8; 4 * 4];
+        assert!(and_mask_packed_from_alpha(&solid, 2).iter().all(|b| *b == 0));
+    }
+
+    /// v0.3.4 #4 验收：缩放矩阵（文本 60/100/140 × 背景 60/80/100 × 圆/方）下，
+    /// 文字墨迹不超出背景块、背景块不超出位图边界。
+    #[test]
+    fn scale_matrix_keeps_text_within_block_and_bitmap() {
+        let size = 32u32;
+        for text_scale in [60u8, 100, 140] {
+            for bg_scale in [60u8, 80, 100] {
+                for shape in [IconShape::Rounded, IconShape::Square] {
+                    for text in ["50", "满"] {
+                        let bg = (0x0A, 0x6C, 0xFF);
+                        let with_text = render_text_bitmap(
+                            size, text, (255, 255, 255), Some(bg), shape, "Segoe UI",
+                            text_scale, bg_scale,
+                        );
+                        let bg_only = render_text_bitmap(
+                            size, "", (255, 255, 255), Some(bg), shape, "Segoe UI",
+                            text_scale, bg_scale,
+                        );
+                        // 文字墨迹 = 与纯背景帧的差异像素。
+                        let mut ink = Vec::new();
+                        for i in 0..(size * size) as usize {
+                            if with_text[i * 4..i * 4 + 4] != bg_only[i * 4..i * 4 + 4] {
+                                ink.push(i);
+                            }
+                        }
+                        assert!(!ink.is_empty(), "no ink at ts={text_scale} bs={bg_scale}");
+                        // 背景块边界（与渲染几何同式）。
+                        let block = size as i32 * bg_scale as i32 / 100;
+                        let lo = (size as i32 - block) / 2;
+                        let hi = lo + block - 1;
+                        for i in &ink {
+                            let (py, px) = (
+                                (*i / size as usize) as i32,
+                                (*i % size as usize) as i32,
+                            );
+                            assert!(
+                                px >= lo && px <= hi && py >= lo && py <= hi,
+                                "ink at ({px},{py}) outside block [{lo},{hi}]                                  ts={text_scale} bs={bg_scale} shape={shape:?} text={text}"
+                            );
+                        }
+                        // 背景块不超出位图：所有非透明像素都在位图内（天然成立），
+                        // 再验边界值合法。
+                        assert!(lo >= 0 && hi < size as i32);
+                    }
+                }
+            }
+        }
     }
 }
