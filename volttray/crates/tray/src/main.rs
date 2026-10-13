@@ -1149,7 +1149,9 @@ mod imp {
         fn export_filename_uses_logivolttray_prefix() {
             let root = temp_root("prefix");
             let path = write_diag_export(&root, "LogiVoltTray-diag-export-42.json", "{}").unwrap();
-            assert!(path.to_string_lossy().contains("LogiVoltTray-diag-export-42.json"));
+            assert!(path
+                .to_string_lossy()
+                .contains("LogiVoltTray-diag-export-42.json"));
             let _ = std::fs::remove_dir_all(&root);
         }
     }
