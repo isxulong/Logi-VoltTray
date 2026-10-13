@@ -1,28 +1,39 @@
-//! 设置窗口（v0.3.0 产品方案 M9-M13）：裸 Win32 单页非模态窗口。
+//! 设置窗口（v0.3.0 产品方案 M9-M13；v0.3.3 #3/#4）：裸 Win32 单页非模态窗口。
 //!
 //! 形态：无模式、单实例（重复打开只前置既有窗口）、改动即时生效（无确定/取消）、
 //! 关闭即销毁。GUI 改动直接写入共享配置（AppCore 同一个 `Arc<RwLock<Config>>`）
 //! 并持久化 TOML；TOML 侧改动经既有 mtime 热重载进入共享配置——双向一致。
 //!
+//! v0.3.3：
+//! - #3 所有颜色入口（背景色 / 字体颜色 / 分档色点）点击「选色…」呼出系统
+//!   取色对话框（ChooseColorW，展开完整色轮 + 自定义色），HEX 手输框保留、
+//!   双向同步（D-41）；
+//! - #4 字体颜色分档：启用后隐藏单一字体颜色入口；N 档 = N-1 个阈值数字框
+//!   （该数字及以下的电量归上一档）+ N 个色点，色点点击走同一取色对话框；
+//!   阈值校验 1–99 严格递增（D-42）。
+//!
 //! 三组控件 + 每组「恢复默认」+ 全局「恢复全部默认」：
 //! - 外观：形状（圆角/直角/透明）、背景色（深/浅/自定义 #RRGGBB）、字体（系统
-//!   字体枚举）、字体颜色（auto / 自定义 #RRGGBB）、实时预览；对比度 <3.0 仅警告
-//!   不阻断（M9）；
+//!   字体枚举）、字体颜色（auto / 自定义 #RRGGBB / 分档）、实时预览；对比度 <3.0
+//!   仅警告不阻断（M9）；
 //! - 刷新：轮询间隔 15/30/60/120/300 秒（M10）；
 //! - 低电提醒：闪烁开关 + 阈值滑块 5..=50 步进 5（M11/M12）。
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use volttray_app::autostart;
 use volttray_app::config::{
-    contrast_ok, contrast_ratio, Config, IconBackground, IconFontColor, IconShape, RgbColor,
-    CONTRAST_FLOOR, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
+    contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers, Config,
+    IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR,
+    DEFAULT_FONT_TIER_COLORS, DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD,
+    DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX,
+    FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
 };
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC,
     DEFAULT_CHARSET, DEFAULT_GUI_FONT, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, TEXTMETRICW,
@@ -32,15 +43,20 @@ use windows::Win32::UI::Controls::{
     InitCommonControlsEx, BST_CHECKED, BST_UNCHECKED, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX,
     TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS,
 };
+// comdlg32（ChooseColorW 等）在 windows crate 的 Controls::Dialogs 子模块。
+use windows::Win32::UI::Controls::Dialogs::{
+    ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetDlgItem, GetWindowLongPtrW, GetWindowTextW,
     IsWindow, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
     ShowWindow, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CBN_SELCHANGE, CBS_DROPDOWNLIST,
     CB_ADDSTRING, CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
     CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HCURSOR,
-    HICON, HMENU, IMAGE_BITMAP, STM_SETIMAGE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY, WM_SETFONT, WNDCLASSW,
-    WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    HICON, HMENU, IMAGE_BITMAP, STM_SETIMAGE, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY,
+    WM_SETFONT, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW,
+    WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::icon::{font_rgb, render_text_bitmap, IconColor};
@@ -52,10 +68,14 @@ macro_rules! SendMessageW {
     };
 }
 
-// windows crate 0.62 未导出的两个控件常量（本地定义）：
+// windows crate 0.62 未导出的控件常量（本地定义）：
 // TBM_GETPOS = WM_USER+0；SS_BITMAP = 0x0E。
 const TBM_GETPOS: u32 = 0x0400;
 const SS_BITMAP: u32 = 14;
+/// SS_NOTIFY = 0x0100（STATIC 点击通知 STN_CLICKED；windows crate 未导出）。
+const SS_NOTIFY: u32 = 0x0100;
+/// ES_NUMBER = 0x2000（EDIT 仅数字；windows crate 未导出）。
+const ES_NUMBER: u32 = 0x2000;
 
 /// BS_GROUPBOX（分组框样式；windows crate 以 i32 导出，这里只用作样式位）。
 const BS_GROUPBOX: u32 = 7;
@@ -64,6 +84,9 @@ const BS_AUTOCHECKBOX: u32 = 3;
 
 /// 设置窗口单实例句柄（0 = 未打开）。
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// ChooseColorW 自定义颜色槽（进程级持久；comdlg32 要求可写指针）。
+static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0); 16]);
 
 // 控件 ID。
 const IDC_SHAPE: i32 = 2001;
@@ -82,9 +105,23 @@ const IDC_SLIDER: i32 = 2013;
 const IDC_THRESH_VAL: i32 = 2014;
 const IDC_STATUS: i32 = 2015;
 const IDC_INTERVAL: i32 = 2016;
+/// 背景色「选色…」按钮（#3 色轮入口）。
+const IDC_BG_PICK: i32 = 2017;
+/// 字体颜色「选色…」按钮（#3 色轮入口）。
+const IDC_FONT_PICK: i32 = 2018;
+/// 「字体颜色分档」复选框（#4）。
+const IDC_TIERED: i32 = 2019;
+/// 分档数量下拉（2..=5 档）。
+const IDC_TIER_COUNT: i32 = 2020;
+/// 分档阈值数字框（最多 4 个 = 5 档 - 1）。
+const IDC_TIER_TH0: i32 = 2021;
+/// 分档色点（最多 5 个）。
+const IDC_TIER_DOT0: i32 = 2031;
 
 /// 预览位图边长（像素）。
 const PREVIEW_PX: i32 = 48;
+/// 分档色点边长（像素）。
+const DOT_PX: i32 = 26;
 
 const INTERVALS: [u64; 5] = [15, 30, 60, 120, 300];
 
@@ -147,7 +184,7 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             Err(_) => return,
         };
         let class = wide("VoltTraySettingsWnd");
-        let title = wide("VoltTray 设置");
+        let title = wide("LogiVoltTray 设置");
         let wc = WNDCLASSW {
             style: WNDCLASS_STYLES(0),
             lpfnWndProc: Some(wndproc),
@@ -180,7 +217,7 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             510,
-            570,
+            624,
             None,
             None,
             Some(hinst),
@@ -207,8 +244,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ACTIVATE => {
             // 双向一致（M9）：窗口重新激活时以共享配置为准（覆盖外部 TOML 改动
-            // 后的控件状态）。仅在「激活」而非每次点击时同步。
-            if wparam.0 & 0xFFFF == 1 && !ctx.is_null() {
+            // 后的控件状态）。仅激活时同步。P3-2：WA_CLICKACTIVE（鼠标点击激活）
+            // 低位为 1、WA_ACTIVE 为 1、WA_INACTIVE 为 0——「非 0」覆盖点击激活。
+            if wparam.0 & 0xFFFF != 0 && !ctx.is_null() {
                 let ctx = &*ctx;
                 if let Ok(guard) = ctx.arc.read() {
                     *ctx.cfg.borrow_mut() = guard.clone();
@@ -329,7 +367,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         8,
         4,
         482,
-        232,
+        316,
         0,
         hinst,
         hfont,
@@ -341,7 +379,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(BS_GROUPBOX),
         WINDOW_EX_STYLE(0),
         8,
-        244,
+        328,
         482,
         64,
         0,
@@ -355,7 +393,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(BS_GROUPBOX),
         WINDOW_EX_STYLE(0),
         8,
-        316,
+        400,
         482,
         108,
         0,
@@ -434,6 +472,21 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         hinst,
         hfont,
     );
+    // #3：色轮入口（系统取色对话框，展开完整调色板）。
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("选色…"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        274,
+        58,
+        54,
+        24,
+        IDC_BG_PICK,
+        hinst,
+        hfont,
+    );
     create_ctl(
         hwnd,
         "STATIC",
@@ -506,6 +559,20 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
     );
     create_ctl(
         hwnd,
+        "BUTTON",
+        Some("选色…"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        274,
+        122,
+        54,
+        24,
+        IDC_FONT_PICK,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
         "STATIC",
         Some("预览"),
         ws(0),
@@ -547,6 +614,112 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         hfont,
     );
 
+    // —— 字体颜色分档（#4）——
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("字体颜色分档"),
+        ws(BS_AUTOCHECKBOX),
+        WINDOW_EX_STYLE(0),
+        20,
+        212,
+        132,
+        22,
+        IDC_TIERED,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("档数"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        162,
+        214,
+        32,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        198,
+        210,
+        64,
+        140,
+        IDC_TIER_COUNT,
+        hinst,
+        hfont,
+    );
+    // 阈值数字框（N 档 = N-1 个；该数字及以下电量归上一档）。
+    for i in 0..4 {
+        create_ctl(
+            hwnd,
+            "EDIT",
+            None,
+            ws(ES_NUMBER),
+            WS_EX_CLIENTEDGE,
+            62 + i * 44,
+            242,
+            38,
+            22,
+            IDC_TIER_TH0 + i,
+            hinst,
+            hfont,
+        );
+    }
+    // 分档色点（N 个；点击呼出取色对话框）。
+    for i in 0..5 {
+        create_ctl(
+            hwnd,
+            "STATIC",
+            None,
+            ws(SS_BITMAP | SS_NOTIFY),
+            WINDOW_EX_STYLE(0),
+            62 + i * 44,
+            268,
+            DOT_PX,
+            DOT_PX,
+            IDC_TIER_DOT0 + i,
+            hinst,
+            hfont,
+        );
+    }
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("阈值"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        246,
+        36,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("阈值需 1–99 严格递增；数字及以下的电量归上一档（20/50 → 0-20、21-50、51-100）"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        294,
+        452,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+
     // —— 刷新 ——
     create_ctl(
         hwnd,
@@ -555,7 +728,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         20,
-        272,
+        356,
         60,
         20,
         0,
@@ -569,7 +742,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         WINDOW_EX_STYLE(0),
         96,
-        268,
+        352,
         180,
         200,
         IDC_INTERVAL,
@@ -585,7 +758,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         96,
-        296,
+        380,
         320,
         20,
         0,
@@ -599,7 +772,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         290,
-        266,
+        350,
         100,
         26,
         IDC_RESET_REFRESH,
@@ -615,7 +788,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(BS_AUTOCHECKBOX),
         WINDOW_EX_STYLE(0),
         20,
-        344,
+        428,
         180,
         22,
         IDC_BLINK,
@@ -629,7 +802,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         20,
-        380,
+        464,
         60,
         20,
         0,
@@ -643,7 +816,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(TBS_AUTOTICKS),
         WINDOW_EX_STYLE(0),
         96,
-        376,
+        460,
         180,
         32,
         IDC_SLIDER,
@@ -657,7 +830,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         290,
-        380,
+        464,
         50,
         20,
         IDC_THRESH_VAL,
@@ -671,7 +844,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         290,
-        340,
+        424,
         100,
         26,
         IDC_RESET_LOW,
@@ -687,7 +860,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         16,
-        436,
+        520,
         120,
         26,
         IDC_RESET_ALL,
@@ -701,7 +874,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         16,
-        470,
+        554,
         466,
         20,
         IDC_STATUS,
@@ -721,6 +894,10 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
     let fc = GetDlgItem(Some(hwnd), IDC_FONT_COLOR).unwrap_or_default();
     for s in ["自动（按电量档位）", "自定义"] {
         add_string(fc, s);
+    }
+    let tc = GetDlgItem(Some(hwnd), IDC_TIER_COUNT).unwrap_or_default();
+    for k in FONT_TIER_MIN_TIERS..=FONT_TIER_MAX_TIERS {
+        add_string(tc, &format!("{k} 档"));
     }
     let fam = GetDlgItem(Some(hwnd), IDC_FONT_FAMILY).unwrap_or_default();
     for name in enum_fonts() {
@@ -875,15 +1052,110 @@ fn ctl(hwnd: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(hwnd), id).unwrap_or_default() }
 }
 
+/// 显示/隐藏控件（分档模式下隐藏单一字体颜色入口、多余阈值框与色点）。
+unsafe fn show_ctl(hwnd: HWND, id: i32, show: bool) {
+    let _ = ShowWindow(ctl(hwnd, id), if show { SW_SHOW } else { SW_HIDE });
+}
+
+/// 呼出系统取色对话框（#3：CC_FULLOPEN 展开完整色轮 + 自定义色区）。
+/// 返回 None = 用户取消。模态期间不持有任何配置借用（WM_ACTIVATE 同步会重入）。
+unsafe fn pick_color(owner: HWND, initial: RgbColor) -> Option<RgbColor> {
+    let mut custom = CUSTOM_COLORS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cc = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: owner,
+        hInstance: HWND::default(),
+        rgbResult: COLORREF(
+            (initial.b as u32) | ((initial.g as u32) << 8) | ((initial.r as u32) << 16),
+        ),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        lCustData: LPARAM(0),
+        lpfnHook: None,
+        lpTemplateName: PCWSTR::null(),
+    };
+    if ChooseColorW(&mut cc).as_bool() {
+        let c = cc.rgbResult.0;
+        Some(RgbColor {
+            r: ((c >> 16) & 0xFF) as u8,
+            g: ((c >> 8) & 0xFF) as u8,
+            b: (c & 0xFF) as u8,
+        })
+    } else {
+        None
+    }
+}
+
+/// 生成 DOT_PX² 的分档色点位图（BGRA，1px 抗锯齿边缘的实心圆点）。
+fn tier_dot_bgra(c: RgbColor) -> Vec<u8> {
+    let size = DOT_PX;
+    let center = (size as f32 - 1.0) / 2.0;
+    let radius = (size as f32 / 2.0) - 1.5; // 留 1.5px 边距
+    let mut v = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let d = (dx * dx + dy * dy).sqrt();
+            // 1px 线性抗锯齿过渡。
+            let cov = (radius - d).clamp(-1.0, 1.0) * 0.5 + 0.5;
+            let i = ((y * size + x) * 4) as usize;
+            v[i] = c.b;
+            v[i + 1] = c.g;
+            v[i + 2] = c.r;
+            v[i + 3] = (cov * 255.0).round() as u8;
+        }
+    }
+    v
+}
+
+/// 把分档颜色画到色点控件（SS_BITMAP）。
+unsafe fn draw_dot(hwnd: HWND, id: i32, color: RgbColor) {
+    let bgra = tier_dot_bgra(color);
+    let dot = ctl(hwnd, id);
+    let hbmp = CreateBitmap(
+        DOT_PX,
+        DOT_PX,
+        1,
+        32,
+        Some(bgra.as_ptr() as *const core::ffi::c_void),
+    );
+    if !hbmp.is_invalid() {
+        let old = SendMessageW!(
+            dot,
+            STM_SETIMAGE,
+            WPARAM(IMAGE_BITMAP.0 as usize),
+            LPARAM(hbmp.0 as isize)
+        );
+        if old != 0 {
+            let _ = DeleteObject(HGDIOBJ(old as *mut core::ffi::c_void));
+        }
+    }
+}
+
 /// 校验外观对比度（M9：<3.0 仅警告不阻断）并刷新预览。
 fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     let cfg = ctx.cfg.borrow();
+    // #4：分档启用时预览用当前电量对应的分档色（预览文本非数字则回退自动色）。
+    let tiered = cfg.icon_font_tiers_enabled;
+    let tiers: Option<&[RgbColor]> = if tiered {
+        Some(cfg.icon_font_tier_colors.as_slice())
+    } else {
+        None
+    };
+    let percent: Option<u8> = ctx.preview_text.parse().ok();
+    let level = if let (true, Some(p)) = (tiered, percent) {
+        IconColor::Tier(font_tier_for_percent(&cfg.icon_font_tier_thresholds, p) as u8)
+    } else {
+        IconColor::Default
+    };
     let rgb = font_rgb(
-        IconColor::Default,
+        level,
         ctx.dark_theme,
         cfg.icon_shape,
         cfg.icon_background,
         cfg.icon_font_color,
+        tiers,
     );
     let bg_opt = (cfg.icon_shape != IconShape::Transparent).then_some(cfg.icon_background.rgb());
     let rgba = render_text_bitmap(
@@ -940,10 +1212,21 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         }
     }
 
-    // 对比度提示（M9：仅警告）。
-    let font_c = match cfg.icon_font_color {
-        IconFontColor::Fixed(c) => (c.r, c.g, c.b),
-        IconFontColor::Auto => rgb,
+    // 对比度提示（M9：仅警告）。分档模式取当前档颜色（无数字回退最高档）。
+    let font_c = if tiered {
+        let t = match percent {
+            Some(p) => font_tier_for_percent(&cfg.icon_font_tier_thresholds, p),
+            None => cfg.icon_font_tier_colors.len().saturating_sub(1),
+        };
+        cfg.icon_font_tier_colors
+            .get(t)
+            .map(|c| (c.r, c.g, c.b))
+            .unwrap_or(rgb)
+    } else {
+        match cfg.icon_font_color {
+            IconFontColor::Fixed(c) => (c.r, c.g, c.b),
+            IconFontColor::Auto => rgb,
+        }
     };
     let bg_c = match cfg.icon_shape {
         IconShape::Transparent => {
@@ -1018,6 +1301,45 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             .unwrap_or(0);
         combo_set_sel(iv, idx as i32);
 
+        // —— 字体颜色分档（#4）——
+        let tiered = cfg.icon_font_tiers_enabled;
+        SendMessageW!(
+            ctl(hwnd, IDC_TIERED),
+            BM_SETCHECK,
+            WPARAM(if tiered {
+                BST_CHECKED.0 as usize
+            } else {
+                BST_UNCHECKED.0 as usize
+            }),
+            LPARAM(0)
+        );
+        // 启用分档后隐藏单一字体颜色入口（用户原话：按钮右侧就不需要单一颜色选择）。
+        show_ctl(hwnd, IDC_FONT_COLOR, !tiered);
+        show_ctl(hwnd, IDC_FONT_HEX, !tiered);
+        show_ctl(hwnd, IDC_FONT_PICK, !tiered);
+        let n = cfg
+            .icon_font_tier_colors
+            .len()
+            .clamp(FONT_TIER_MIN_TIERS, FONT_TIER_MAX_TIERS);
+        combo_set_sel(ctl(hwnd, IDC_TIER_COUNT), (n - FONT_TIER_MIN_TIERS) as i32);
+        let ths = cfg.icon_font_tier_thresholds.clone();
+        for i in 0..4usize {
+            let e = ctl(hwnd, IDC_TIER_TH0 + i as i32);
+            let _ = ShowWindow(e, if i < n - 1 { SW_SHOW } else { SW_HIDE });
+            if let Some(t) = ths.get(i) {
+                let v = wide(&t.to_string());
+                let _ = SetWindowTextW(e, PCWSTR(v.as_ptr()));
+            }
+        }
+        let cols = cfg.icon_font_tier_colors.clone();
+        for i in 0..5usize {
+            let d = IDC_TIER_DOT0 + i as i32;
+            let _ = ShowWindow(ctl(hwnd, d), if i < n { SW_SHOW } else { SW_HIDE });
+            if let Some(c) = cols.get(i) {
+                draw_dot(hwnd, d, *c);
+            }
+        }
+
         let blink = ctl(hwnd, IDC_BLINK);
         SendMessageW!(
             blink,
@@ -1044,11 +1366,84 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
     refresh_preview_and_hints(hwnd, ctx);
 }
 
+/// 「选色…」按钮与分档色点点击：先取初始色（短借用）→ 呼出模态取色 → 回写。
+unsafe fn handle_color_pick(hwnd: HWND, ctx: &Ctx, id: i32) {
+    let initial = {
+        let cfg = ctx.cfg.borrow();
+        match id {
+            IDC_BG_PICK => match cfg.icon_background {
+                IconBackground::Custom(c) => c,
+                IconBackground::Dark => RgbColor {
+                    r: 0x1F,
+                    g: 0x1F,
+                    b: 0x1F,
+                },
+                IconBackground::Light => RgbColor {
+                    r: 0xF2,
+                    g: 0xF2,
+                    b: 0xF2,
+                },
+            },
+            IDC_FONT_PICK => match cfg.icon_font_color {
+                IconFontColor::Fixed(c) => c,
+                IconFontColor::Auto => RgbColor {
+                    r: 0xFF,
+                    g: 0xFF,
+                    b: 0xFF,
+                },
+            },
+            _ => {
+                let i = (id - IDC_TIER_DOT0) as usize;
+                cfg.icon_font_tier_colors
+                    .get(i)
+                    .copied()
+                    .unwrap_or(RgbColor {
+                        r: 0x80,
+                        g: 0x80,
+                        b: 0x80,
+                    })
+            }
+        }
+    };
+    let Some(picked) = pick_color(hwnd, initial) else {
+        return; // 用户取消
+    };
+    {
+        let mut cfg = ctx.cfg.borrow_mut();
+        match id {
+            IDC_BG_PICK => {
+                cfg.icon_background = IconBackground::Custom(picked);
+                // 「自定义」档被选中，HEX 框与下拉在下一次 sync 对齐。
+            }
+            IDC_FONT_PICK => {
+                cfg.icon_font_color = IconFontColor::Fixed(picked);
+            }
+            _ => {
+                let i = (id - IDC_TIER_DOT0) as usize;
+                if i < cfg.icon_font_tier_colors.len() {
+                    cfg.icon_font_tier_colors[i] = picked;
+                }
+            }
+        }
+        ctx.apply(&cfg);
+    }
+    sync_controls(hwnd, ctx);
+}
+
 fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
     if ctx.syncing.get() {
         return;
     }
     let clicked = code == BN_CLICKED;
+    // #3：取色按钮 / 分档色点（STN_CLICKED 与 BN_CLICKED 同为 0）。
+    if clicked
+        && (id == IDC_BG_PICK
+            || id == IDC_FONT_PICK
+            || (IDC_TIER_DOT0..IDC_TIER_DOT0 + 5).contains(&id))
+    {
+        unsafe { handle_color_pick(hwnd, ctx, id) };
+        return;
+    }
     let selchange = code == CBN_SELCHANGE;
     let change = code == EN_CHANGE;
     let mut cfg = ctx.cfg.borrow_mut();
@@ -1129,6 +1524,84 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 }
             }
         }
+        // #4：分档开关——关闭恢复单一字体颜色选择（控件显隐在 sync_controls）。
+        IDC_TIERED if clicked => {
+            let checked =
+                unsafe { SendMessageW!(ctl(hwnd, IDC_TIERED), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
+            cfg.icon_font_tiers_enabled = checked == BST_CHECKED.0 as isize;
+            touched = true;
+            resync = true;
+        }
+        // #4：分档数量——调整阈值数组（增长时在上个阈值 +30、封顶 99），
+        // 再过一遍 normalize（钳制 + 修补严格递增 + 颜色补齐/截断）。
+        IDC_TIER_COUNT if selchange => {
+            let idx = combo_sel(ctl(hwnd, IDC_TIER_COUNT));
+            if idx < 0 {
+                return;
+            }
+            let n = FONT_TIER_MIN_TIERS + idx as usize;
+            let mut ths = cfg.icon_font_tier_thresholds.clone();
+            while ths.len() + 1 > n {
+                ths.pop();
+            }
+            while ths.len() + 1 < n {
+                let next = ths
+                    .last()
+                    .map(|t| (*t as i32 + 30).min(FONT_TIER_THRESHOLD_MAX as i32))
+                    .unwrap_or(DEFAULT_FONT_TIER_THRESHOLDS[0] as i32);
+                if next <= *ths.last().unwrap_or(&0) as i32 {
+                    break; // 99 封顶后再无严格递增空间；normalize 会兜底。
+                }
+                ths.push(next as u8);
+            }
+            let (t2, c2, _) =
+                normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
+            cfg.icon_font_tier_thresholds = t2;
+            cfg.icon_font_tier_colors = c2;
+            touched = true;
+            resync = true;
+        }
+        // #4：阈值数字框——1–99、严格递增，非法即时提示且不落地。
+        id if change && (IDC_TIER_TH0..IDC_TIER_TH0 + 4).contains(&id) => {
+            let i = (id - IDC_TIER_TH0) as usize;
+            let text = unsafe { edit_text(ctl(hwnd, id)) };
+            if text.is_empty() {
+                set_text(ctx, IDC_STATUS, ""); // 输入中间态
+                return;
+            }
+            let v: u8 = match text.parse::<i64>() {
+                Ok(v)
+                    if (FONT_TIER_THRESHOLD_MIN as i64..=FONT_TIER_THRESHOLD_MAX as i64)
+                        .contains(&v) =>
+                {
+                    v as u8
+                }
+                _ => {
+                    set_text(
+                        ctx,
+                        IDC_STATUS,
+                        "分档阈值需为 1–99 的整数（数字及以下的电量归上一档）",
+                    );
+                    return;
+                }
+            };
+            if i >= cfg.icon_font_tier_thresholds.len() {
+                return;
+            }
+            let mut ths = cfg.icon_font_tier_thresholds.clone();
+            ths[i] = v;
+            if !ths.windows(2).all(|w| w[0] < w[1]) {
+                set_text(
+                    ctx,
+                    IDC_STATUS,
+                    "分档阈值必须严格递增（如 20、50：0-20 一档、21-50 一档、51-100 一档）",
+                );
+                return;
+            }
+            cfg.icon_font_tier_thresholds = ths;
+            set_text(ctx, IDC_STATUS, "");
+            touched = true;
+        }
         IDC_INTERVAL if selchange => {
             let idx = combo_sel(ctl(hwnd, IDC_INTERVAL));
             if idx >= 0 && (idx as usize) < INTERVALS.len() {
@@ -1147,6 +1620,10 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             cfg.icon_background = IconBackground::Dark;
             cfg.icon_font_color = IconFontColor::Auto;
             cfg.icon_font_family = "Segoe UI".to_string();
+            // #4：分档键一并恢复默认。
+            cfg.icon_font_tiers_enabled = false;
+            cfg.icon_font_tier_thresholds = DEFAULT_FONT_TIER_THRESHOLDS.to_vec();
+            cfg.icon_font_tier_colors = DEFAULT_FONT_TIER_COLORS.to_vec();
             touched = true;
             resync = true;
         }

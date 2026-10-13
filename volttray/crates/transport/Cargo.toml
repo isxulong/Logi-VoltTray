@@ -1,6 +1,6 @@
 [package]
 name = "volttray-transport"
-description = "Logi VoltTray - HID 传输层（通道抽象、超时/重试、观测事件）"
+description = "LogiVoltTray - HID 传输层（通道抽象、超时/重试、观测事件）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

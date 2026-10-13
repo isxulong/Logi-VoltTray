@@ -1,6 +1,6 @@
 [package]
 name = "volttray-tray"
-description = "Logi VoltTray - Windows 托盘程序（单实例、托盘图标、菜单、通知、诊断面板）"
+description = "LogiVoltTray - Windows 托盘程序（单实例、托盘图标、菜单、通知、诊断面板）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

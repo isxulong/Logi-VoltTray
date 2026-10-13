@@ -12,12 +12,14 @@
 //!   透明底改为提亮字色。
 
 use std::collections::HashMap;
-use volttray_app::config::{brighten, contrast_ratio, IconBackground, IconFontColor, IconShape};
+use volttray_app::config::{
+    brighten, contrast_ratio, IconBackground, IconFontColor, IconShape, RgbColor,
+};
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET,
-    DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
+    SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
@@ -31,6 +33,8 @@ pub enum IconColor {
     Yellow,
     Red,
     Gray,
+    /// 分档色（v0.3.3 #4）：u8 = 档位序号（0 基），颜色由分档颜色表解析。
+    Tier(u8),
 }
 
 impl IconColor {
@@ -61,9 +65,10 @@ fn high_contrast_bw(bg: (u8, u8, u8)) -> (u8, u8, u8) {
     }
 }
 
-/// 解析某电量档的字体 RGB（M9）。
+/// 解析某电量档的字体 RGB（M9；v0.3.3 #4 增加分档表）。
 ///
 /// - 灰显（未知/离线）固定灰色，不受固定色覆盖；
+/// - 分档色（Tier）：直接取分档颜色表；启用分档时单一字色被忽略；
 /// - 固定色覆盖正常/警告/低电档；
 /// - auto：警告黄、低电红、正常档依背景/形状取高对比
 ///   （深底白字 / 浅底深字 / 自定义底取黑白中对比更高者 / 透明按系统主题）。
@@ -73,10 +78,16 @@ pub fn font_rgb(
     shape: IconShape,
     bg: IconBackground,
     font: IconFontColor,
+    tiers: Option<&[RgbColor]>,
 ) -> (u8, u8, u8) {
     match (font, level) {
         // 灰显永远是灰色：未知(?)与离线(--)不参与配色覆盖。
         (_, IconColor::Gray) => (0x80, 0x80, 0x80),
+        // 分档色优先于单一字色（#4：启用分档后单一颜色选择被忽略）。
+        (_, IconColor::Tier(i)) => tiers
+            .and_then(|t| t.get(i as usize))
+            .map(|c| (c.r, c.g, c.b))
+            .unwrap_or((0x80, 0x80, 0x80)),
         (IconFontColor::Fixed(c), _) => (c.r, c.g, c.b),
         (IconFontColor::Auto, IconColor::Yellow) => (0xFF, 0xD2, 0x1F),
         (IconFontColor::Auto, IconColor::Red) => (0xE8, 0x11, 0x23),
@@ -110,13 +121,10 @@ pub fn icon_text(percent: Option<u8>, gray: bool) -> String {
 }
 
 pub fn dpi_bucket_size(dpi: u32) -> u32 {
-    if dpi >= 192 {
-        32
-    } else if dpi >= 144 {
-        24
-    } else {
-        16
-    }
+    // v0.3.3 #5：连续尺寸取代 16/24/32 三档——125% 这类中间 DPI 原先被
+    // 钳到 16px 再拉伸到 20px 槽位，是高分屏模糊的直接原因；现按 DPI
+    // 线性取整（96→16、120→20、144→24、192→32），并钳制在 16..=48。
+    ((dpi as f64 * 16.0 / 96.0).round() as u32).clamp(16, 48)
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -170,10 +178,13 @@ pub struct IconCache {
     background: IconBackground,
     font: IconFontColor,
     font_family: String,
+    /// 分档颜色表（v0.3.3 #4）；None = 未启用分档（走 IconColor::ALL）。
+    tier_colors: Option<Vec<RgbColor>>,
     map: HashMap<(IconColor, String, bool), Vec<u8>>,
 }
 
 impl IconCache {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         size: u32,
         dark_theme: bool,
@@ -181,6 +192,7 @@ impl IconCache {
         background: IconBackground,
         font: IconFontColor,
         font_family: String,
+        tiers: Option<Vec<RgbColor>>,
     ) -> Self {
         let mut cache = IconCache {
             size,
@@ -189,6 +201,7 @@ impl IconCache {
             background,
             font,
             font_family,
+            tier_colors: tiers,
             map: HashMap::new(),
         };
         cache.fill();
@@ -204,8 +217,24 @@ impl IconCache {
         let shape = self.shape;
         let bg_rgb = self.background.rgb();
         let face = self.font_family.clone();
-        for color in IconColor::ALL {
-            let rgb = font_rgb(color, self.dark_theme, shape, self.background, self.font);
+        let tiers = self.tier_colors.as_deref();
+        // 颜色档集合：分档模式 = N 个分档色 + 灰；否则 = 默认 4 档。
+        let colors: Vec<IconColor> = match tiers {
+            Some(cols) => (0..cols.len() as u8)
+                .map(IconColor::Tier)
+                .chain(std::iter::once(IconColor::Gray))
+                .collect(),
+            None => IconColor::ALL.to_vec(),
+        };
+        for color in colors {
+            let rgb = font_rgb(
+                color,
+                self.dark_theme,
+                shape,
+                self.background,
+                self.font,
+                tiers,
+            );
             for bright in [false, true] {
                 // M11 闪烁：有背景时提亮背景，透明底提亮字色。
                 let (fg, bg) = if bright {
@@ -226,7 +255,9 @@ impl IconCache {
         }
     }
 
-    /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体）时重建缓存。
+    /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体 / 分档表）
+    /// 时重建缓存。
+    #[allow(clippy::too_many_arguments)]
     pub fn rebuild(
         &mut self,
         size: u32,
@@ -235,6 +266,7 @@ impl IconCache {
         background: IconBackground,
         font: IconFontColor,
         font_family: String,
+        tiers: Option<Vec<RgbColor>>,
     ) {
         if size != self.size
             || dark_theme != self.dark_theme
@@ -242,6 +274,7 @@ impl IconCache {
             || background != self.background
             || font != self.font
             || font_family != self.font_family
+            || tiers != self.tier_colors
         {
             self.size = size;
             self.dark_theme = dark_theme;
@@ -249,6 +282,7 @@ impl IconCache {
             self.background = background;
             self.font = font;
             self.font_family = font_family;
+            self.tier_colors = tiers;
             self.fill();
         }
     }
@@ -260,12 +294,44 @@ impl IconCache {
     }
 }
 
+/// #5：由字形墨迹边界框计算「居中所需平移量」。
+///
+/// 墨迹判定阈值 0x10（BGRA 任意通道亮度）；无墨迹（空文本/字体回退失败）
+/// 返回 (0, 0)。目标位置 = bbox 居中于位图：左上角平移到
+/// ((size - w) / 2, (size - h) / 2)，对齐偏差允许 ±1px（整数除法余数）。
+fn ink_center_shift(src: &[u8], size: i32) -> (i32, i32) {
+    let stride = size as usize;
+    let mut x0 = i32::MAX;
+    let mut x1 = i32::MIN;
+    let mut y0 = i32::MAX;
+    let mut y1 = i32::MIN;
+    for (i, px) in src.chunks_exact(4).enumerate() {
+        let v = px[0].max(px[1]).max(px[2]) as i32;
+        if v >= 0x10 {
+            let (py, px_x) = ((i / stride) as i32, (i % stride) as i32);
+            x0 = x0.min(px_x);
+            x1 = x1.max(px_x);
+            y0 = y0.min(py);
+            y1 = y1.max(py);
+        }
+    }
+    if x0 > x1 {
+        return (0, 0);
+    }
+    let w = x1 - x0 + 1;
+    let h = y1 - y0 + 1;
+    ((size - w) / 2 - x0, (size - h) / 2 - y0)
+}
+
 /// GDI 渲染：黑底白字取覆盖率，再按「形状底 + 字色」直出 RGBA。
 ///
 /// - `bg = None`（transparent 形状）：颜色 = 目标色，alpha = 字覆盖率；
 /// - `bg = Some`：rounded 圆底（1px 软边缘）/ square 直角底（四边 1px 软边缘），
 ///   文字按 source-over 叠加在底色之上；
-/// - `face` 字体缺失时 GDI 静默回退系统默认（M9 容错，不报错）。
+/// - `face` 字体缺失时 GDI 静默回退系统默认（M9 容错，不报错）；
+/// - v0.3.3 #5：两遍渲染——先按估算位置落字，扫描字形墨迹边界框，
+///   再平移到水平 + 垂直真正居中（按字形实际 bbox，非行高估算）；
+///   字体质量用 ANTIALIASED_QUALITY（消除位图字模糊）。
 pub fn render_text_bitmap(
     size: u32,
     text: &str,
@@ -337,14 +403,23 @@ pub fn render_text_bitmap(
                 DEFAULT_CHARSET,
                 Default::default(),
                 Default::default(),
-                Default::default(),
+                ANTIALIASED_QUALITY,
                 0,
                 PCWSTR::from_raw(face_w.as_ptr()),
             );
             let old_font = SelectObject(hdc, HGDIOBJ(font.0));
             let _ = SetBkMode(hdc, TRANSPARENT);
             let _ = SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
+            // 第一遍：按估算位置落字。
             let _ = TextOutW(hdc, x, y, &text_w);
+            // #5：按字形实际墨迹边界框计算居中平移量。
+            let probe = std::slice::from_raw_parts(bits as *const u8, n * 4);
+            let (dx, dy) = ink_center_shift(probe, size_i);
+            if dx != 0 || dy != 0 {
+                // 第二遍：清空后在平移后的位置重画。
+                std::ptr::write_bytes(bits, 0, n * 4);
+                let _ = TextOutW(hdc, x + dx, y + dy, &text_w);
+            }
             // BGRA → RGBA：取字覆盖度（亮度），与形状底色合成。
             let src = std::slice::from_raw_parts(bits as *const u8, n * 4);
             let cx = (size_i - 1) as f32 / 2.0;
@@ -434,6 +509,9 @@ mod tests {
         assert_eq!(dpi_bucket_size(96), 16);
         assert_eq!(dpi_bucket_size(144), 24);
         assert_eq!(dpi_bucket_size(192), 32);
+        // v0.3.3 #5：连续尺寸——125%（120 DPI）不再被钳到 16px 再拉伸。
+        assert_eq!(dpi_bucket_size(120), 20);
+        assert_eq!(dpi_bucket_size(168), 28);
     }
 
     #[test]
@@ -445,7 +523,8 @@ mod tests {
                 true,
                 IconShape::Rounded,
                 IconBackground::Dark,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0xFF, 0xFF, 0xFF)
         );
@@ -456,7 +535,8 @@ mod tests {
                 true,
                 IconShape::Rounded,
                 IconBackground::Light,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0x1B, 0x1B, 0x1B)
         );
@@ -467,7 +547,8 @@ mod tests {
                 true,
                 IconShape::Transparent,
                 IconBackground::Dark,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0xFF, 0xFF, 0xFF)
         );
@@ -477,7 +558,8 @@ mod tests {
                 false,
                 IconShape::Transparent,
                 IconBackground::Dark,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0x1B, 0x1B, 0x1B)
         );
@@ -492,7 +574,8 @@ mod tests {
                     g: 0x10,
                     b: 0x50
                 }),
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0xFF, 0xFF, 0xFF)
         );
@@ -503,7 +586,8 @@ mod tests {
                 false,
                 IconShape::Rounded,
                 IconBackground::Dark,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0xFF, 0xD2, 0x1F)
         );
@@ -513,9 +597,95 @@ mod tests {
                 false,
                 IconShape::Rounded,
                 IconBackground::Light,
-                IconFontColor::Auto
+                IconFontColor::Auto,
+                None
             ),
             (0xE8, 0x11, 0x23)
+        );
+    }
+
+    #[test]
+    fn tier_color_overrides_fixed_and_falls_back() {
+        // 分档色优先于固定字色（#4：启用分档后单一颜色被忽略）。
+        let tiers = vec![
+            RgbColor {
+                r: 0xE8,
+                g: 0x11,
+                b: 0x23,
+            },
+            RgbColor {
+                r: 0xFF,
+                g: 0xD2,
+                b: 0x1F,
+            },
+            RgbColor {
+                r: 0x00,
+                g: 0xCC,
+                b: 0x6A,
+            },
+        ];
+        let fixed = IconFontColor::Fixed(RgbColor {
+            r: 0x0A,
+            g: 0x6C,
+            b: 0xFF,
+        });
+        assert_eq!(
+            font_rgb(
+                IconColor::Tier(0),
+                true,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed,
+                Some(&tiers)
+            ),
+            (0xE8, 0x11, 0x23)
+        );
+        assert_eq!(
+            font_rgb(
+                IconColor::Tier(2),
+                true,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed,
+                Some(&tiers)
+            ),
+            (0x00, 0xCC, 0x6A)
+        );
+        // 档位越界（表缺失该档）→ 灰色兜底。
+        assert_eq!(
+            font_rgb(
+                IconColor::Tier(9),
+                true,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed,
+                Some(&tiers)
+            ),
+            (0x80, 0x80, 0x80)
+        );
+        // 未提供分档表的 Tier → 灰色兜底。
+        assert_eq!(
+            font_rgb(
+                IconColor::Tier(0),
+                true,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed,
+                None
+            ),
+            (0x80, 0x80, 0x80)
+        );
+        // 灰显不受分档影响。
+        assert_eq!(
+            font_rgb(
+                IconColor::Gray,
+                true,
+                IconShape::Rounded,
+                IconBackground::Dark,
+                fixed,
+                Some(&tiers)
+            ),
+            (0x80, 0x80, 0x80)
         );
     }
 
@@ -532,7 +702,8 @@ mod tests {
                 false,
                 IconShape::Rounded,
                 IconBackground::Light,
-                fixed
+                fixed,
+                None
             ),
             (0x0A, 0x6C, 0xFF)
         );
@@ -542,7 +713,8 @@ mod tests {
                 false,
                 IconShape::Rounded,
                 IconBackground::Dark,
-                fixed
+                fixed,
+                None
             ),
             (0x0A, 0x6C, 0xFF)
         );
@@ -553,7 +725,8 @@ mod tests {
                 false,
                 IconShape::Rounded,
                 IconBackground::Dark,
-                fixed
+                fixed,
+                None
             ),
             (0x80, 0x80, 0x80)
         );
@@ -573,6 +746,7 @@ mod tests {
             bg,
             IconFontColor::Auto,
             "Segoe UI".to_string(),
+            None,
         );
         let rgba = cache
             .map
@@ -591,11 +765,127 @@ mod tests {
             bg,
             IconFontColor::Auto,
             "Segoe UI".to_string(),
+            None,
         );
         let rgba_t = transparent
             .map
             .get(&(IconColor::Default, "50".to_string(), false))
             .expect("transparent bitmap cached");
         assert_eq!(rgba_t[idx + 3], 0);
+    }
+
+    /// #5：文本按字形实际边界框水平 + 垂直居中——透明底（alpha = 覆盖率）
+    /// 便于逐像素断言：bbox 中心与位图中心偏差 ≤ 1px，且墨迹越过中心线
+    /// （拦住「偏左 / 偏上」回归）。
+    #[test]
+    fn text_is_centered_by_ink_bbox() {
+        let size = 32u32;
+        for text in ["50", "7", "满"] {
+            let rgba = render_text_bitmap(
+                size,
+                text,
+                (0xFF, 0xFF, 0xFF),
+                None,
+                IconShape::Transparent,
+                "Segoe UI",
+            );
+            let center = ((size - 1) / 2) as i32;
+            let mut x0 = i32::MAX;
+            let mut x1 = i32::MIN;
+            let mut y0 = i32::MAX;
+            let mut y1 = i32::MIN;
+            for (i, px) in rgba.chunks_exact(4).enumerate() {
+                if px[3] >= 0x10 {
+                    let (py, pxx) = ((i / size as usize) as i32, (i % size as usize) as i32);
+                    x0 = x0.min(pxx);
+                    x1 = x1.max(pxx);
+                    y0 = y0.min(py);
+                    y1 = y1.max(py);
+                }
+            }
+            assert!(x0 <= x1, "{text}: no ink rendered");
+            let cx = (x0 + x1) as f32 / 2.0;
+            let cy = (y0 + y1) as f32 / 2.0;
+            assert!(
+                (cx - center as f32).abs() <= 1.0,
+                "{text}: ink bbox center x {cx} vs {center}"
+            );
+            assert!(
+                (cy - center as f32).abs() <= 1.0,
+                "{text}: ink bbox center y {cy} vs {center}"
+            );
+            // 墨迹必须覆盖中心区域两侧（偏左/偏上直接被拦）。
+            assert!(x0 <= center && x1 >= center, "{text}: not spanning center x");
+            assert!(y0 <= center && y1 >= center, "{text}: not spanning center y");
+        }
+    }
+
+    /// #5：抗锯齿渲染——字形边缘存在部分覆盖（0 < alpha < 255）像素。
+    #[test]
+    fn aa_renders_partial_coverage() {
+        let size = 32u32;
+        let rgba = render_text_bitmap(
+            size,
+            "50",
+            (0xFF, 0xFF, 0xFF),
+            None,
+            IconShape::Transparent,
+            "Segoe UI",
+        );
+        let partial = rgba
+            .chunks_exact(4)
+            .filter(|px| px[3] > 0 && px[3] < 255)
+            .count();
+        assert!(
+            partial > 0,
+            "anti-aliased edge pixels expected, got {partial}"
+        );
+        // 完全覆盖（实心）像素也存在（字形主体）。
+        let solid = rgba
+            .chunks_exact(4)
+            .filter(|px| px[3] >= 255)
+            .count();
+        assert!(solid > 0, "solid glyph core expected");
+    }
+
+    /// #4：分档模式缓存 —— N 个分档色 + 灰共 N+1 个颜色档位可用。
+    #[test]
+    fn tier_cache_fills_tier_colors() {
+        let tiers = vec![
+            RgbColor {
+                r: 0xE8,
+                g: 0x11,
+                b: 0x23,
+            },
+            RgbColor {
+                r: 0xFF,
+                g: 0xD2,
+                b: 0x1F,
+            },
+            RgbColor {
+                r: 0x00,
+                g: 0xCC,
+                b: 0x6A,
+            },
+        ];
+        let cache = IconCache::new(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            Some(tiers),
+        );
+        for i in 0..3u8 {
+            assert!(
+                cache.map.contains_key(&(IconColor::Tier(i), "50".to_string(), false)),
+                "tier {i} bitmap missing"
+            );
+        }
+        assert!(cache.map.contains_key(&(IconColor::Gray, "50".to_string(), false)));
+        // 分档模式不渲染默认 4 档。
+        assert!(!cache.map.contains_key(&(IconColor::Default, "50".to_string(), false)));
+        assert!(!cache.map.contains_key(&(IconColor::Red, "50".to_string(), false)));
     }
 }

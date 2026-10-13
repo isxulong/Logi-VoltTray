@@ -1,6 +1,6 @@
 [package]
 name = "volttray-protocol"
-description = "Logi VoltTray - HID++ 协议组帧/解帧（纯计算，无 I/O）"
+description = "LogiVoltTray - HID++ 协议组帧/解帧（纯计算，无 I/O）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

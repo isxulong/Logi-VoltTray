@@ -1382,7 +1382,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volttray-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "volttray-device"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde_json",
  "volttray-protocol",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "volttray-protocol"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "proptest",
  "serde",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "volttray-transport"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hidapi",
  "serde",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "volttray-tray"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hidapi",
  "tray-icon",

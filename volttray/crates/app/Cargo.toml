@@ -1,6 +1,6 @@
 [package]
 name = "volttray-app"
-description = "Logi VoltTray - 应用核心（配置、阈值去抖、诊断观测流、快照）"
+description = "LogiVoltTray - 应用核心（配置、阈值去抖、诊断观测流、快照）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -5,7 +5,7 @@
 //! 容错规则：未知键 / 非法值 → 回退默认 + 诊断警告；越界值 → **钳制到边界 +
 //! 警告**（M10：不再重置默认）；绝不 panic、绝不拒绝启动。
 //!
-//! 键位一览（v0.3.0，共 11 键）：
+//! 键位一览（v0.3.3，共 14 键；前 11 键同 v0.3.0）：
 //! | 键 | 类型 | 默认 | 取值范围 / 说明 |
 //! | --- | --- | --- | --- |
 //! | `autostart` | bool | `false` | 开机自启（写入启动快捷方式） |
@@ -15,10 +15,13 @@
 //! | `notification_silent` | bool | `false` | 通知静默（无提示音） |
 //! | `icon_shape` | str | `"rounded"` | `rounded` / `square` / `transparent`（M9） |
 //! | `icon_background` | str | `"dark"` | `light` / `dark` / `"#RRGGBB"`（预设或自定义；`transparent` 迁移到 `icon_shape`，M9） |
-//! | `icon_font_color` | str | `"auto"` | `"auto"` 或 `"#RRGGBB"`（M9） |
+//! | `icon_font_color` | str | `"auto"` | `"auto"` 或 `"#RRGGBB"`（M9；分档模式启用时被忽略） |
 //! | `icon_font_family` | str | `"Segoe UI"` | 系统字体名（渲染时缺失则 GDI 静默回退） |
 //! | `low_threshold` | int | `20` | `5`–`50`，低电提醒阈值（M12 单阈值，越界钳制） |
 //! | `blink_enabled` | bool | `true` | 低电闪烁提醒（M11，可关） |
+//! | `icon_font_tiers_enabled` | bool | `false` | 按电量分档着色（v0.3.3 #4；启用时单一字色入口隐藏） |
+//! | `icon_font_tier_thresholds` | int 数组 | `[20, 50]` | N-1 个边界（N 档 2..=5）；阈值含该值归上一档；1–99 严格递增（越界钳制 / 递进修复 + 警告） |
+//! | `icon_font_tier_colors` | str 数组 | `["#E81123", "#FFD21F", "#00CC6A"]` | N 个分档色（缺失补默认色、多余截断 + 警告） |
 //!
 //! 废弃键（保留迁移语义）：
 //! - `low_threshold_warn`：迁移为 `low_threshold`（钳 5..=50）+ 警告；
@@ -37,6 +40,167 @@ pub const LOW_THRESHOLD_MIN: u8 = 5;
 pub const LOW_THRESHOLD_MAX: u8 = 50;
 /// 字体颜色与背景对比度下限（M9：<3.0 仅警告，不阻断）。
 pub const CONTRAST_FLOOR: f64 = 3.0;
+
+// ---------- 分档字体颜色（v0.3.3 #4） ----------
+
+/// 分档数量下限（N 档 = N-1 个阈值 + N 个颜色）。
+pub const FONT_TIER_MIN_TIERS: usize = 2;
+/// 分档数量上限（对应阈值 ≤ 4 个）。
+pub const FONT_TIER_MAX_TIERS: usize = 5;
+/// 阈值取值范围 1..=99（电量 0%/100% 不允许作为边界）。
+pub const FONT_TIER_THRESHOLD_MIN: u8 = 1;
+pub const FONT_TIER_THRESHOLD_MAX: u8 = 99;
+/// 默认分档：0..=20 / 21..=50 / 51..=100 三档（红/黄/绿）。
+pub const DEFAULT_FONT_TIER_THRESHOLDS: [u8; 2] = [20, 50];
+/// 与默认阈值配套的 3 个分档色。
+pub const DEFAULT_FONT_TIER_COLORS: [RgbColor; 3] = [
+    RgbColor {
+        r: 0xE8,
+        g: 0x11,
+        b: 0x23,
+    },
+    RgbColor {
+        r: 0xFF,
+        g: 0xD2,
+        b: 0x1F,
+    },
+    RgbColor {
+        r: 0x00,
+        g: 0xCC,
+        b: 0x6A,
+    },
+];
+/// 颜色不足时依序补位的调色板（红/橙/黄/绿/蓝）。
+pub const TIER_PAD_PALETTE: [RgbColor; 5] = [
+    RgbColor {
+        r: 0xE8,
+        g: 0x11,
+        b: 0x23,
+    },
+    RgbColor {
+        r: 0xFF,
+        g: 0x8C,
+        b: 0x00,
+    },
+    RgbColor {
+        r: 0xFF,
+        g: 0xD2,
+        b: 0x1F,
+    },
+    RgbColor {
+        r: 0x00,
+        g: 0xCC,
+        b: 0x6A,
+    },
+    RgbColor {
+        r: 0x00,
+        g: 0x78,
+        b: 0xD7,
+    },
+];
+
+/// 电量百分比的档位序号（0 基）：阈值含该值归上一档。
+/// 例：thresholds = [20, 50] 时 0..=20 → 0，21..=50 → 1，51..=100 → 2。
+pub fn font_tier_for_percent(thresholds: &[u8], percent: u8) -> usize {
+    thresholds.iter().filter(|&&t| percent > t).count()
+}
+
+/// 分档数据规范化：钳制阈值到 1..=99、修复非严格递增、数量对齐
+/// （阈值截断到 MAX-1；颜色不足补调色板、多余截断），返回修复警告。
+/// 对已合规数据是幂等的（不产生警告）。
+pub fn normalize_font_tiers(
+    thresholds: Vec<u8>,
+    colors: Vec<RgbColor>,
+) -> (Vec<u8>, Vec<RgbColor>, Vec<ConfigWarning>) {
+    let mut warnings = Vec::new();
+    let mut warn = |reason: String| warnings.push(ConfigWarning {
+        key: "icon_font_tier_thresholds".into(),
+        reason,
+    });
+
+    let tier_count = thresholds.len() + 1;
+    if tier_count < FONT_TIER_MIN_TIERS || tier_count > FONT_TIER_MAX_TIERS {
+        warn(format!(
+            "tier count {} out of range {FONT_TIER_MIN_TIERS}..={FONT_TIER_MAX_TIERS}; reset to default 3",
+            tier_count
+        ));
+        return (
+            DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
+            DEFAULT_FONT_TIER_COLORS.to_vec(),
+            warnings,
+        );
+    }
+
+    // 钳制 + 严格递增修复：nxt = max(t, prev + 1)；超出 99 则丢弃余下阈值。
+    let mut fixed: Vec<u8> = Vec::with_capacity(thresholds.len());
+    let mut prev: u8 = 0;
+    for &t in &thresholds {
+        let clamped = t.clamp(FONT_TIER_THRESHOLD_MIN, FONT_TIER_THRESHOLD_MAX);
+        if clamped != t {
+            warn(format!(
+                "threshold {t} out of range {FONT_TIER_THRESHOLD_MIN}..={FONT_TIER_THRESHOLD_MAX}; clamped to {clamped}"
+            ));
+        }
+        let nxt = clamped.max(prev + 1);
+        if nxt > FONT_TIER_THRESHOLD_MAX {
+            warn(format!(
+                "thresholds not strictly increasing beyond {FONT_TIER_THRESHOLD_MAX}; trailing thresholds dropped"
+            ));
+            break;
+        }
+        if nxt > clamped {
+            warn(format!(
+                "thresholds not strictly increasing; {clamped} raised to {nxt}"
+            ));
+        }
+        fixed.push(nxt);
+        prev = nxt;
+    }
+
+    let tier_count = fixed.len() + 1;
+    if fixed.len() + 1 < FONT_TIER_MIN_TIERS {
+        // 全部阈值被丢弃（理论上仅在输入全 >99 且无法递进时发生）。
+        warn("no valid thresholds left; reset to default 3".into());
+        return (
+            DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
+            DEFAULT_FONT_TIER_COLORS.to_vec(),
+            warnings,
+        );
+    }
+
+    // 颜色数量对齐：不足补调色板（跳过已有色）、多余截断。
+    let mut col = colors;
+    let mut pad_i = 0usize;
+    while col.len() < tier_count {
+        let candidate = TIER_PAD_PALETTE[pad_i % TIER_PAD_PALETTE.len()];
+        if !col.contains(&candidate) {
+            warnings.push(ConfigWarning {
+                key: "icon_font_tier_colors".into(),
+                reason: format!("too few colors; padded with {}", candidate.to_hex()),
+            });
+            col.push(candidate);
+        }
+        pad_i += 1;
+        if pad_i > TIER_PAD_PALETTE.len() * 2 {
+            // 调色板被自定义色占满时退回顺序补位。
+            warnings.push(ConfigWarning {
+                key: "icon_font_tier_colors".into(),
+                reason: format!("padded with {}", candidate.to_hex()),
+            });
+            col.push(candidate);
+        }
+    }
+    if col.len() > tier_count {
+        warnings.push(ConfigWarning {
+            key: "icon_font_tier_colors".into(),
+            reason: format!(
+                "too many colors; truncated to {tier_count}"
+            ),
+        });
+        col.truncate(tier_count);
+    }
+    (fixed, col, warnings)
+}
 
 /// 图标配色策略（v0.2.0 遗留风格键；v0.3.0 不参与渲染决策）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -214,6 +378,12 @@ pub struct Config {
     pub low_threshold: u8,
     /// 低电闪烁提醒开关，默认开（M11）。
     pub blink_enabled: bool,
+    /// 按电量分档着色（v0.3.3 #4）；启用时单一字色被忽略、设置窗口隐藏单一字色入口。
+    pub icon_font_tiers_enabled: bool,
+    /// 分档边界（N 档 = N-1 个阈值，默认 [20, 50]）；阈值含该值归上一档。
+    pub icon_font_tier_thresholds: Vec<u8>,
+    /// 分档颜色（N 个，默认红/黄/绿）。
+    pub icon_font_tier_colors: Vec<RgbColor>,
 }
 
 impl Default for Config {
@@ -230,6 +400,9 @@ impl Default for Config {
             icon_font_family: "Segoe UI".to_string(),
             low_threshold: DEFAULT_LOW_THRESHOLD,
             blink_enabled: true,
+            icon_font_tiers_enabled: false,
+            icon_font_tier_thresholds: DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
+            icon_font_tier_colors: DEFAULT_FONT_TIER_COLORS.to_vec(),
         }
     }
 }
@@ -251,6 +424,8 @@ enum Value {
     Bool(bool),
     Int(u64),
     Str(String),
+    /// `[a, b, c]` 数组（v0.3.3 #4：分档阈值 / 颜色）。
+    List(Vec<Value>),
 }
 
 fn parse_value(raw: &str) -> Option<Value> {
@@ -265,6 +440,19 @@ fn parse_value(raw: &str) -> Option<Value> {
     }
     if let Ok(n) = v.parse::<u64>() {
         return Some(Value::Int(n));
+    }
+    // 数组：`[` 开头 `]` 结尾，逗号分隔的标量（v0.3.3 #4）。
+    if v.len() >= 2 && v.starts_with('[') && v.ends_with(']') {
+        let inner = &v[1..v.len() - 1];
+        let mut items = Vec::new();
+        for part in inner.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            items.push(parse_value(p)?);
+        }
+        return Some(Value::List(items));
     }
     None
 }
@@ -389,6 +577,52 @@ impl Config {
                     cfg.low_threshold = clamped as u8;
                 }
                 ("blink_enabled", Value::Bool(b)) => cfg.blink_enabled = *b,
+                ("icon_font_tiers_enabled", Value::Bool(b)) => {
+                    cfg.icon_font_tiers_enabled = *b;
+                }
+                ("icon_font_tier_thresholds", Value::List(items)) => {
+                    let mut ths = Vec::with_capacity(items.len());
+                    let mut ok = true;
+                    for it in items {
+                        if let Value::Int(n) = it {
+                            if *n > u8::MAX as u64 {
+                                warn(key, "threshold out of range; default kept");
+                                ok = false;
+                                break;
+                            }
+                            ths.push(*n as u8);
+                        } else {
+                            warn(key, "array items must be integers; default kept");
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        cfg.icon_font_tier_thresholds = ths;
+                    }
+                }
+                ("icon_font_tier_colors", Value::List(items)) => {
+                    let mut cols = Vec::with_capacity(items.len());
+                    let mut ok = true;
+                    for it in items {
+                        if let Value::Str(s) = it {
+                            match RgbColor::parse_hex(s) {
+                                Some(c) => cols.push(c),
+                                None => warn(
+                                    key,
+                                    &format!("invalid color {s:?} skipped (expect \"#RRGGBB\")"),
+                                ),
+                            }
+                        } else {
+                            warn(key, "array items must be color strings; default kept");
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        cfg.icon_font_tier_colors = cols;
+                    }
+                }
                 // 废弃键（M12 单阈值取代双阈值）。
                 ("low_threshold_warn", Value::Int(n)) if *n <= 100 => {
                     migrated_warn_threshold = Some(*n);
@@ -411,7 +645,10 @@ impl Config {
                     | "icon_font_color"
                     | "icon_font_family"
                     | "low_threshold"
-                    | "blink_enabled",
+                    | "blink_enabled"
+                    | "icon_font_tiers_enabled"
+                    | "icon_font_tier_thresholds"
+                    | "icon_font_tier_colors",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
                 (other, _) => warn(other, "unknown key; ignored"),
@@ -425,13 +662,35 @@ impl Config {
                 cfg.low_threshold = clamped as u8;
             }
         }
+        // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
+        {
+            let (ths, cols, mut tier_warns) = normalize_font_tiers(
+                std::mem::take(&mut cfg.icon_font_tier_thresholds),
+                std::mem::take(&mut cfg.icon_font_tier_colors),
+            );
+            cfg.icon_font_tier_thresholds = ths;
+            cfg.icon_font_tier_colors = cols;
+            warnings.append(&mut tier_warns);
+        }
         (cfg, warnings)
     }
 
     /// 序列化为扁平 TOML（首次运行生成默认配置 / 设置窗口持久化用）。
     pub fn to_toml(&self) -> String {
+        let tier_thresholds = self
+            .icon_font_tier_thresholds
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tier_colors = self
+            .icon_font_tier_colors
+            .iter()
+            .map(|c| format!("\"{}\"", c.to_hex()))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
-            "# Logi VoltTray 配置（扁平键值；未知键会被忽略并产生诊断警告）\n\
+            "# LogiVoltTray 配置（扁平键值；未知键会被忽略并产生诊断警告）\n\
              autostart = {}\n\
              poll_interval_secs = {}\n\
              icon_style = \"{}\"\n\
@@ -442,7 +701,10 @@ impl Config {
              icon_font_color = \"{}\"\n\
              icon_font_family = \"{}\"\n\
              low_threshold = {}\n\
-             blink_enabled = {}\n",
+             blink_enabled = {}\n\
+             icon_font_tiers_enabled = {}\n\
+             icon_font_tier_thresholds = [{}]\n\
+             icon_font_tier_colors = [{}]\n",
             self.autostart,
             self.poll_interval_secs,
             self.icon_style.name(),
@@ -454,6 +716,9 @@ impl Config {
             self.icon_font_family,
             self.low_threshold,
             self.blink_enabled,
+            self.icon_font_tiers_enabled,
+            tier_thresholds,
+            tier_colors,
         )
     }
 
@@ -688,5 +953,126 @@ mod tests {
         // 提亮 40%：31×1.4≈43.4 四舍五入 → 43 (0x2B)；封顶 255。
         assert_eq!(brighten((0x1F, 0x1F, 0x1F), 0.4), (0x2B, 0x2B, 0x2B));
         assert_eq!(brighten((255, 200, 0), 0.4), (255, 255, 0));
+    }
+
+    #[test]
+    fn font_tier_defaults() {
+        let c = Config::default();
+        assert!(!c.icon_font_tiers_enabled);
+        assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
+        assert_eq!(c.icon_font_tier_colors.len(), 3);
+        // 默认值本身必须已合规（规范化幂等、无警告）。
+        let (ths, cols, w) = normalize_font_tiers(
+            c.icon_font_tier_thresholds.clone(),
+            c.icon_font_tier_colors.clone(),
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(ths, c.icon_font_tier_thresholds);
+        assert_eq!(cols, c.icon_font_tier_colors);
+    }
+
+    #[test]
+    fn font_tier_mapping_semantics() {
+        // [20, 50]：0..=20 → 0；21..=50 → 1；51..=100 → 2（含边界值归上一档）。
+        let th = [20u8, 50];
+        assert_eq!(font_tier_for_percent(&th, 0), 0);
+        assert_eq!(font_tier_for_percent(&th, 19), 0);
+        assert_eq!(font_tier_for_percent(&th, 20), 0);
+        assert_eq!(font_tier_for_percent(&th, 21), 1);
+        assert_eq!(font_tier_for_percent(&th, 50), 1);
+        assert_eq!(font_tier_for_percent(&th, 51), 2);
+        assert_eq!(font_tier_for_percent(&th, 100), 2);
+        // 用户示例：20 / 50 两个数字框。
+        let th2 = [20u8];
+        assert_eq!(font_tier_for_percent(&th2, 20), 0);
+        assert_eq!(font_tier_for_percent(&th2, 21), 1);
+        let th4 = [10u8, 30, 60, 90];
+        assert_eq!(font_tier_for_percent(&th4, 0), 0);
+        assert_eq!(font_tier_for_percent(&th4, 10), 0);
+        assert_eq!(font_tier_for_percent(&th4, 11), 1);
+        assert_eq!(font_tier_for_percent(&th4, 60), 2);
+        assert_eq!(font_tier_for_percent(&th4, 91), 4);
+        assert_eq!(font_tier_for_percent(&th4, 100), 4);
+    }
+
+    #[test]
+    fn font_tier_parse_and_roundtrip() {
+        let (c, w) = Config::parse(
+            "icon_font_tiers_enabled = true\n\
+             icon_font_tier_thresholds = [15, 45, 80]\n\
+             icon_font_tier_colors = [\"#E81123\", \"#FFD21F\", \"#00CC6A\", \"#0078D7\"]\n",
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert!(c.icon_font_tiers_enabled);
+        assert_eq!(c.icon_font_tier_thresholds, vec![15, 45, 80]);
+        assert_eq!(c.icon_font_tier_colors.len(), 4);
+        // 序列化往返。
+        let (back, w2) = Config::parse(&c.to_toml());
+        assert!(w2.is_empty(), "{w2:?}");
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn font_tier_normalize_clamps_and_repairs() {
+        // 越界钳制：0 → 1，150 → 99，随后非递进被抬升 → [1, 99]。
+        let (ths, cols, w) = normalize_font_tiers(vec![0, 150, 30], vec![]);
+        assert_eq!(ths, vec![1, 99]);
+        assert_eq!(cols.len(), 3);
+        assert!(!w.is_empty());
+        // 非严格递增：[20, 20] → [20, 21]。
+        let (ths, _, w) = normalize_font_tiers(vec![20, 20], vec![]);
+        assert_eq!(ths, vec![20, 21]);
+        assert!(w.iter().any(|x| x.reason.contains("strictly increasing")));
+        // 数量越界：单阈值（2 档）与 5 个阈值（6 档）均重置默认 3 档。
+        let (ths, _, w) = normalize_font_tiers(vec![], vec![]);
+        assert_eq!(ths, vec![20, 50]);
+        assert!(w.len() == 1);
+        let (ths, cols, w) = normalize_font_tiers(vec![10, 20, 30, 40, 50], vec![]);
+        assert_eq!(ths, vec![20, 50]);
+        assert_eq!(cols.len(), 3);
+        assert!(!w.is_empty());
+        // 递进溢出：[99, 5] → 第二个抬到 100 超 99，丢弃余下阈值。
+        let (ths, _, _) = normalize_font_tiers(vec![99, 5], vec![]);
+        assert_eq!(ths, vec![99]);
+        // 颜色对齐：不足补调色板、多余截断。
+        let (_, cols, w) = normalize_font_tiers(vec![20, 50], vec![RgbColor {
+            r: 0,
+            g: 0,
+            b: 0,
+        }]);
+        assert_eq!(cols.len(), 3);
+        assert!(w.iter().any(|x| x.key == "icon_font_tier_colors"));
+        let (_, cols, _) = normalize_font_tiers(
+            vec![20, 50],
+            (0..5)
+                .map(|i| RgbColor {
+                    r: i as u8,
+                    g: 0,
+                    b: 0,
+                })
+                .collect(),
+        );
+        assert_eq!(cols.len(), 3);
+    }
+
+    #[test]
+    fn font_tier_parse_repairs_and_warns() {
+        // 无效颜色跳过 + 警告；阈值钳制 + 警告；颜色补齐。
+        let (c, w) = Config::parse(
+            "icon_font_tier_thresholds = [0, 150]\n\
+             icon_font_tier_colors = [\"#12345\", \"#E81123\"]\n",
+        );
+        assert_eq!(c.icon_font_tier_thresholds, vec![1, 99]);
+        assert_eq!(c.icon_font_tier_colors.len(), 3);
+        assert!(w.iter().any(|x| x.key == "icon_font_tier_thresholds"));
+        assert!(w.iter().any(|x| x.key == "icon_font_tier_colors"));
+        // 数组元素类型错误 → 整组保默认 + 警告。
+        let (c, w) = Config::parse("icon_font_tier_thresholds = [20, \"50\"]\n");
+        assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
+        assert_eq!(w.len(), 1);
+        // 数组值给到标量键 → catch-all 警告。
+        let (c, w) = Config::parse("icon_font_tiers_enabled = [true]\n");
+        assert!(!c.icon_font_tiers_enabled);
+        assert_eq!(w.len(), 1);
     }
 }

@@ -40,7 +40,9 @@ mod imp {
 
     use volttray_app::aumid;
     use volttray_app::autostart;
-    use volttray_app::config::{IconBackground, IconFontColor, IconShape};
+    use volttray_app::config::{
+        font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
+    };
     use volttray_app::{
         Alert, AppCore, Config, ConfigWatcher, Observer, PollDecision, SharedObserver, Snapshot,
         TimeoutOutcome,
@@ -162,7 +164,7 @@ mod imp {
     fn alert_text(alert: Alert, name: &str) -> (String, String) {
         match alert {
             Alert::LowBattery(p) => (
-                "VoltTray 电量偏低".into(),
+                "LogiVoltTray 电量偏低".into(),
                 format!("{name} 电量剩余 {p}%，请及时充电"),
             ),
         }
@@ -418,7 +420,7 @@ mod imp {
                 }
                 for id in core.newly_gray(now) {
                     alerts.push((
-                        "VoltTray 设备离线".into(),
+                        "LogiVoltTray 设备离线".into(),
                         format!("设备 {id} 超过 90 秒未响应，已置灰"),
                     ));
                 }
@@ -503,6 +505,13 @@ mod imp {
         poll_secs: u64,
         blink_enabled: bool,
         low_threshold: u8,
+        /// 分档着色镜像（v0.3.3 #4）：阈值数组 + 颜色数组，热重载生效。
+        tiers_enabled: bool,
+        tier_thresholds: Vec<u8>,
+        tier_colors: Vec<RgbColor>,
+        /// 菜单内容签名（v0.3.3 卫生项：P3-1 右键菜单闪烁缓解——内容未变
+        /// 不重建菜单，避免菜单打开时反复 set_menu 引发的闪烁）。
+        menu_sig: String,
         /// 低电闪烁状态机（M11）：相位 500ms 翻转 → 1Hz；ack = 用户已点击停闪；
         /// low_active = 展示设备当前处于低电触发状态。
         blink_phase: bool,
@@ -524,6 +533,10 @@ mod imp {
                 poll_secs: cfg.poll_interval_secs,
                 blink_enabled: cfg.blink_enabled,
                 low_threshold: cfg.low_threshold,
+                tiers_enabled: cfg.icon_font_tiers_enabled,
+                tier_thresholds: cfg.icon_font_tier_thresholds.clone(),
+                tier_colors: cfg.icon_font_tier_colors.clone(),
+                menu_sig: String::new(),
                 blink_phase: false,
                 blink_ack: false,
                 low_active: false,
@@ -572,13 +585,16 @@ mod imp {
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
         // P2-1：启动加载的钳制/未知键警告进入诊断流（M9 AC3）。
-        if let Ok(mut o) = observer.lock() {
-            o.push(DiagEvent::new(
-                Layer::App,
-                DiagKind::ConfigReloaded {
-                    warnings: load_warnings.iter().map(|w| w.to_string()).collect(),
-                },
-            ));
+        // v0.3.3 卫生项①：空警告不再推 ConfigReloaded（噪声事件）。
+        if !load_warnings.is_empty() {
+            if let Ok(mut o) = observer.lock() {
+                o.push(DiagEvent::new(
+                    Layer::App,
+                    DiagKind::ConfigReloaded {
+                        warnings: load_warnings.iter().map(|w| w.to_string()).collect(),
+                    },
+                ));
+            }
         }
         // 共享配置同时喂 AppCore 与设置窗口（GUI ↔ TOML 双向一致，M9/M10）。
         let core = Arc::new(Mutex::new(AppCore::new(config_arc.clone())));
@@ -603,6 +619,11 @@ mod imp {
             cfg.icon_background,
             cfg.icon_font_color,
             cfg.icon_font_family.clone(),
+            if cfg.icon_font_tiers_enabled {
+                Some(cfg.icon_font_tier_colors.clone())
+            } else {
+                None
+            },
         );
         let mut cur_size = dpi_bucket_size(dpi);
         let mut cur_dark = dark;
@@ -625,7 +646,7 @@ mod imp {
         );
         let tray = match TrayIconBuilder::new()
             .with_menu(Box::new(menu_obj))
-            .with_tooltip("Logi VoltTray")
+            .with_tooltip("LogiVoltTray")
             .with_icon(first_icon)
             .with_menu_on_left_click(false)
             .build()
@@ -715,6 +736,7 @@ mod imp {
 
         // 共享配置对账（GUI ↔ TOML 双向一致）：设置窗口直接写共享配置、外部
         // TOML 改动经热重载 swap_config——任何一侧变化都落到 GUI 镜像。
+        let mut autostart_target: Option<bool> = None;
         let cfg_changed = match core.lock() {
             Ok(c) => {
                 let cfg = c.config();
@@ -726,7 +748,10 @@ mod imp {
                     || cfg.blink_enabled != state.blink_enabled
                     || cfg.low_threshold != state.low_threshold
                     || cfg.notification_silent != state.silent
-                    || cfg.autostart != state.autostart_on;
+                    || cfg.autostart != state.autostart_on
+                    || cfg.icon_font_tiers_enabled != state.tiers_enabled
+                    || cfg.icon_font_tier_thresholds != state.tier_thresholds
+                    || cfg.icon_font_tier_colors != state.tier_colors;
                 if changed {
                     state.icon_shape = cfg.icon_shape;
                     state.icon_bg = cfg.icon_background;
@@ -736,23 +761,51 @@ mod imp {
                     state.blink_enabled = cfg.blink_enabled;
                     state.low_threshold = cfg.low_threshold;
                     state.silent = cfg.notification_silent;
+                    state.tiers_enabled = cfg.icon_font_tiers_enabled;
+                    state.tier_thresholds = cfg.icon_font_tier_thresholds.clone();
+                    state.tier_colors = cfg.icon_font_tier_colors.clone();
                     // P2-3：自启键纳入镜像（M13 AC1）——TOML/设置侧改动同步注册表；
                     // 注册表写失败时保留旧镜像值，下个 tick 重试。
                     if cfg.autostart != state.autostart_on {
-                        let ok = if cfg.autostart {
-                            autostart::enable(exe).is_ok()
-                        } else {
-                            autostart::disable().is_ok()
-                        };
-                        if ok {
-                            state.autostart_on = cfg.autostart;
-                        }
+                        // v0.3.3 卫生项②：注册表 I/O 挪到 core 锁外执行
+                        //（此前在锁内做 I/O，且持续失败会每 tick 触发
+                        // cfg_changed → 全量 refresh_ui）。
+                        autostart_target = Some(cfg.autostart);
                     }
                 }
                 changed
             }
             Err(_) => false,
         };
+        // 自启注册表同步（core 锁外）：成功更新镜像；失败把共享配置回退为
+        // 注册表现状（防每 tick 重试刷 UI）并推 Alert 提醒。
+        if let Some(target) = autostart_target {
+            let ok = if target {
+                autostart::enable(exe).is_ok()
+            } else {
+                autostart::disable().is_ok()
+            };
+            if ok {
+                state.autostart_on = target;
+            } else {
+                let current = state.autostart_on;
+                if let Ok(mut guard) = cfg_arc.write() {
+                    guard.autostart = current;
+                }
+                persist_bool(cfg_path, "autostart", current);
+                if let Ok(mut o) = observer.lock() {
+                    o.push(DiagEvent::new(
+                        Layer::App,
+                        DiagKind::Alert {
+                            level: "warning".into(),
+                            message: format!(
+                                "autostart registry sync failed; config reverted to {current}"
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
         if cfg_changed {
             snap_changed = true;
         }
@@ -770,6 +823,11 @@ mod imp {
                 state.icon_bg,
                 state.icon_font,
                 state.icon_family.clone(),
+                if state.tiers_enabled {
+                    Some(state.tier_colors.clone())
+                } else {
+                    None
+                },
             );
             *cur_size = size;
             *cur_dark = dark;
@@ -893,17 +951,40 @@ mod imp {
         let default_id = default_idx
             .and_then(|i| devices.get(i))
             .map(|d| d.id.clone());
-        let (menu_obj, new_ids) = build_menu(
-            &devices,
-            default_id.as_deref(),
-            state.pinned.as_deref(),
-            state.poll_secs,
-            state.blink_enabled,
-            state.autostart_on,
-            state.silent,
-        );
-        *ids = new_ids;
-        tray.set_menu(Some(Box::new(menu_obj)));
+        // v0.3.3 卫生项（P3-1 缓解）：菜单内容签名未变则跳过 set_menu 重建
+        //（闪烁根源 = 每 500ms tick 反复 set_menu 同一内容）。
+        let sig = {
+            let mut s = format!(
+                "{}|p{:?}|b{}|a{}|s{}|d{:?}",
+                state.pinned.as_deref().unwrap_or("-"),
+                state.poll_secs,
+                state.blink_enabled,
+                state.autostart_on,
+                state.silent,
+                default_id.as_deref()
+            );
+            for d in &devices {
+                s.push_str(&format!(
+                    "/{}:{}:{:?}:{}:{}",
+                    d.id, d.percent, d.charging, d.gray, d.state
+                ));
+            }
+            s
+        };
+        if sig != state.menu_sig {
+            let (menu_obj, new_ids) = build_menu(
+                &devices,
+                default_id.as_deref(),
+                state.pinned.as_deref(),
+                state.poll_secs,
+                state.blink_enabled,
+                state.autostart_on,
+                state.silent,
+            );
+            *ids = new_ids;
+            tray.set_menu(Some(Box::new(menu_obj)));
+            state.menu_sig = sig;
+        }
 
         // 图标：默认展示设备（或钉选设备）的电量。
         let show = state
@@ -919,8 +1000,14 @@ mod imp {
         // 若把文本也打成 "--"，用户会误以为「未读取」——正是本次要修的症状。
         let sleeping = show.is_some_and(|d| d.state == "sleeping");
         let text = icon_text(percent, gray && !sleeping);
+        // v0.3.3 #4：分档模式按电量百分比映射档位色（阈值含该值归上一档）；
+        // 灰显（未知/休眠离线）仍走灰色档。
         let color = match percent {
+            Some(p) if state.tiers_enabled && !gray => {
+                IconColor::Tier(font_tier_for_percent(&state.tier_thresholds, p) as u8)
+            }
             Some(p) => IconColor::for_percent(p, gray, state.low_threshold),
+            None if state.tiers_enabled => IconColor::Gray,
             None => IconColor::Default,
         };
         // M11：低电闪烁 = 常态与提亮档各 500ms 交替；点击托盘后本次停闪。
@@ -932,14 +1019,46 @@ mod imp {
         let tip = match show {
             Some(d) if d.state == "sleeping" => {
                 format!(
-                    "Logi VoltTray — {} {}（休眠中 · 最后已知电量）",
+                    "LogiVoltTray — {} {}（休眠中 · 最后已知电量）",
                     d.name, text
                 )
             }
-            Some(d) => format!("Logi VoltTray — {} {}", d.name, text),
-            None => "Logi VoltTray".to_string(),
+            Some(d) => format!("LogiVoltTray — {} {}", d.name, text),
+            None => "LogiVoltTray".to_string(),
         };
         let _ = tray.set_tooltip(Some(&tip));
+    }
+
+    /// v0.3.3 #2：把 os error 翻译成可读错误（保留原始错误供诊断）。
+    fn friendly_io_error(e: &std::io::Error) -> String {
+        use std::io::ErrorKind;
+        match e.kind() {
+            ErrorKind::NotFound => "系统找不到指定的路径（目录不存在）".to_string(),
+            ErrorKind::PermissionDenied => "没有写入权限（请检查目录权限）".to_string(),
+            _ => e.to_string(),
+        }
+    }
+
+    /// 诊断导出落盘（v0.3.3 #2，可测试纯函数）：
+    /// 导出前 `create_dir_all` 确保目录存在（干净机器无历史目录也能导出），
+    /// 写入失败返回可读错误（含原始 os error）而非裸错误码。
+    fn write_diag_export(dir: &Path, filename: &str, json: &str) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            format!(
+                "无法创建导出目录 {}：{}；原始错误：{e}",
+                dir.display(),
+                friendly_io_error(&e)
+            )
+        })?;
+        let path = dir.join(filename);
+        std::fs::write(&path, json).map_err(|e| {
+            format!(
+                "无法写入 {}：{}；原始错误：{e}",
+                path.display(),
+                friendly_io_error(&e)
+            )
+        })?;
+        Ok(path)
     }
 
     /// 诊断导出（P1-6：脱敏 JSON 落盘 + 弹窗告知路径）。
@@ -952,16 +1071,19 @@ mod imp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let path = Config::default_path()
-            .parent()
-            .map(|p| p.join(format!("diag-export-{secs}.json")))
-            .unwrap_or_else(|| PathBuf::from(format!("diag-export-{secs}.json")));
-        let msg = match std::fs::write(&path, json) {
-            Ok(()) => format!("诊断事件流已脱敏导出：\n{}", path.display()),
-            Err(e) => format!("导出失败：{e}"),
+        let filename = format!("LogiVoltTray-diag-export-{secs}.json");
+        let msg = match write_diag_export(
+            Config::default_path()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            &filename,
+            &json,
+        ) {
+            Ok(path) => format!("诊断事件流已脱敏导出：\n{}", path.display()),
+            Err(e) => format!("诊断导出失败：{e}"),
         };
         let text = wide(&msg);
-        let title = wide("Logi VoltTray 诊断");
+        let title = wide("LogiVoltTray 诊断");
         unsafe {
             MessageBoxW(
                 None,
@@ -969,6 +1091,66 @@ mod imp {
                 PCWSTR(title.as_ptr()),
                 MB_OK | MB_ICONINFORMATION,
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod diag_export_tests {
+        use super::*;
+
+        fn temp_root(tag: &str) -> PathBuf {
+            let mut p = std::env::temp_dir();
+            p.push(format!(
+                "volttray-diag-test-{}-{tag}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            p
+        }
+
+        /// #2 回归：目标目录（含多级嵌套）不存在时导出仍成功——
+        /// 真机「系统找不到指定的路径。(os error 3)」的根因即缺 create_dir_all。
+        #[test]
+        fn export_creates_missing_nested_dirs() {
+            let root = temp_root("nested");
+            let dir = root.join("a").join("b").join("c");
+            let path = write_diag_export(&dir, "LogiVoltTray-diag-export-1.json", "[]")
+                .expect("export should succeed on missing dirs");
+            assert!(path.is_file());
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "[]",
+                "exported content must match"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// #2：导出目录被同名文件挡住时，错误可读且含原始错误。
+        #[test]
+        fn export_blocked_by_file_gives_readable_error() {
+            let root = temp_root("blocked");
+            std::fs::create_dir_all(&root).unwrap();
+            let blocker = root.join("blocker");
+            std::fs::write(&blocker, b"i am a file").unwrap();
+            let err = write_diag_export(&blocker, "x.json", "[]")
+                .expect_err("export into a file path must fail");
+            assert!(
+                err.contains("无法创建导出目录"),
+                "readable error expected, got: {err}"
+            );
+            assert!(err.contains("原始错误"), "raw error retained: {err}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// #2：导出文件名统一为 LogiVoltTray- 前缀（#1 命名一致性）。
+        #[test]
+        fn export_filename_uses_logivolttray_prefix() {
+            let root = temp_root("prefix");
+            let path = write_diag_export(&root, "LogiVoltTray-diag-export-42.json", "{}").unwrap();
+            assert!(path.to_string_lossy().contains("LogiVoltTray-diag-export-42.json"));
+            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }
@@ -981,7 +1163,7 @@ fn main() {
     }
     #[cfg(not(windows))]
     {
-        eprintln!("Logi VoltTray 仅支持 Windows；此二进制在非 Windows 平台仅用于编译与单元测试。");
+        eprintln!("LogiVoltTray 仅支持 Windows；此二进制在非 Windows 平台仅用于编译与单元测试。");
         std::process::exit(2);
     }
 }

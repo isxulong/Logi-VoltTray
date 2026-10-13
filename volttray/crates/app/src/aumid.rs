@@ -76,7 +76,7 @@ mod imp {
             let exe = wide(&exe_path.display().to_string());
             link.SetPath(PCWSTR::from_raw(exe.as_ptr()))
                 .map_err(|e| format!("SetPath failed: {e}"))?;
-            let desc = wide("Logi VoltTray - battery monitor");
+            let desc = wide("LogiVoltTray - battery monitor");
             let _ = link.SetDescription(PCWSTR::from_raw(desc.as_ptr()));
 
             // 写 AUMID 属性（手工构造 VT_LPWSTR PROPVARIANT，D-09）。
