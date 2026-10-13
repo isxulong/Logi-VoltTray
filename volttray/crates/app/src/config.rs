@@ -680,7 +680,7 @@ impl Config {
                 }
                 ("blink_enabled", Value::Bool(b)) => cfg.blink_enabled = *b,
                 ("icon_text_scale", Value::Int(n)) => {
-                    // D-48：越界钳制到 [60, 140] + 警告。
+                    // D-57：越界钳制到 [40, 160] + 警告。
                     let clamped =
                         (*n).clamp(ICON_TEXT_SCALE_MIN as u64, ICON_TEXT_SCALE_MAX as u64);
                     if clamped != *n {
@@ -689,7 +689,7 @@ impl Config {
                     cfg.icon_text_scale = clamped as u8;
                 }
                 ("icon_bg_scale", Value::Int(n)) => {
-                    // D-48：越界钳制到 [60, 100] + 警告（>100 会溢出位图）。
+                    // D-57：越界钳制到 [20, 100] + 警告（>100 会溢出位图）。
                     let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
                     if clamped != *n {
                         warn(key, &format!("out of range; clamped {n} -> {clamped}"));

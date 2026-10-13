@@ -252,6 +252,8 @@ mod imp {
     ) {
         let mut channels: Vec<ChannelState> = Vec::new();
         let mut watcher = ConfigWatcher::new(cfg_path);
+        // v0.3.6（D-62）：热重载告警去重——同一组迁移告警只上报一次。
+        let mut last_reload_warnings: Vec<String> = Vec::new();
         let mut last_enum = Instant::now() - Duration::from_secs(60);
         'outer: loop {
             if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
@@ -453,16 +455,24 @@ mod imp {
                 if let Ok(mut o) = observer.lock() {
                     // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
                     // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
-                    let kind = if warnings.is_empty() {
-                        DiagKind::Info {
+                    // v0.3.6（D-62）：迁移告警幂等但每次加载都重复出现，
+                    // 同一组告警只上报一次，不随每次热重载重复刷屏。
+                    let ws: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+                    let kind = if ws.is_empty() {
+                        Some(DiagKind::Info {
                             message: "config reloaded".into(),
-                        }
+                        })
+                    } else if ws != last_reload_warnings {
+                        Some(DiagKind::ConfigReloaded {
+                            warnings: ws.clone(),
+                        })
                     } else {
-                        DiagKind::ConfigReloaded {
-                            warnings: warnings.iter().map(|w| w.to_string()).collect(),
-                        }
+                        None
                     };
-                    o.push(DiagEvent::new(Layer::App, kind));
+                    last_reload_warnings = ws;
+                    if let Some(kind) = kind {
+                        o.push(DiagEvent::new(Layer::App, kind));
+                    }
                 }
             }
 
