@@ -5,7 +5,7 @@
 //! 容错规则：未知键 / 非法值 → 回退默认 + 诊断警告；越界值 → **钳制到边界 +
 //! 警告**（M10：不再重置默认）；绝不 panic、绝不拒绝启动。
 //!
-//! 键位一览（v0.3.4，共 16 键）：
+//! 键位一览（v0.3.5，共 16 键）：
 //! | 键 | 类型 | 默认 | 取值范围 / 说明 |
 //! | --- | --- | --- | --- |
 //! | `autostart` | bool | `false` | 开机自启（写入启动快捷方式） |
@@ -19,11 +19,11 @@
 //! | `icon_font_family` | str | `"Segoe UI"` | 系统字体名（渲染时缺失则 GDI 静默回退） |
 //! | `low_threshold` | int | `20` | `5`–`50`，低电提醒阈值（M12 单阈值，越界钳制） |
 //! | `blink_enabled` | bool | `true` | 低电闪烁提醒（M11，可关） |
-//! | `icon_font_tiers_enabled` | bool | `false` | 按电量分档着色（v0.3.3 #4；启用时单一字色入口隐藏） |
+//! | `icon_font_tiers_enabled` | bool | `true` | 按电量分档着色（v0.3.5 #5 默认开：字体颜色「自动(按电量档位)」即分档；旧配置「勾选关 + auto」迁移为开，D-56） |
 //! | `icon_font_tier_thresholds` | int 数组 | `[20, 50]` | N-1 个边界（N 档 2..=5）；阈值含该值归上一档；1–99 严格递增（越界钳制 / 递进修复 + 警告） |
 //! | `icon_font_tier_colors` | str 数组 | `["#E81123", "#FFD21F", "#00CC6A"]` | N 个分档色（缺失补默认色、多余截断 + 警告） |
-//! | `icon_text_scale` | int | `100` | `60`–`140`，图标文本大小（%，D-48，越界钳制） |
-//! | `icon_bg_scale` | int | `100` | `60`–`100`，图标背景块大小（%，D-48；100% 已触及位图边界故为上限） |
+//! | `icon_text_scale` | int | `100` | `40`–`160`，图标文本大小（%，D-48/D-57 范围拓展，越界钳制） |
+//! | `icon_bg_scale` | int | `100` | `20`–`100`，图标背景覆盖度（%，D-57；100% = 满出血零边距，几何上限） |
 //!
 //! 废弃键（保留迁移语义）：
 //! - `low_threshold_warn`：迁移为 `low_threshold`（钳 5..=50）+ 警告；
@@ -45,13 +45,14 @@ pub const POLL_TIERS_SECS: [u64; 5] = [60, 300, 600, 900, 1800];
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 pub const LOW_THRESHOLD_MIN: u8 = 5;
 pub const LOW_THRESHOLD_MAX: u8 = 50;
-/// 图标文本大小下限（%，D-48）。
-pub const ICON_TEXT_SCALE_MIN: u8 = 60;
-/// 图标文本大小上限（%，D-48）。
-pub const ICON_TEXT_SCALE_MAX: u8 = 140;
-/// 图标背景块大小下限（%，D-48）。
-pub const ICON_BG_SCALE_MIN: u8 = 60;
-/// 图标背景块大小上限（%，D-48）：100% 已触及位图边界，更大会溢出。
+/// 图标文本大小下限（%，D-48；D-57 由 60 拓展到 40）。
+pub const ICON_TEXT_SCALE_MIN: u8 = 40;
+/// 图标文本大小上限（%，D-48；D-57 由 140 拓展到 160）。
+pub const ICON_TEXT_SCALE_MAX: u8 = 160;
+/// 图标背景覆盖度下限（%，D-57 由 60 拓展到 20）。
+pub const ICON_BG_SCALE_MIN: u8 = 20;
+/// 图标背景覆盖度上限（%，D-48/D-57）：100% = 满出血零边距，已触及位图
+/// 边界，更大会溢出，故不设 >100%。
 pub const ICON_BG_SCALE_MAX: u8 = 100;
 /// 字体颜色与背景对比度下限（M9：<3.0 仅警告，不阻断）。
 pub const CONTRAST_FLOOR: f64 = 3.0;
@@ -400,7 +401,38 @@ pub fn flash_rgb(c: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
     }
 }
 
-/// 配置（v0.3.4：16 键 + 废弃迁移）。
+// ---------- Win32 COLORREF 转换（v0.3.5 #1，D-52） ----------
+
+/// RGB → Win32 COLORREF（0x00BBGGRR）。
+///
+/// **全仓唯一实现**：取色对话框 / HEX 输入 / 分档色点等所有与 Win32 交换
+/// 颜色的入口必须用本函数对转换，禁止第二份实现。v0.3.4 的 P1 缺陷就是把
+/// COLORREF 直接按 `#{:06X}` 序列化（BGR 当 RGB），纯红被写成 #0000FF。
+pub fn rgb_to_colorref(c: RgbColor) -> u32 {
+    c.r as u32 | ((c.g as u32) << 8) | ((c.b as u32) << 16)
+}
+
+/// Win32 COLORREF（0x00BBGGRR）→ RGB（忽略高 8 位）。
+/// 与 `rgb_to_colorref` 互为逆运算，同样全仓唯一。
+pub fn colorref_to_rgb(c: u32) -> RgbColor {
+    RgbColor {
+        r: (c & 0xFF) as u8,
+        g: ((c >> 8) & 0xFF) as u8,
+        b: ((c >> 16) & 0xFF) as u8,
+    }
+}
+
+/// 透明背景下低电闪烁的文本透明度脉冲系数（v0.3.5 #4，D-55）：
+/// 提亮帧文本 alpha × (1 − 0.55) ≈ 45%，与颜色跳变叠加保证肉眼可见。
+pub const BLINK_TEXT_ALPHA_PULSE: f64 = 0.55;
+
+/// 透明度脉冲：alpha × (1 − factor)（四舍五入）。`factor` 取
+/// `BLINK_TEXT_ALPHA_PULSE`；普通帧不调用本函数（alpha 原样）。
+pub fn pulse_alpha(alpha: u8, factor: f64) -> u8 {
+    (alpha as f64 * (1.0 - factor) + 0.5) as u8
+}
+
+/// 配置（v0.3.5：16 键 + 废弃迁移）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// 开机自启（HKCU Run 单值）。
@@ -426,16 +458,17 @@ pub struct Config {
     pub low_threshold: u8,
     /// 低电闪烁提醒开关，默认开（M11）。
     pub blink_enabled: bool,
-    /// 按电量分档着色（v0.3.3 #4）；启用时单一字色被忽略、设置窗口隐藏单一字色入口。
+    /// 按电量分档着色（v0.3.5 #5：默认开——设置窗口「自动(按电量档位)」
+    /// 即分档；由字体颜色下拉派生，不再有独立勾选）。启用时单一字色被忽略。
     pub icon_font_tiers_enabled: bool,
     /// 分档边界（N 档 = N-1 个阈值，默认 [20, 50]）；阈值含该值归上一档。
     pub icon_font_tier_thresholds: Vec<u8>,
     /// 分档颜色（N 个，默认红/黄/绿）。
     pub icon_font_tier_colors: Vec<RgbColor>,
-    /// 图标文本大小（% 相对基准字号，D-48），默认 100，范围 60..=140。
+    /// 图标文本大小（% 相对基准字号，D-48/D-57），默认 100，范围 40..=160。
     pub icon_text_scale: u8,
-    /// 图标背景块大小（% 相对位图内切块，D-48），默认 100，范围 60..=100
-    /// （100% 已触及位图边界，更大会溢出，故上限为 100）。
+    /// 图标背景覆盖度（% 相对位图内切块，D-48/D-57），默认 100，范围
+    /// 20..=100（100% = 满出血零边距，已触及位图边界，故上限为 100）。
     pub icon_bg_scale: u8,
 }
 
@@ -453,7 +486,8 @@ impl Default for Config {
             icon_font_family: "Segoe UI".to_string(),
             low_threshold: DEFAULT_LOW_THRESHOLD,
             blink_enabled: true,
-            icon_font_tiers_enabled: false,
+            // v0.3.5 #5（D-56）：字体颜色「自动(按电量档位)」即分档，默认开。
+            icon_font_tiers_enabled: true,
             icon_font_tier_thresholds: DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
             icon_font_tier_colors: DEFAULT_FONT_TIER_COLORS.to_vec(),
             icon_text_scale: 100,
@@ -539,6 +573,7 @@ impl Config {
 
         let mut saw_low_threshold = false;
         let mut migrated_warn_threshold: Option<u64> = None;
+        let mut saw_tier_thresholds = false;
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -683,6 +718,7 @@ impl Config {
                     }
                     if ok {
                         cfg.icon_font_tier_thresholds = ths;
+                        saw_tier_thresholds = true;
                     }
                 }
                 ("icon_font_tier_colors", Value::List(items)) => {
@@ -747,6 +783,23 @@ impl Config {
                 let clamped = w.clamp(LOW_THRESHOLD_MIN as u64, LOW_THRESHOLD_MAX as u64);
                 cfg.low_threshold = clamped as u8;
             }
+        }
+        // v0.3.5 #5 迁移（D-56）：旧配置「分档勾选关 + 字体颜色 auto」的语义
+        // 是「按电量自动变色」，对应新下拉的「自动(按电量档位)」——启用分档，
+        // 而不是按字面映射成「自定义」（那会把按电量变化退化成固定色）。
+        // 未显式给分档阈值且 low_threshold 定制过时，沿用 [low_threshold, 50]
+        // 保住旧的变色点；勾选关 + 固定色 → 自定义（不启用分档）。
+        if !cfg.icon_font_tiers_enabled && cfg.icon_font_color == IconFontColor::Auto {
+            cfg.icon_font_tiers_enabled = true;
+            if !saw_tier_thresholds && cfg.low_threshold != DEFAULT_FONT_TIER_THRESHOLDS[0] {
+                cfg.icon_font_tier_thresholds = vec![cfg.low_threshold, DEFAULT_FONT_TIER_THRESHOLDS[1]];
+            }
+            warnings.push(ConfigWarning {
+                key: "icon_font_tiers_enabled".into(),
+                reason: "migrated (v0.3.5): font color \"auto\" merged into tier mode; \
+                         tiers enabled to preserve per-battery-level coloring"
+                    .into(),
+            });
         }
         // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
         {
@@ -1103,15 +1156,19 @@ mod tests {
         assert!(w2.is_empty(), "{w2:?}");
         assert_eq!(back, c);
 
-        // 越界钳制 + 警告：文本 200 → 140、20 → 60；背景 130 → 100（几何上限）。
+        // 越界钳制 + 警告：文本 200 → 160、10 → 40；背景 130 → 100（几何上限）、
+        // 10 → 20（D-57 新边界）。
         let (c, w) = Config::parse("icon_text_scale = 200\nicon_bg_scale = 130\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MAX);
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MAX);
         assert_eq!(w.len(), 2);
         assert!(w.iter().any(|x| x.key == "icon_text_scale"));
         assert!(w.iter().any(|x| x.key == "icon_bg_scale"));
-        let (c, w) = Config::parse("icon_text_scale = 20\n");
+        let (c, w) = Config::parse("icon_text_scale = 10\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MIN);
+        assert_eq!(w.len(), 1);
+        let (c, w) = Config::parse("icon_bg_scale = 10\n");
+        assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MIN);
         assert_eq!(w.len(), 1);
         // 非整数 / 布尔 → 默认保留 + 警告。
         let (c, w) = Config::parse("icon_text_scale = true\n");
@@ -1122,7 +1179,8 @@ mod tests {
     #[test]
     fn font_tier_defaults() {
         let c = Config::default();
-        assert!(!c.icon_font_tiers_enabled);
+        // v0.3.5 #5（D-56）：分档默认开（「自动(按电量档位)」即分档）。
+        assert!(c.icon_font_tiers_enabled);
         assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
         assert_eq!(c.icon_font_tier_colors.len(), 3);
         // 默认值本身必须已合规（规范化幂等、无警告）。
@@ -1230,9 +1288,91 @@ mod tests {
         let (c, w) = Config::parse("icon_font_tier_thresholds = [20, \"50\"]\n");
         assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
         assert_eq!(w.len(), 1);
-        // 数组值给到标量键 → catch-all 警告。
+        // 数组值给到标量键 → catch-all 警告；v0.3.5 默认开，「保默认」即开。
         let (c, w) = Config::parse("icon_font_tiers_enabled = [true]\n");
-        assert!(!c.icon_font_tiers_enabled);
+        assert!(c.icon_font_tiers_enabled);
         assert_eq!(w.len(), 1);
+    }
+
+    /// v0.3.5 #1（D-52）：COLORREF ↔ RGB 字节序，验收用例。
+    #[test]
+    fn colorref_rgb_byte_order_roundtrip() {
+        // 验收：COLORREF 0x000000FF（红）→ 序列化必须是 #FF0000。
+        let red = colorref_to_rgb(0x0000_00FF);
+        assert_eq!(red.to_hex(), "#FF0000");
+        // 反向：#FF0000 → COLORREF 0x000000FF。
+        assert_eq!(
+            rgb_to_colorref(RgbColor {
+                r: 0xFF,
+                g: 0x00,
+                b: 0x00
+            }),
+            0x0000_00FF
+        );
+        // 纯蓝不再被串成红色：COLORREF 0x00FF0000 ↔ #0000FF。
+        assert_eq!(colorref_to_rgb(0x00FF_0000).to_hex(), "#0000FF");
+        assert_eq!(
+            rgb_to_colorref(RgbColor {
+                r: 0x00,
+                g: 0x00,
+                b: 0xFF
+            }),
+            0x00FF_0000
+        );
+        // 往返恒等（含高 8 位为零的全部边界）。
+        for c in [0x0000_0000u32, 0x00FF_FFFF, 0x0012_3456, 0x00AB_CDEF] {
+            assert_eq!(rgb_to_colorref(colorref_to_rgb(c)), c);
+            assert_eq!(colorref_to_rgb(rgb_to_colorref(colorref_to_rgb(c))), colorref_to_rgb(c));
+        }
+    }
+
+    /// v0.3.5 #4（D-55）：透明背景闪烁帧的文本透明度脉冲。
+    #[test]
+    fn blink_text_alpha_pulse_math() {
+        // 255 × (1 − 0.55) = 114.75 → 115：与普通帧 255 差异肉眼可见。
+        assert_eq!(pulse_alpha(255, BLINK_TEXT_ALPHA_PULSE), 115);
+        // 普通帧不脉冲（factor = 0 恒等）。
+        assert_eq!(pulse_alpha(255, 0.0), 255);
+        // 脉冲只降不升，且永不超原值。
+        for a in [0u8, 1, 128, 254, 255] {
+            assert!(pulse_alpha(a, BLINK_TEXT_ALPHA_PULSE) <= a);
+        }
+    }
+
+    /// v0.3.5 #5（D-56）：旧配置「分档勾选关 + auto」迁移为分档开。
+    #[test]
+    fn v035_auto_font_color_migrates_to_tier_mode() {
+        // 勾选关 + 显式 auto → 启用分档 + 迁移警告；默认阈值不变。
+        let (c, w) = Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"auto\"\n");
+        assert!(c.icon_font_tiers_enabled);
+        assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "icon_font_tiers_enabled" && x.reason.contains("migrated")),
+            "{w:?}"
+        );
+        // 勾选关 + 未写 font_color（默认 auto）+ 定制 low_threshold → 沿用
+        // [low_threshold, 50]，保住旧的变色点。
+        let (c, _) = Config::parse("icon_font_tiers_enabled = false\nlow_threshold = 30\n");
+        assert!(c.icon_font_tiers_enabled);
+        assert_eq!(c.icon_font_tier_thresholds, vec![30, 50]);
+        // 显式分档阈值优先，不被迁移种子覆盖。
+        let (c, _) = Config::parse(
+            "icon_font_tiers_enabled = false\nlow_threshold = 30\nicon_font_tier_thresholds = [10, 40]\n",
+        );
+        assert!(c.icon_font_tiers_enabled);
+        assert_eq!(c.icon_font_tier_thresholds, vec![10, 40]);
+        // 勾选关 + 固定色 → 自定义：不启用分档、无迁移警告。
+        let (c, w) = Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n");
+        assert!(!c.icon_font_tiers_enabled);
+        assert!(w.is_empty(), "{w:?}");
+        // 勾选开 → 无迁移警告（本来就在分档模式）。
+        let (c, w) = Config::parse("icon_font_tiers_enabled = true\n");
+        assert!(c.icon_font_tiers_enabled);
+        assert!(w.is_empty(), "{w:?}");
+        // 空配置 = 全新默认：分档开、无警告。
+        let (c, w) = Config::parse("");
+        assert!(c.icon_font_tiers_enabled);
+        assert!(w.is_empty(), "{w:?}");
     }
 }

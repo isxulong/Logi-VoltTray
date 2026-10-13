@@ -195,4 +195,63 @@ mod tests {
         core.record_success("m1", read(90, false), now);
         assert!(!core.is_low_battery("m1"));
     }
+
+    /// v0.3.5 #4 验收：透明形状 + 低电 → 闪烁状态机走「文本帧路径」。
+    /// 状态机产出 bright 帧标记，渲染侧（IconCache 透明形状）对 bright 帧
+    /// 施加文本颜色跳变 + 透明度脉冲，两帧必有可见差异；非透明形状维持
+    /// 背景闪烁（背景帧差异、文本 alpha 恒 255）。
+    #[test]
+    fn transparent_low_battery_takes_text_frame_path() {
+        use crate::icon::{IconCache, IconColor};
+        use volttray_app::config::{
+            pulse_alpha, IconBackground, IconFontColor, IconShape, BLINK_TEXT_ALPHA_PULSE,
+        };
+
+        let cache = IconCache::new(
+            32,
+            true,
+            IconShape::Transparent,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let frame = |bright: bool| {
+            cache
+                .map_for_test(IconColor::Default, "15", bright)
+                .expect("frame cached")
+        };
+
+        // 低电触发 → tick 出 bright=true 的一帧。
+        let mut s = BlinkState::new();
+        s.set_low_active(true);
+        let (mut normal_tag, mut bright_tag) = (false, false);
+        for _ in 0..4 {
+            let t = s.tick(true);
+            if t.bright {
+                bright_tag = true;
+            } else {
+                normal_tag = true;
+            }
+        }
+        assert!(normal_tag && bright_tag, "blink must alternate both frames");
+
+        // 文本帧路径：bright 帧文本 alpha 被脉冲，normal 帧不脉冲。
+        let (n, b) = (frame(false), frame(true));
+        assert_ne!(n, b, "transparent blink frames must differ");
+        let solid = n
+            .chunks_exact(4)
+            .position(|px| px[3] == 255)
+            .expect("solid glyph pixel");
+        assert_eq!(b[solid * 4 + 3], pulse_alpha(255, BLINK_TEXT_ALPHA_PULSE));
+        // 背景闪烁路径不被误用：透明形状两帧都没有背景像素可闪，
+        // 差异必须且只能落在文本像素上。
+        for (pn, pb) in n.chunks_exact(4).zip(b.chunks_exact(4)) {
+            if pn[3] == 0 {
+                assert_eq!(pb[3], 0, "no background pixel may appear");
+            }
+        }
+    }
 }

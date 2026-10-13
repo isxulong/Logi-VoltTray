@@ -1,65 +1,87 @@
-//! 设置窗口（v0.3.0 产品方案 M9-M13；v0.3.3 #3/#4）：裸 Win32 单页非模态窗口。
+//! 设置窗口（v0.3.5 全面现代化重构）：裸 Win32 单页非模态窗口。
 //!
 //! 形态：无模式、单实例（重复打开只前置既有窗口）、改动即时生效（无确定/取消）、
 //! 关闭即销毁。GUI 改动直接写入共享配置（AppCore 同一个 `Arc<RwLock<Config>>`）
 //! 并持久化 TOML；TOML 侧改动经既有 mtime 热重载进入共享配置——双向一致。
 //!
-//! v0.3.3：
-//! - #3 所有颜色入口（背景色 / 字体颜色 / 分档色点）点击「选色…」呼出系统
-//!   取色对话框（ChooseColorW，展开完整色轮 + 自定义色），HEX 手输框保留、
-//!   双向同步（D-41）；
-//! - #4 字体颜色分档：启用后隐藏单一字体颜色入口；N 档 = N-1 个阈值数字框
-//!   （该数字及以下的电量归上一档）+ N 个色点，色点点击走同一取色对话框；
-//!   阈值校验 1–99 严格递增（D-42）。
+//! v0.3.5（#7696143042746518551 设计规范 v1.0 逐条落地）：
+//! - #1 字节序（D-52）：所有 Win32 COLORREF（0x00BBGGRR）↔ `RgbColor`（#RRGGBB）
+//!   转换统一走 `config::rgb_to_colorref` / `config::colorref_to_rgb`，全窗口
+//!   不存在第二份字节序实现；取色对话框 → 配置 → 渲染链路字节序一致。
+//! - #2 程序图标（D-53）：EXE 嵌入 assets/volttray.ico（16/24/32/48/64/128/256），
+//!   运行时 `LoadIconW(MAKEINTRESOURCE(1))` 设置窗口大/小图标 + 窗口类图标。
+//! - #3 滚轮方向（D-54）：滑块与数字框统一「上滚增加、下滚减少」（规范裁决 5），
+//!   经 GWLP_WNDPROC 子类化注入（windows crate 0.62 未导出 SetWindowSubclass，
+//!   改用 SetWindowLongPtrW + CallWindowProcW）；数字框同时支持 ↑/↓ 键。
+//! - #5/#6 字体颜色合一（D-56）：删除独立「字体颜色分档」复选框，下拉
+//!   [自动（按电量档位）, 自定义] 即分档开关；「自动」展开分档卡片（档数/
+//!   阈值/色点/提示），「自定义」收起并显示单一选色 swatch，空间经 relayout 回收。
+//! - #7 文字不截断：分区标题/标签按 9pt、提示语按 8pt 实测文本宽度，
+//!   最长提示语反推窗口最小宽度（规范裁决 3），任何文案不再截断/裁切。
+//! - #8 图标大小范围（D-57）：文本 40–160%、背景覆盖度 20–100%（100% = 满出血），
+//!   常量统一来自 config（ICON_*_SCALE_*）。
+//! - #9 现代化（D-58）：分区标题 + 8px 网格 + 分色 token（浅/深）、按钮
+//!   owner-draw（悬停/按下态）、深色标题栏（DWMWA_USE_IMMERSIVE_DARK_MODE）、
+//!   DPI 感知（GetDpiForWindow + AdjustWindowRectExForDpi）、分档色点 hover
+//!   tooltip（档位区间 + HEX）。原生控件（下拉/滑块/复选框）保持系统主题，
+//!   不引入 WebView/大型框架。
 //!
-//! 三组控件 + 每组「恢复默认」+ 全局「恢复全部默认」：
-//! - 外观：形状（圆角/直角/透明）、背景色（深/浅/自定义 #RRGGBB）、字体（系统
-//!   字体枚举）、字体颜色（auto / 自定义 #RRGGBB / 分档）、实时预览；对比度 <3.0
-//!   仅警告不阻断（M9）；
-//! - 刷新：轮询间隔 15/30/60/120/300 秒（M10）；
-//! - 低电提醒：闪烁开关 + 阈值滑块 5..=50 步进 5（M11/M12）。
+//! 低电提醒：闪烁开关 + 阈值滑块 5..=50 步进 5；透明形状下低电闪烁作用于
+//! 文本透明度脉冲（icon.rs / blink.rs，D-55），本窗口仅含开关与阈值。
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::icon::{font_rgb, render_text_bitmap, IconColor};
 use volttray_app::autostart;
 use volttray_app::config::{
-    contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers, Config,
-    IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS,
-    DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS,
-    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX,
-    ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX,
-    LOW_THRESHOLD_MIN,
+    colorref_to_rgb, contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers,
+    rgb_to_colorref, Config, IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR,
+    DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS,
+    FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN,
+    ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
 };
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{
+    COLORREF, HWND, HINSTANCE, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::{
-    CreateDIBSection, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
-    HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, TEXTMETRICW,
+    BeginPaint, CreateDIBSection, CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteObject,
+    DrawTextW, EndPaint, EnumFontFamiliesExW, FillRect, FrameRect, GetDC, GetStockObject,
+    GetTextExtentPoint32W, InvalidateRect, ReleaseDC, RoundRect, ScreenToClient, SelectObject,
+    SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET,
+    DEFAULT_GUI_FONT, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, HBITMAP, HBRUSH, HDC,
+    HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, PS_SOLID, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, BST_CHECKED, BST_UNCHECKED, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX,
-    TBM_SETPOS, TBM_SETRANGE, TBM_SETTICFREQ, TBS_AUTOTICKS,
-};
-// comdlg32（ChooseColorW 等）在 windows crate 的 Controls::Dialogs 子模块。
 use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetDlgItem, GetWindowLongPtrW, GetWindowTextW,
-    IsWindow, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CB_ADDSTRING, CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
-    CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GWLP_USERDATA, HCURSOR,
-    HICON, HMENU, IMAGE_BITMAP, STM_SETIMAGE, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HSCROLL, WM_NCDESTROY, WM_SETFONT,
-    WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    WS_VSCROLL,
+use windows::Win32::UI::Controls::{
+    InitCommonControlsEx, BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, ICC_BAR_CLASSES,
+    ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, ODS_SELECTED, TBM_SETPOS, TBM_SETRANGE,
+    TBM_SETTICFREQ, TBS_AUTOTICKS, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW,
+    TTM_UPDATETIPTEXTW, TTTOOLINFOW,
 };
-
-use crate::icon::{font_rgb, render_text_bitmap, IconColor};
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_HOVER, TME_LEAVE, TrackMouseEvent, TRACKMOUSEEVENT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CBN_SELCHANGE, CB_ADDSTRING, CB_FINDSTRINGEXACT,
+    CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_SETCURSEL, CBS_DROPDOWNLIST,
+    CallWindowProcW, CREATESTRUCTW, CW_USEDEFAULT, DefWindowProcW, DestroyWindow, EN_CHANGE,
+    GetClientRect, GetCursorPos, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW,
+    GetWindowTextW, GWLP_USERDATA, GWLP_WNDPROC, HCURSOR, HICON, HMENU, IDC_ARROW, IMAGE_BITMAP,
+    IsWindow, LoadCursorW, LoadIconW, MoveWindow, RegisterClassW, SendMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, STM_SETIMAGE, SW_HIDE, SW_SHOW,
+    SWP_NOMOVE, SWP_NOZORDER, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL,
+    WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW,
+    WNDCLASS_STYLES, WNDPROC, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE, WS_VSCROLL,
+};
 
 /// SendMessageW 包装（Option 参数形态见 0.62 绑定；返回 LRESULT 内层值）。
 macro_rules! SendMessageW {
@@ -68,19 +90,43 @@ macro_rules! SendMessageW {
     };
 }
 
-// windows crate 0.62 未导出的控件常量（本地定义）：
-// TBM_GETPOS = WM_USER+0；SS_BITMAP = 0x0E。
+// —— windows crate 0.62 未导出 / 类型不便利的控件常量（本地定义）——
+/// TBM_GETPOS = WM_USER+0；TBM_GETRANGEMIN/MAX = WM_USER+1/2。
 const TBM_GETPOS: u32 = 0x0400;
+const TBM_GETRANGEMIN: u32 = 0x0401;
+const TBM_GETRANGEMAX: u32 = 0x0402;
+/// TB_THUMBPOSITION（转发给父窗口的 WM_HSCROLL 通知码）。
+const TB_THUMBPOSITION: u32 = 4;
+/// SS_BITMAP = 0x0E。
 const SS_BITMAP: u32 = 14;
-/// SS_NOTIFY = 0x0100（STATIC 点击通知 STN_CLICKED；windows crate 未导出）。
+/// SS_NOTIFY = 0x0100（STATIC 点击通知 STN_CLICKED）。
 const SS_NOTIFY: u32 = 0x0100;
-/// ES_NUMBER = 0x2000（EDIT 仅数字；windows crate 未导出）。
+/// ES_NUMBER = 0x2000（EDIT 仅数字）。
 const ES_NUMBER: u32 = 0x2000;
-
-/// BS_GROUPBOX（分组框样式；windows crate 以 i32 导出，这里只用作样式位）。
-const BS_GROUPBOX: u32 = 7;
-/// BS_AUTOCHECKBOX。
+/// BS_AUTOCHECKBOX = 0x03。
 const BS_AUTOCHECKBOX: u32 = 3;
+/// BS_OWNERDRAW = 0x0B（BUTTON 样式常量 crate 以 i32 导出，本地取位值）。
+const BS_OWNERDRAW_STYLE: u32 = 0x000B;
+/// WS_EX_CLIENTEDGE = 0x0200。
+const WS_EX_CLIENTEDGE_RAW: u32 = 0x0200;
+/// WM_MOUSEHOVER / WM_MOUSELEAVE（未在 0.62 导出；与 WinUser.h 一致）。
+const WM_MOUSEHOVER: u32 = 0x02A1;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+/// WM_KEYDOWN。
+const WM_KEYDOWN: u32 = 0x0100;
+const VK_UP: usize = 0x26;
+const VK_DOWN: usize = 0x28;
+/// WM_CTLCOLORLISTBOX（下拉列表部分）。
+const WM_CTLCOLORLISTBOX: u32 = 0x0134;
+/// WM_SETICON 的 wParam：ICON_SMALL=0 / ICON_BIG=1。
+const ICON_SMALL_ID: usize = 0;
+const ICON_BIG_ID: usize = 1;
+/// DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 1809+）。
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+/// tooltip 弹出层样式 TTS_ALWAYSTIP(0x01) | TTS_NOPREFIX(0x02)。
+const TTS_FLAGS_RAW: u32 = 0x01 | 0x02;
+/// 设置窗口固定样式（无缩放边框：布局由代码精确控制）。
+const SETTINGS_STYLE: u32 = WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0;
 
 /// 设置窗口单实例句柄（0 = 未打开）。
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -88,16 +134,12 @@ static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
 /// ChooseColorW 自定义颜色槽（进程级持久；comdlg32 要求可写指针）。
 static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0); 16]);
 
-// 控件 ID。
+// —— 控件 ID（v0.3.5：删除 HEX 框/分档勾选/分组恢复按钮，新增 swatch 与行内重置）——
 const IDC_SHAPE: i32 = 2001;
 const IDC_BG: i32 = 2002;
-const IDC_BG_HEX: i32 = 2003;
 const IDC_FONT_FAMILY: i32 = 2004;
 const IDC_FONT_COLOR: i32 = 2005;
-const IDC_FONT_HEX: i32 = 2006;
 const IDC_PREVIEW: i32 = 2007;
-const IDC_RESET_APPEAR: i32 = 2008;
-const IDC_RESET_REFRESH: i32 = 2009;
 const IDC_RESET_LOW: i32 = 2010;
 const IDC_RESET_ALL: i32 = 2011;
 const IDC_BLINK: i32 = 2012;
@@ -105,33 +147,154 @@ const IDC_SLIDER: i32 = 2013;
 const IDC_THRESH_VAL: i32 = 2014;
 const IDC_STATUS: i32 = 2015;
 const IDC_INTERVAL: i32 = 2016;
-/// 文本大小滑块（v0.3.4 #4，D-48）。
-const IDC_TEXT_SLIDER: i32 = 2036;
-const IDC_TEXT_VAL: i32 = 2037;
-/// 背景大小滑块（v0.3.4 #4，D-48）。
-const IDC_BG_SLIDER: i32 = 2038;
-const IDC_BG_VAL: i32 = 2039;
-/// 背景色「选色…」按钮（#3 色轮入口）。
+/// 背景色「选色…」按钮（色轮入口）。
 const IDC_BG_PICK: i32 = 2017;
-/// 字体颜色「选色…」按钮（#3 色轮入口）。
+/// 字体颜色「选色…」按钮（色轮入口）。
 const IDC_FONT_PICK: i32 = 2018;
-/// 「字体颜色分档」复选框（#4）。
-const IDC_TIERED: i32 = 2019;
 /// 分档数量下拉（2..=5 档）。
 const IDC_TIER_COUNT: i32 = 2020;
 /// 分档阈值数字框（最多 4 个 = 5 档 - 1）。
 const IDC_TIER_TH0: i32 = 2021;
 /// 分档色点（最多 5 个）。
 const IDC_TIER_DOT0: i32 = 2031;
+/// 文本大小滑块（D-48；v0.3.5 范围 40–160%）。
+const IDC_TEXT_SLIDER: i32 = 2036;
+const IDC_TEXT_VAL: i32 = 2037;
+/// 背景覆盖度滑块（D-57；v0.3.5 范围 20–100%，100% = 满出血）。
+const IDC_BG_SLIDER: i32 = 2038;
+const IDC_BG_VAL: i32 = 2039;
+/// 行内「重置」按钮（文本大小 / 背景覆盖度）。
+const IDC_TEXT_RESET: i32 = 2040;
+const IDC_BG_RESET: i32 = 2041;
+/// 背景色 swatch（40×24 色块，显示当前背景色）。
+const IDC_BG_SWATCH: i32 = 2042;
+/// 字体颜色 swatch（「自定义」模式显示；「自动」模式隐藏）。
+const IDC_FONT_SWATCH: i32 = 2043;
+/// 分档卡片内提示语。
+const IDC_TIER_HINT: i32 = 2044;
+/// 背景覆盖度说明。
+const IDC_COVER_HINT: i32 = 2045;
+/// 4× 放大预览。
+const IDC_PREVIEW_BIG: i32 = 2046;
+/// 轮询间隔耗电提示。
+const IDC_INTERVAL_HINT: i32 = 2047;
+/// 分档卡片内标签（档数/阈值/颜色）。
+const IDC_LBL_TIER_COUNT: i32 = 2050;
+const IDC_LBL_TIER_TH: i32 = 2051;
+const IDC_LBL_TIER_COLOR: i32 = 2052;
+/// 需要随分档卡收起而移动的标签/分区标题。
+const IDC_LBL_TEXT: i32 = 2060;
+const IDC_LBL_BGCOVER: i32 = 2061;
+const IDC_LBL_PREVIEW: i32 = 2062;
+const IDC_SEC_REFRESH: i32 = 2063;
+const IDC_LBL_INTERVAL: i32 = 2064;
+const IDC_SEC_LOW: i32 = 2065;
+const IDC_LBL_LOW: i32 = 2066;
 
-/// 预览位图边长（像素）。
+/// 预览位图边长（逻辑像素；实际按 DPI 缩放）。
 const PREVIEW_PX: i32 = 48;
-/// 分档色点边长（像素）。
-const DOT_PX: i32 = 26;
+/// 分档色点边长（规范裁决 2：16×16 圆点）。
+const DOT_PX: i32 = 16;
 
-/// 刷新间隔档位（v0.3.4 #2 / D-45）：过短档位（15/30/120 秒）与零耗电理念
-/// 相悖且无收益（电量变化约 1%–2%/小时），收敛为 60/300/600/900/1800。
+/// 刷新间隔档位（D-45）：60/300/600/900/1800。
 const INTERVALS: [u64; 5] = [60, 300, 600, 900, 1800];
+
+// —— 布局常量（逻辑像素，96dpi 基准；渲染时按窗口 DPI 缩放）——
+/// 客户区最小逻辑宽（实际按最长提示语实测拓宽）。
+const L_CLIENT_W: i32 = 500;
+/// 分档卡片逻辑高（3 行 + 提示行；规范 96 的微调：避免 8pt 提示贴边）。
+const L_CARD_H: i32 = 104;
+/// 展开态客户区逻辑高。
+const L_EXPANDED_H: i32 = 812;
+/// 收起分档卡后回收的逻辑高度（卡片 104 + 间距 8）。
+const TIER_DELTA: i32 = L_CARD_H + 8;
+/// 收起态客户区逻辑高。
+const L_COLLAPSED_H: i32 = L_EXPANDED_H - TIER_DELTA;
+
+/// 分档卡提示语（裁决 2：单行动态说明；实测宽度反推窗口最小宽）。
+const TIER_HINT_TEXT: &str =
+    "阈值 1–99 严格递增；电量 ≤ 数值归入对应档（如 20/50 → 0–20 / 21–50 / 51–100）";
+/// 背景覆盖度说明（裁决 4：100% = 满出血）。
+const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个内切区域）";
+/// 轮询间隔耗电提示（D-33）。
+const INTERVAL_HINT_TEXT: &str = "更短的间隔会增加鼠标耗电；电量变化很慢，默认档已足够及时";
+/// 最长状态文案（宽度实测样本）。
+const MSG_TIER_RANGE: &str = "⚠ 阈值需为 1–99 的整数，且必须严格递增（如 20、50 → 0-20 / 21-50 / 51-100）";
+const MSG_CONTRAST_SAMPLE: &str = "⚠ 字色与背景对比度 12.3 低于 3.0，可能不易读（不阻断使用）";
+
+/// 展开态下方控件坐标表：(id, x, y, w, h)（逻辑像素）。
+/// 收起分档卡时整组上移 TIER_DELTA；提示语宽度在 relayout 中按实测宽覆盖。
+const BELOW: [(i32, i32, i32, i32, i32); 23] = [
+    (IDC_LBL_TEXT, 16, 278, 64, 20),
+    (IDC_TEXT_SLIDER, 88, 274, 196, 26),
+    (IDC_TEXT_VAL, 292, 278, 44, 20),
+    (IDC_TEXT_RESET, 344, 274, 48, 24),
+    (IDC_LBL_BGCOVER, 16, 310, 72, 20),
+    (IDC_BG_SLIDER, 88, 306, 196, 26),
+    (IDC_BG_VAL, 292, 310, 44, 20),
+    (IDC_BG_RESET, 344, 306, 48, 24),
+    (IDC_COVER_HINT, 88, 338, 396, 14),
+    (IDC_LBL_PREVIEW, 16, 366, 64, 20),
+    (IDC_PREVIEW, 88, 362, PREVIEW_PX, PREVIEW_PX),
+    (IDC_PREVIEW_BIG, 152, 362, PREVIEW_PX * 4, PREVIEW_PX * 4),
+    (IDC_SEC_REFRESH, 16, 566, 80, 18),
+    (IDC_LBL_INTERVAL, 16, 592, 64, 20),
+    (IDC_INTERVAL, 88, 588, 160, 220),
+    (IDC_INTERVAL_HINT, 88, 620, 396, 14),
+    (IDC_SEC_LOW, 16, 646, 96, 18),
+    (IDC_BLINK, 16, 672, 240, 22),
+    (IDC_LBL_LOW, 16, 702, 64, 20),
+    (IDC_SLIDER, 88, 698, 196, 26),
+    (IDC_THRESH_VAL, 292, 702, 44, 20),
+    (IDC_RESET_LOW, 344, 698, 48, 24),
+    (IDC_RESET_ALL, 16, 738, 120, 28),
+    // IDC_STATUS 单列（宽度按实测覆盖）。
+];
+
+/// 色彩 token（规范裁决 6：浅/深两套；存储为 COLORREF 0x00BBGGRR，
+/// 一律经 `rgb_to_colorref` 从 #RRGGBB 语义构造，杜绝第二份字节序实现）。
+#[derive(Clone, Copy)]
+struct Theme {
+    window: u32,
+    card: u32,
+    border: u32,
+    text: u32,
+    secondary: u32,
+    error: u32,
+    hover: u32,
+    pressed: u32,
+}
+
+/// #RRGGBB 语义 → COLORREF（0x00BBGGRR）。全文件唯一的颜色→Win32 通道（D-52）。
+fn tc(r: u8, g: u8, b: u8) -> u32 {
+    rgb_to_colorref(RgbColor { r, g, b })
+}
+
+fn theme(dark: bool) -> Theme {
+    if dark {
+        Theme {
+            window: tc(0x20, 0x20, 0x20),
+            card: tc(0x2B, 0x2B, 0x2B),
+            border: tc(0x3F, 0x3F, 0x3F),
+            text: tc(0xFF, 0xFF, 0xFF),
+            secondary: tc(0xC8, 0xC8, 0xC8),
+            error: tc(0xFF, 0x99, 0xA4),
+            hover: tc(0x38, 0x38, 0x38),
+            pressed: tc(0x48, 0x48, 0x48),
+        }
+    } else {
+        Theme {
+            window: tc(0xFF, 0xFF, 0xFF),
+            card: tc(0xF5, 0xF5, 0xF5),
+            border: tc(0xE0, 0xE0, 0xE0),
+            text: tc(0x1B, 0x1B, 0x1B),
+            secondary: tc(0x61, 0x61, 0x61),
+            error: tc(0xC4, 0x2B, 0x1C),
+            hover: tc(0xF0, 0xF0, 0xF0),
+            pressed: tc(0xE0, 0xE0, 0xE0),
+        }
+    }
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -155,10 +318,48 @@ struct Ctx {
     syncing: Cell<bool>,
     /// 预览文本（如当前电量数字）。
     preview_text: String,
+    /// 色彩 token（浅/深）。
+    theme: Theme,
+    /// 窗口 DPI（WM_CREATE 时取）。
+    dpi: Cell<u32>,
+    /// 客户区逻辑宽（按实测提示语宽度决定，≥ L_CLIENT_W）。
+    cw: Cell<i32>,
+    /// 分档卡是否展开（驱动 relayout）。
+    expanded: Cell<bool>,
+    /// 字体（0 = 创建失败回退 DEFAULT_GUI_FONT，销毁时不删）。
+    f_base: Cell<isize>,
+    f_title: Cell<isize>,
+    f_hint: Cell<isize>,
+    /// 主题画刷句柄（0 = 无效）。
+    br_window: Cell<isize>,
+    br_card: Cell<isize>,
+    br_input: Cell<isize>,
+    br_border: Cell<isize>,
+    /// tooltip 控件句柄。
+    tooltip: Cell<isize>,
 }
 
 impl Ctx {
-    /// 即时生效：写入共享配置 + 持久化 TOML（M9：无确定/取消）。
+    /// 逻辑像素 → 设备像素。
+    fn sc(&self, v: i32) -> i32 {
+        v * self.dpi.get() as i32 / 96
+    }
+
+    /// 取字体句柄（0 = 库存字体兜底）。
+    fn font(&self, cell: &Cell<isize>) -> HFONT {
+        let v = cell.get();
+        if v != 0 {
+            HFONT(v as *mut core::ffi::c_void)
+        } else {
+            HFONT(GetStockObject(DEFAULT_GUI_FONT).0)
+        }
+    }
+
+    fn brush(&self, cell: &Cell<isize>) -> HBRUSH {
+        HBRUSH(cell.get() as *mut core::ffi::c_void)
+    }
+
+    /// 即时生效：写入共享配置 + 持久化 TOML（无确定/取消）。
     fn apply(&self, cfg: &Config) {
         if let Ok(mut guard) = self.arc.write() {
             *guard = cfg.clone();
@@ -183,14 +384,16 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_BAR_CLASSES,
+            dwICC: ICC_BAR_CLASSES | ICC_WIN95_CLASSES, // 含 tooltip 类
         };
         let _ = InitCommonControlsEx(&icc);
 
         let hinst = match GetModuleHandleW(None) {
-            Ok(h) => windows::Win32::Foundation::HINSTANCE(h.0),
+            Ok(h) => HINSTANCE(h.0),
             Err(_) => return,
         };
+        // v0.3.5 #2（D-53）：EXE 版本资源中的 1 号图标（winres set_icon → ID 1）。
+        let hicon = LoadIconW(Some(hinst), PCWSTR(1usize as *const u16)).unwrap_or(HICON::default());
         let class = wide("VoltTraySettingsWnd");
         let title = wide("LogiVoltTray 设置");
         let wc = WNDCLASSW {
@@ -199,9 +402,9 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinst,
-            hIcon: HICON::default(),
-            hCursor: HCURSOR::default(),
-            hbrBackground: HBRUSH(6usize as *mut core::ffi::c_void), // COLOR_WINDOW + 1
+            hIcon: hicon,
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or(HCURSOR::default()),
+            hbrBackground: HBRUSH::default(), // 背景 WM_ERASEBKGND 自绘（主题色）
             lpszMenuName: PCWSTR::null(),
             lpszClassName: PCWSTR(class.as_ptr()),
         };
@@ -215,16 +418,28 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             dark_theme,
             syncing: Cell::new(false),
             preview_text: preview_text.to_string(),
+            theme: theme(dark_theme),
+            dpi: Cell::new(96),
+            cw: Cell::new(L_CLIENT_W),
+            expanded: Cell::new(true),
+            f_base: Cell::new(0),
+            f_title: Cell::new(0),
+            f_hint: Cell::new(0),
+            br_window: Cell::new(0),
+            br_card: Cell::new(0),
+            br_input: Cell::new(0),
+            br_border: Cell::new(0),
+            tooltip: Cell::new(0),
         });
 
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class.as_ptr()),
             PCWSTR(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW,
+            WINDOW_STYLE(SETTINGS_STYLE),
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            510,
+            500,
             724,
             None,
             None,
@@ -246,14 +461,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
             let raw = cs.lpCreateParams;
             let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
-            let ctx = &*(raw as *const Ctx);
+            let ctx = &mut *(raw as *mut Ctx);
             build_controls(hwnd, ctx);
             LRESULT(0)
         }
         WM_ACTIVATE => {
-            // 双向一致（M9）：窗口重新激活时以共享配置为准（覆盖外部 TOML 改动
-            // 后的控件状态）。仅激活时同步。P3-2：WA_CLICKACTIVE（鼠标点击激活）
-            // 低位为 1、WA_ACTIVE 为 1、WA_INACTIVE 为 0——「非 0」覆盖点击激活。
+            // 双向一致：窗口重新激活时以共享配置为准（覆盖外部 TOML 改动）。
             if wparam.0 & 0xFFFF != 0 && !ctx.is_null() {
                 let ctx = &*ctx;
                 if let Ok(guard) = ctx.arc.read() {
@@ -264,7 +477,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_HSCROLL => {
-            // 滑块（发给父窗口；lparam = 滑块 HWND）：低电阈值 + 文本/背景大小。
+            // 滑块（发给父窗口；lparam = 滑块 HWND）：低电阈值 + 文本/背景覆盖度。
             if !ctx.is_null() {
                 let ctx = &*ctx;
                 let lp = lparam.0 as *mut core::ffi::c_void;
@@ -285,7 +498,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             ctx.apply(&cfg);
                         }
                     } else if ts_ctl.0 == lp {
-                        // v0.3.4 #4（D-48）：文本大小 60..=140%，即时生效并持久化。
+                        // D-57：文本大小 40..=160%，步进 5。
                         let pos = SendMessageW!(ts_ctl, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
                         let v =
                             pos.clamp(ICON_TEXT_SCALE_MIN as i32, ICON_TEXT_SCALE_MAX as i32) as u8;
@@ -297,7 +510,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             ctx.apply(&cfg);
                         }
                     } else if bs_ctl.0 == lp {
-                        // v0.3.4 #4（D-48）：背景大小 60..=100%（>100% 会溢出内切块）。
+                        // D-57：背景覆盖度 20..=100%（100% = 满出血）。
                         let pos = SendMessageW!(bs_ctl, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
                         let v = pos.clamp(ICON_BG_SCALE_MIN as i32, ICON_BG_SCALE_MAX as i32) as u8;
                         let mut cfg = ctx.cfg.borrow_mut();
@@ -320,6 +533,91 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_DRAWITEM => {
+            // owner-draw 按钮自绘（D-58：悬停/按下态扁平按钮）。
+            if ctx.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);
+            draw_owner_button(&*ctx, dis);
+            LRESULT(1)
+        }
+        WM_ERASEBKGND => {
+            if ctx.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let ctx = &*ctx;
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            FillRect(hdc, &rc, ctx.brush(&ctx.br_window));
+            LRESULT(1)
+        }
+        WM_PAINT => {
+            if ctx.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let ctx = &*ctx;
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            if !hdc.is_invalid() && ctx.expanded.get() {
+                // 分档卡片底（1px 边框 + 卡片底色 + 圆角 4 → 直径 8）。
+                let l = ctx.sc(16);
+                let t = ctx.sc(166);
+                let r = ctx.sc(ctx.cw.get() - 16);
+                let b = t + ctx.sc(L_CARD_H);
+                let pen = CreatePen(PS_SOLID, 1, COLORREF(ctx.theme.border));
+                let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
+                let old_br = SelectObject(hdc, HGDIOBJ(ctx.brush(&ctx.br_card).0));
+                let _ = RoundRect(hdc, l, t, r, b, ctx.sc(8), ctx.sc(8));
+                SelectObject(hdc, old_br);
+                SelectObject(hdc, old_pen);
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+            }
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            if ctx.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let ctx = &*ctx;
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let child = HWND(lparam.0 as *mut core::ffi::c_void);
+            let id = GetDlgCtrlID(child);
+            let hint =
+                id == IDC_TIER_HINT || id == IDC_COVER_HINT || id == IDC_INTERVAL_HINT;
+            let in_card = (IDC_LBL_TIER_COUNT..=IDC_TIER_HINT).contains(&id)
+                || (IDC_TIER_TH0..IDC_TIER_DOT0).contains(&id)
+                || (IDC_TIER_DOT0..IDC_TIER_DOT0 + 5).contains(&id);
+            let color = if hint { ctx.theme.secondary } else { ctx.theme.text };
+            SetTextColor(hdc, COLORREF(color));
+            SetBkMode(hdc, TRANSPARENT);
+            let br = if in_card {
+                ctx.brush(&ctx.br_card)
+            } else {
+                ctx.brush(&ctx.br_window)
+            };
+            if br.is_invalid() {
+                LRESULT(0)
+            } else {
+                LRESULT(br.0 as isize)
+            }
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+            if ctx.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let ctx = &*ctx;
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            SetTextColor(hdc, COLORREF(ctx.theme.text));
+            let br = ctx.brush(&ctx.br_input);
+            if br.is_invalid() {
+                LRESULT(0)
+            } else {
+                LRESULT(br.0 as isize)
+            }
+        }
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
@@ -327,6 +625,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DESTROY | WM_NCDESTROY => {
             if msg == WM_NCDESTROY {
                 if !ctx.is_null() {
+                    let ctx = &*ctx;
+                    // 释放自建 GDI 对象（0 = 库存兜底，跳过）。
+                    for v in [
+                        ctx.f_base.get(),
+                        ctx.f_title.get(),
+                        ctx.f_hint.get(),
+                        ctx.br_window.get(),
+                        ctx.br_card.get(),
+                        ctx.br_input.get(),
+                        ctx.br_border.get(),
+                    ] {
+                        if v != 0 {
+                            let _ = DeleteObject(HGDIOBJ(v as *mut core::ffi::c_void));
+                        }
+                    }
                     drop(Box::from_raw(ctx));
                 }
                 let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -338,8 +651,123 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-#[allow(dead_code)]
-fn _unused(_x: HWND) {}
+// ---------------------------------------------------------------------------
+// 滚轮/键盘子类化（D-54；windows crate 0.62 无 SetWindowSubclass，用 GWLP_WNDPROC）
+// ---------------------------------------------------------------------------
+
+/// 取回子类化前保存的原窗口过程（挂在控件 GWLP_USERDATA 上）。
+unsafe fn prev_proc(hwnd: HWND) -> WNDPROC {
+    std::mem::transmute::<isize, WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))
+}
+
+unsafe fn call_prev(prev: WNDPROC, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if let Some(p) = prev {
+        CallWindowProcW(p, hwnd, msg, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// WM_MOUSEWHEEL 的滚动增量（wParam 高 16 位有符号）。
+fn wheel_delta(wparam: WPARAM) -> i16 {
+    (((wparam.0 >> 16) & 0xFFFF) as u16) as i16
+}
+
+/// 滑块滚轮：上滚增加、下滚减少（D-54，规范裁决 5）；步进 5 并转发 WM_HSCROLL。
+unsafe extern "system" fn trackbar_wheel_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let prev = prev_proc(hwnd);
+    if msg == WM_MOUSEWHEEL {
+        let d = wheel_delta(wparam);
+        let lo = SendMessageW!(hwnd, TBM_GETRANGEMIN, WPARAM(0), LPARAM(0)) as i32;
+        let hi = SendMessageW!(hwnd, TBM_GETRANGEMAX, WPARAM(0), LPARAM(0)) as i32;
+        let pos = SendMessageW!(hwnd, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
+        let next = if d > 0 { pos + 5 } else { pos - 5 }.clamp(lo, hi);
+        if next != pos {
+            SendMessageW!(hwnd, TBM_SETPOS, WPARAM(1), LPARAM(next as isize));
+            if let Ok(parent) = GetParent(hwnd) {
+                SendMessageW!(
+                    parent,
+                    WM_HSCROLL,
+                    WPARAM(TB_THUMBPOSITION as usize),
+                    LPARAM(hwnd.0 as isize)
+                );
+            }
+        }
+        return LRESULT(0);
+    }
+    call_prev(prev, hwnd, msg, wparam, lparam)
+}
+
+/// 阈值数字框：滚轮 ±1、↑/↓ 键 ±1（1–99），写入文本触发 EN_CHANGE 交父窗口校验。
+unsafe extern "system" fn edit_wheel_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let prev = prev_proc(hwnd);
+    let is_wheel_step = msg == WM_MOUSEWHEEL;
+    let is_key_step = msg == WM_KEYDOWN && (wparam.0 == VK_UP || wparam.0 == VK_DOWN);
+    if is_wheel_step || is_key_step {
+        let up = if is_wheel_step {
+            wheel_delta(wparam) > 0
+        } else {
+            wparam.0 == VK_UP
+        };
+        let cur = edit_text(hwnd).parse::<i64>().unwrap_or(-1);
+        if (FONT_TIER_THRESHOLD_MIN as i64..=FONT_TIER_THRESHOLD_MAX as i64).contains(&cur) {
+            let next =
+                (cur + if up { 1 } else { -1 }).clamp(FONT_TIER_THRESHOLD_MIN as i64, FONT_TIER_THRESHOLD_MAX as i64);
+            if next != cur {
+                let v = wide(&next.to_string());
+                let _ = SetWindowTextW(hwnd, PCWSTR(v.as_ptr())); // 触发 EN_CHANGE
+            }
+        }
+        return LRESULT(0);
+    }
+    call_prev(prev, hwnd, msg, wparam, lparam)
+}
+
+/// owner-draw 按钮悬停态：进入/离开时请求重绘（hover 由 WM_DRAWITEM 即时判定）。
+unsafe extern "system" fn button_hover_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let prev = prev_proc(hwnd);
+    if msg == WM_MOUSEMOVE {
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_HOVER | TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 10,
+        };
+        let _ = TrackMouseEvent(&mut tme);
+    } else if msg == WM_MOUSEHOVER || msg == WM_MOUSELEAVE {
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+    call_prev(prev, hwnd, msg, wparam, lparam)
+}
+
+/// GWLP_WNDPROC 子类化（原过程存 GWLP_USERDATA）。
+unsafe fn subclass(hwnd: HWND, proc_: WNDPROC) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let new_raw = std::mem::transmute::<WNDPROC, isize>(proc_);
+    let prev_raw = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, new_raw);
+    let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, prev_raw);
+}
+
+// ---------------------------------------------------------------------------
+// 控件创建与布局
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)] // 裸 Win32 控件创建包装，参数即 CreateWindowExW 实参集。
 unsafe fn create_ctl(
@@ -353,7 +781,7 @@ unsafe fn create_ctl(
     w: i32,
     h: i32,
     id: i32,
-    hinst: windows::Win32::Foundation::HINSTANCE,
+    hinst: HINSTANCE,
     hfont: HFONT,
 ) -> HWND {
     let title_v: Vec<u16> = title.map(wide).unwrap_or_default();
@@ -387,86 +815,188 @@ fn ws(extra: u32) -> WINDOW_STYLE {
     WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | extra)
 }
 
-unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
+/// Segoe UI 字体（pt_x10 = 磅 ×10；失败返回 None 由库存字体兜底）。
+unsafe fn make_font(dpi: u32, pt_x10: i32, weight: i32) -> Option<HFONT> {
+    let mut lf = LOGFONTW::default();
+    lf.lfHeight = -((pt_x10 * dpi as i32 + 360) / 720);
+    lf.lfWeight = weight;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    let face = wide("Segoe UI"); // 含 NUL，len = 11 ≤ 32
+    lf.lfFaceName = [0u16; 32];
+    lf.lfFaceName[..face.len()].copy_from_slice(&face[..]);
+    let f = CreateFontIndirectW(&lf);
+    if f.is_invalid() {
+        None
+    } else {
+        Some(f)
+    }
+}
+
+/// 实测文本宽度（按所选字体，逻辑像素）。
+unsafe fn text_width(hwnd: HWND, font: HFONT, s: &str) -> i32 {
+    let v: Vec<u16> = s.encode_utf16().collect();
+    let hdc = GetDC(Some(hwnd));
+    if hdc.is_invalid() {
+        return 0;
+    }
+    let old = SelectObject(hdc, HGDIOBJ(font.0));
+    let mut sz = SIZE::default();
+    let ok = GetTextExtentPoint32W(hdc, &v, &mut sz).as_bool();
+    SelectObject(hdc, old);
+    ReleaseDC(Some(hwnd), hdc);
+    if ok {
+        sz.cx
+    } else {
+        0
+    }
+}
+
+/// 生成 w×h swatch 位图（BGRA：圆角 2、1px 边框、实心填充；边缘 1px 抗锯齿）。
+/// `border` 为 COLORREF（0x00BBGGRR），来自 Theme token。
+fn swatch_bgra(c: RgbColor, border: u32, w: i32, h: i32) -> Vec<u8> {
+    let bb = (border & 0xFF) as u8;
+    let bg_c = ((border >> 8) & 0xFF) as u8;
+    let br_c = ((border >> 16) & 0xFF) as u8;
+    let r = 2.0f32;
+    let mut v = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32;
+            let fy = y as f32;
+            let mut cov = 1.0f32;
+            let corners = [
+                (r, r),
+                (w as f32 - 1.0 - r, r),
+                (r, h as f32 - 1.0 - r),
+                (w as f32 - 1.0 - r, h as f32 - 1.0 - r),
+            ];
+            for &(cx, cy) in &corners {
+                let in_x = if cx < w as f32 / 2.0 { fx < cx } else { fx > cx };
+                let in_y = if cy < h as f32 / 2.0 { fy < cy } else { fy > cy };
+                if in_x && in_y {
+                    let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+                    if d > r {
+                        cov = 0.0;
+                    } else if d > r - 1.0 {
+                        cov = cov.min((r - d).clamp(0.0, 1.0));
+                    }
+                }
+            }
+            let outer = x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            let (b, g, rr, a) = if cov <= 0.0 {
+                (0u8, 0u8, 0u8, 0u8)
+            } else if outer && cov < 1.0 {
+                // 圆角过渡：填充色半透明（预乘由 DIB 打包统一处理）。
+                (c.b, c.g, c.r, (cov * 255.0) as u8)
+            } else if outer {
+                (bb, bg_c, br_c, 255)
+            } else {
+                (c.b, c.g, c.r, 255)
+            };
+            let i = ((y * w + x) * 4) as usize;
+            v[i] = b;
+            v[i + 1] = g;
+            v[i + 2] = rr;
+            v[i + 3] = a;
+        }
+    }
+    v
+}
+
+unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
     let hinst = match GetModuleHandleW(None) {
-        Ok(h) => windows::Win32::Foundation::HINSTANCE(h.0),
+        Ok(h) => HINSTANCE(h.0),
         Err(_) => return,
     };
-    let hfont = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
+    let dpi = GetDpiForWindow(hwnd);
+    ctx.dpi.set(dpi);
 
-    // 分组框（BUTTON + BS_GROUPBOX）。
+    // 字体（规范裁决 6：正文 9pt / 分区标题 10.5pt Semibold / 提示 8pt）。
+    if let Some(f) = make_font(dpi, 90, 400) {
+        ctx.f_base.set(f.0 as isize);
+    }
+    if let Some(f) = make_font(dpi, 105, 600) {
+        ctx.f_title.set(f.0 as isize);
+    }
+    if let Some(f) = make_font(dpi, 80, 400) {
+        ctx.f_hint.set(f.0 as isize);
+    }
+    // 主题画刷。
+    ctx.br_window
+        .set(CreateSolidBrush(COLORREF(ctx.theme.window)).0 as isize);
+    ctx.br_card
+        .set(CreateSolidBrush(COLORREF(ctx.theme.card)).0 as isize);
+    ctx.br_input
+        .set(CreateSolidBrush(COLORREF(if ctx.dark_theme {
+            ctx.theme.card
+        } else {
+            ctx.theme.window
+        }))
+        .0 as isize);
+    ctx.br_border
+        .set(CreateSolidBrush(COLORREF(ctx.theme.border)).0 as isize);
+
+    let f_base = ctx.font(&ctx.f_base);
+    let f_title = ctx.font(&ctx.f_title);
+    let f_hint = ctx.font(&ctx.f_hint);
+
+    // 裁决 3：以最长提示语实测宽度反推客户区宽，杜绝截断。
+    let tier_hint_w = text_width(hwnd, f_hint, TIER_HINT_TEXT);
+    let status_w = text_width(hwnd, f_hint, MSG_TIER_RANGE)
+        .max(text_width(hwnd, f_hint, MSG_CONTRAST_SAMPLE));
+    let cw = L_CLIENT_W
+        .max(tier_hint_w + 24 + 32) // 卡片内提示（x=28，内宽 = cw-56）
+        .max(status_w + 32);
+    ctx.cw.set(cw);
+
+    // 窗口图标（#2：大/小图标 + 类图标，任务栏/Alt-Tab 显示）。
+    if let Ok(hicon) = LoadIconW(Some(hinst), PCWSTR(1usize as *const u16)) {
+        SendMessageW!(hwnd, WM_SETICON, WPARAM(ICON_SMALL_ID), LPARAM(hicon.0 as isize));
+        SendMessageW!(hwnd, WM_SETICON, WPARAM(ICON_BIG_ID), LPARAM(hicon.0 as isize));
+    }
+    // 深色标题栏（D-58）。
+    if ctx.dark_theme {
+        let v: i32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(DWMWA_USE_IMMERSIVE_DARK_MODE),
+            &v as *const i32 as *const core::ffi::c_void,
+            4,
+        );
+    }
+
+    let sc = |v: i32| (v * dpi as i32) / 96;
+
+    // —— 分区标题：外观（固定位置，不随分档卡移动）——
     create_ctl(
         hwnd,
-        "BUTTON",
+        "STATIC",
         Some("外观"),
-        ws(BS_GROUPBOX),
+        ws(0),
         WINDOW_EX_STYLE(0),
-        8,
-        4,
-        482,
-        316,
+        sc(16),
+        sc(12),
+        sc(80),
+        sc(18),
         0,
         hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("刷新"),
-        ws(BS_GROUPBOX),
-        WINDOW_EX_STYLE(0),
-        8,
-        328,
-        482,
-        64,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("低电提醒"),
-        ws(BS_GROUPBOX),
-        WINDOW_EX_STYLE(0),
-        8,
-        400,
-        482,
-        108,
-        0,
-        hinst,
-        hfont,
-    );
-    // v0.3.4 #4（D-48）：图标大小分组——文本 60..=140%、背景 60..=100%。
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("图标大小"),
-        ws(BS_GROUPBOX),
-        WINDOW_EX_STYLE(0),
-        8,
-        514,
-        482,
-        96,
-        0,
-        hinst,
-        hfont,
+        f_title,
     );
 
-    // —— 外观 ——
+    // —— 固定区行（形状 / 背景色 / 字体 / 字体颜色）——
     create_ctl(
         hwnd,
         "STATIC",
         Some("形状"),
         ws(0),
         WINDOW_EX_STYLE(0),
-        20,
-        32,
-        44,
-        20,
+        sc(16),
+        sc(38),
+        sc(64),
+        sc(20),
         0,
         hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
@@ -474,13 +1004,13 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         None,
         ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         WINDOW_EX_STYLE(0),
-        76,
-        28,
-        180,
-        220,
+        sc(88),
+        sc(34),
+        sc(180),
+        sc(220),
         IDC_SHAPE,
         hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
@@ -488,13 +1018,13 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         Some("背景色"),
         ws(0),
         WINDOW_EX_STYLE(0),
-        20,
-        64,
-        52,
-        20,
+        sc(16),
+        sc(70),
+        sc(64),
+        sc(20),
         0,
         hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
@@ -502,140 +1032,13 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         None,
         ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         WINDOW_EX_STYLE(0),
-        76,
-        60,
-        110,
-        200,
+        sc(88),
+        sc(66),
+        sc(140),
+        sc(220),
         IDC_BG,
         hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "EDIT",
-        None,
-        ws(ES_AUTOHSCROLL as u32),
-        WS_EX_CLIENTEDGE,
-        196,
-        60,
-        70,
-        22,
-        IDC_BG_HEX,
-        hinst,
-        hfont,
-    );
-    // #3：色轮入口（系统取色对话框，展开完整调色板）。
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("选色…"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        274,
-        58,
-        54,
-        24,
-        IDC_BG_PICK,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("字体"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        96,
-        44,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "COMBOBOX",
-        None,
-        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
-        WINDOW_EX_STYLE(0),
-        76,
-        92,
-        180,
-        240,
-        IDC_FONT_FAMILY,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("字体颜色"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        128,
-        52,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "COMBOBOX",
-        None,
-        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
-        WINDOW_EX_STYLE(0),
-        76,
-        124,
-        110,
-        200,
-        IDC_FONT_COLOR,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "EDIT",
-        None,
-        ws(ES_AUTOHSCROLL as u32),
-        WS_EX_CLIENTEDGE,
-        196,
-        124,
-        70,
-        22,
-        IDC_FONT_HEX,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("选色…"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        274,
-        122,
-        54,
-        24,
-        IDC_FONT_PICK,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("预览"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        160,
-        44,
-        20,
-        0,
-        hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
@@ -643,57 +1046,41 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         None,
         ws(SS_BITMAP),
         WINDOW_EX_STYLE(0),
-        76,
-        152,
-        PREVIEW_PX,
-        PREVIEW_PX,
-        IDC_PREVIEW,
+        sc(236),
+        sc(66),
+        sc(40),
+        sc(24),
+        IDC_BG_SWATCH,
         hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
         "BUTTON",
-        Some("恢复默认"),
-        ws(0),
+        Some("选色…"),
+        ws(BS_OWNERDRAW_STYLE),
         WINDOW_EX_STYLE(0),
-        290,
-        152,
-        100,
-        26,
-        IDC_RESET_APPEAR,
+        sc(284),
+        sc(64),
+        sc(80),
+        sc(24),
+        IDC_BG_PICK,
         hinst,
-        hfont,
-    );
-
-    // —— 字体颜色分档（#4）——
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("字体颜色分档"),
-        ws(BS_AUTOCHECKBOX),
-        WINDOW_EX_STYLE(0),
-        20,
-        212,
-        132,
-        22,
-        IDC_TIERED,
-        hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
         "STATIC",
-        Some("档数"),
+        Some("字体"),
         ws(0),
         WINDOW_EX_STYLE(0),
-        162,
-        214,
-        32,
-        20,
+        sc(16),
+        sc(102),
+        sc(64),
+        sc(20),
         0,
         hinst,
-        hfont,
+        f_base,
     );
     create_ctl(
         hwnd,
@@ -701,32 +1088,145 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         None,
         ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         WINDOW_EX_STYLE(0),
-        198,
-        210,
-        64,
-        140,
+        sc(88),
+        sc(98),
+        sc(240),
+        sc(260),
+        IDC_FONT_FAMILY,
+        hinst,
+        f_base,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("字体颜色"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        sc(16),
+        sc(134),
+        sc(64),
+        sc(20),
+        0,
+        hinst,
+        f_base,
+    );
+    // 裁决 1：字体颜色下拉 = [自动（按电量档位）, 自定义]，宽 ≥200px。
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        sc(88),
+        sc(130),
+        sc(200),
+        sc(220),
+        IDC_FONT_COLOR,
+        hinst,
+        f_base,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        None,
+        ws(SS_BITMAP),
+        WINDOW_EX_STYLE(0),
+        sc(296),
+        sc(130),
+        sc(40),
+        sc(24),
+        IDC_FONT_SWATCH,
+        hinst,
+        f_base,
+    );
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("选色…"),
+        ws(BS_OWNERDRAW_STYLE),
+        WINDOW_EX_STYLE(0),
+        sc(344),
+        sc(128),
+        sc(80),
+        sc(24),
+        IDC_FONT_PICK,
+        hinst,
+        f_base,
+    );
+
+    // —— 分档卡（展开态位于 y=166；收起时隐藏整组并回收空间）——
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("档数"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        sc(28),
+        sc(178),
+        sc(44),
+        sc(20),
+        IDC_LBL_TIER_COUNT,
+        hinst,
+        f_base,
+    );
+    create_ctl(
+        hwnd,
+        "COMBOBOX",
+        None,
+        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+        WINDOW_EX_STYLE(0),
+        sc(80),
+        sc(174),
+        sc(88),
+        sc(140),
         IDC_TIER_COUNT,
         hinst,
-        hfont,
+        f_base,
     );
-    // 阈值数字框（N 档 = N-1 个；该数字及以下电量归上一档）。
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("阈值"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        sc(28),
+        sc(206),
+        sc(44),
+        sc(20),
+        IDC_LBL_TIER_TH,
+        hinst,
+        f_base,
+    );
     for i in 0..4 {
         create_ctl(
             hwnd,
             "EDIT",
             None,
             ws(ES_NUMBER),
-            WS_EX_CLIENTEDGE,
-            62 + i * 44,
-            242,
-            38,
-            22,
+            WINDOW_EX_STYLE(WS_EX_CLIENTEDGE_RAW),
+            sc(80 + i * 48),
+            sc(202),
+            sc(40),
+            sc(22),
             IDC_TIER_TH0 + i,
             hinst,
-            hfont,
+            f_base,
         );
     }
-    // 分档色点（N 个；点击呼出取色对话框）。
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("颜色"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        sc(28),
+        sc(234),
+        sc(44),
+        sc(20),
+        IDC_LBL_TIER_COLOR,
+        hinst,
+        f_base,
+    );
     for i in 0..5 {
         create_ctl(
             hwnd,
@@ -734,293 +1234,114 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
             None,
             ws(SS_BITMAP | SS_NOTIFY),
             WINDOW_EX_STYLE(0),
-            62 + i * 44,
-            268,
-            DOT_PX,
-            DOT_PX,
+            sc(80 + i * 24),
+            sc(234),
+            sc(DOT_PX),
+            sc(DOT_PX),
             IDC_TIER_DOT0 + i,
             hinst,
-            hfont,
+            f_base,
         );
     }
     create_ctl(
         hwnd,
         "STATIC",
-        Some("阈值"),
+        Some(TIER_HINT_TEXT),
         ws(0),
         WINDOW_EX_STYLE(0),
-        20,
-        246,
-        36,
-        20,
-        0,
+        sc(28),
+        sc(258),
+        sc(cw - 56),
+        sc(14),
+        IDC_TIER_HINT,
         hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("阈值需 1–99 严格递增；数字及以下的电量归上一档（20/50 → 0-20、21-50、51-100）"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        294,
-        452,
-        20,
-        0,
-        hinst,
-        hfont,
+        f_hint,
     );
 
-    // —— 刷新 ——
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("轮询间隔"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        356,
-        60,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "COMBOBOX",
-        None,
-        ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
-        WINDOW_EX_STYLE(0),
-        96,
-        352,
-        180,
-        200,
-        IDC_INTERVAL,
-        hinst,
-        hfont,
-    );
-    // D-33：轮询间隔耗电提示——每次 HID++ 查询都是一次射频交互，
-    // 更短的间隔 = 更频繁唤醒鼠标无线链路 = 更快耗电池。
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("提示：更短的间隔会增加鼠标耗电；电量变化很慢，默认档已足够及时"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        96,
-        380,
-        320,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("恢复默认"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        290,
-        350,
-        100,
-        26,
-        IDC_RESET_REFRESH,
-        hinst,
-        hfont,
-    );
-
-    // —— 低电提醒 ——
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("低电时图标闪烁提醒"),
-        ws(BS_AUTOCHECKBOX),
-        WINDOW_EX_STYLE(0),
-        20,
-        428,
-        180,
-        22,
-        IDC_BLINK,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("低电阈值"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        464,
-        60,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "msctls_trackbar32",
-        None,
-        ws(TBS_AUTOTICKS),
-        WINDOW_EX_STYLE(0),
-        96,
-        460,
-        180,
-        32,
-        IDC_SLIDER,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("20%"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        290,
-        464,
-        50,
-        20,
-        IDC_THRESH_VAL,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("恢复默认"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        290,
-        424,
-        100,
-        26,
-        IDC_RESET_LOW,
-        hinst,
-        hfont,
-    );
-
-    // —— 图标大小（v0.3.4 #4，D-48）——
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("文本大小"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        534,
-        60,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "msctls_trackbar32",
-        None,
-        ws(TBS_AUTOTICKS),
-        WINDOW_EX_STYLE(0),
-        96,
-        530,
-        180,
-        32,
-        IDC_TEXT_SLIDER,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("100%"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        290,
-        534,
-        44,
-        20,
-        IDC_TEXT_VAL,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("背景大小"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        20,
-        570,
-        64,
-        20,
-        0,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "msctls_trackbar32",
-        None,
-        ws(TBS_AUTOTICKS),
-        WINDOW_EX_STYLE(0),
-        96,
-        566,
-        180,
-        32,
-        IDC_BG_SLIDER,
-        hinst,
-        hfont,
-    );
-    create_ctl(
-        hwnd,
-        "STATIC",
-        Some("100%"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        290,
-        570,
-        44,
-        20,
-        IDC_BG_VAL,
-        hinst,
-        hfont,
-    );
-
-    // —— 底部 ——
-    create_ctl(
-        hwnd,
-        "BUTTON",
-        Some("恢复全部默认"),
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        16,
-        618,
-        120,
-        26,
-        IDC_RESET_ALL,
-        hinst,
-        hfont,
-    );
+    // —— BELOW 表控件（展开态坐标；随后 relayout 决定最终位置/可见性）——
+    for &(id, x, y, w, h) in BELOW.iter() {
+        let (class, style, ex, title): (&str, WINDOW_STYLE, WINDOW_EX_STYLE, Option<&str>) =
+            match id {
+                IDC_TEXT_SLIDER | IDC_BG_SLIDER | IDC_SLIDER => {
+                    ("msctls_trackbar32", ws(TBS_AUTOTICKS), WINDOW_EX_STYLE(0), None)
+                }
+                IDC_TEXT_VAL | IDC_BG_VAL | IDC_THRESH_VAL => {
+                    ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("0%"))
+                }
+                IDC_LBL_TEXT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("文本大小")),
+                IDC_LBL_BGCOVER => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("背景覆盖度")),
+                IDC_COVER_HINT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(COVER_HINT_TEXT)),
+                IDC_LBL_PREVIEW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("预览")),
+                IDC_PREVIEW | IDC_PREVIEW_BIG => {
+                    ("STATIC", ws(SS_BITMAP), WINDOW_EX_STYLE(0), None)
+                }
+                IDC_SEC_REFRESH => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("刷新")),
+                IDC_SEC_LOW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("低电提醒")),
+                IDC_LBL_INTERVAL => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("轮询间隔")),
+                IDC_INTERVAL => (
+                    "COMBOBOX",
+                    ws(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+                    WINDOW_EX_STYLE(0),
+                    None,
+                ),
+                IDC_INTERVAL_HINT => {
+                    ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(INTERVAL_HINT_TEXT))
+                }
+                IDC_BLINK => (
+                    "BUTTON",
+                    ws(BS_AUTOCHECKBOX),
+                    WINDOW_EX_STYLE(0),
+                    Some("低电时图标闪烁提醒"),
+                ),
+                IDC_LBL_LOW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("低电阈值")),
+                IDC_TEXT_RESET | IDC_BG_RESET | IDC_RESET_LOW => {
+                    ("BUTTON", ws(BS_OWNERDRAW_STYLE), WINDOW_EX_STYLE(0), Some("重置"))
+                }
+                IDC_RESET_ALL => (
+                    "BUTTON",
+                    ws(BS_OWNERDRAW_STYLE),
+                    WINDOW_EX_STYLE(0),
+                    Some("恢复全部默认"),
+                ),
+                _ => continue,
+            };
+        let font = match id {
+            IDC_SEC_REFRESH | IDC_SEC_LOW => f_title,
+            IDC_COVER_HINT | IDC_INTERVAL_HINT => f_hint,
+            _ => f_base,
+        };
+        create_ctl(
+            hwnd,
+            class,
+            title,
+            style,
+            ex,
+            sc(x),
+            sc(y),
+            sc(w),
+            sc(h),
+            id,
+            hinst,
+            font,
+        );
+    }
+    // 状态行（宽 = cw-32；实测保证最长文案不截断）。
     create_ctl(
         hwnd,
         "STATIC",
         None,
         ws(0),
         WINDOW_EX_STYLE(0),
-        16,
-        652,
-        466,
-        20,
+        sc(16),
+        sc(774),
+        sc(cw - 32),
+        sc(30),
         IDC_STATUS,
         hinst,
-        hfont,
+        f_hint,
     );
 
-    // 组合框内容。
+    // —— 组合框内容 ——
     let shape = GetDlgItem(Some(hwnd), IDC_SHAPE).unwrap_or_default();
     for s in ["圆角（默认）", "直角方块", "透明（无背景）"] {
         add_string(shape, s);
@@ -1033,9 +1354,9 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
     for s in ["自动（按电量档位）", "自定义"] {
         add_string(fc, s);
     }
-    let tc = GetDlgItem(Some(hwnd), IDC_TIER_COUNT).unwrap_or_default();
+    let count = GetDlgItem(Some(hwnd), IDC_TIER_COUNT).unwrap_or_default();
     for k in FONT_TIER_MIN_TIERS..=FONT_TIER_MAX_TIERS {
-        add_string(tc, &format!("{k} 档"));
+        add_string(count, &format!("{k} 档"));
     }
     let fam = GetDlgItem(Some(hwnd), IDC_FONT_FAMILY).unwrap_or_default();
     for name in enum_fonts() {
@@ -1051,7 +1372,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         add_string(iv, &label);
     }
 
-    // 滑块：范围 5..=50，刻度间隔 5（M12）。
+    // —— 滑块范围（常量统一来自 config；D-57）——
     let slider = GetDlgItem(Some(hwnd), IDC_SLIDER).unwrap_or_default();
     SendMessageW!(
         slider,
@@ -1060,7 +1381,6 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         LPARAM(((LOW_THRESHOLD_MAX as isize) << 16) | LOW_THRESHOLD_MIN as isize)
     );
     SendMessageW!(slider, TBM_SETTICFREQ, WPARAM(5), LPARAM(0));
-    // v0.3.4 #4（D-48）：文本 60..=140%、背景 60..=100%，刻度间隔 10%。
     let ts = GetDlgItem(Some(hwnd), IDC_TEXT_SLIDER).unwrap_or_default();
     SendMessageW!(
         ts,
@@ -1068,7 +1388,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         WPARAM(1),
         LPARAM(((ICON_TEXT_SCALE_MAX as isize) << 16) | ICON_TEXT_SCALE_MIN as isize)
     );
-    SendMessageW!(ts, TBM_SETTICFREQ, WPARAM(10), LPARAM(0));
+    SendMessageW!(ts, TBM_SETTICFREQ, WPARAM(5), LPARAM(0));
     let bs = GetDlgItem(Some(hwnd), IDC_BG_SLIDER).unwrap_or_default();
     SendMessageW!(
         bs,
@@ -1076,12 +1396,154 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         WPARAM(1),
         LPARAM(((ICON_BG_SCALE_MAX as isize) << 16) | ICON_BG_SCALE_MIN as isize)
     );
-    SendMessageW!(bs, TBM_SETTICFREQ, WPARAM(10), LPARAM(0));
+    SendMessageW!(bs, TBM_SETTICFREQ, WPARAM(5), LPARAM(0));
 
+    // —— 滚轮/键盘子类化（D-54）——
+    subclass(slider, Some(trackbar_wheel_proc));
+    subclass(ts, Some(trackbar_wheel_proc));
+    subclass(bs, Some(trackbar_wheel_proc));
+    for i in 0..4 {
+        let e = GetDlgItem(Some(hwnd), IDC_TIER_TH0 + i).unwrap_or_default();
+        subclass(e, Some(edit_wheel_proc));
+    }
+    // owner-draw 按钮悬停重绘。
+    for id in [
+        IDC_BG_PICK,
+        IDC_FONT_PICK,
+        IDC_TEXT_RESET,
+        IDC_BG_RESET,
+        IDC_RESET_LOW,
+        IDC_RESET_ALL,
+    ] {
+        let b = GetDlgItem(Some(hwnd), id).unwrap_or_default();
+        subclass(b, Some(button_hover_proc));
+    }
+
+    // —— 分档色点 tooltip（裁决 2：hover 显示档位区间 + HEX）——
+    let tip_class = wide("tooltips_class32");
+    let tip = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR(tip_class.as_ptr()),
+        PCWSTR::null(),
+        WINDOW_STYLE(WS_POPUP.0 | TTS_FLAGS_RAW),
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        0,
+        0,
+        Some(hwnd),
+        None,
+        Some(hinst),
+        None,
+    )
+    .unwrap_or_default();
+    ctx.tooltip.set(tip.0 as isize);
+    if !tip.0.is_null() {
+        for i in 0..5 {
+            let dot = GetDlgItem(Some(hwnd), IDC_TIER_DOT0 + i).unwrap_or_default();
+            tip_tool(tip, hwnd, dot, "", true);
+        }
+    }
+
+    // 初始布局（按当前配置的字体颜色模式展开/收起分档卡）。
+    let tiered = ctx.cfg.borrow().icon_font_tiers_enabled;
+    relayout(hwnd, ctx, tiered);
     sync_controls(hwnd, ctx);
 }
 
-/// 枚举系统字体（M9）；失败回退常用最小集。
+/// tooltip 增删/更新文本（add=true 走 TTM_ADDTOOLW，否则 TTM_UPDATETIPTEXTW）。
+unsafe fn tip_tool(tip: HWND, owner: HWND, tool: HWND, text: &str, add: bool) {
+    if tip.0.is_null() || tool.0.is_null() {
+        return;
+    }
+    let mut v = wide(text);
+    let ti = TTTOOLINFOW {
+        cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+        uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+        hwnd: owner,
+        uId: tool.0 as usize,
+        rect: RECT::default(),
+        hinst: HINSTANCE::default(),
+        lpszText: PWSTR(v.as_mut_ptr()),
+        lParam: LPARAM(0),
+        lpReserved: std::ptr::null_mut(),
+    };
+    let msg = if add { TTM_ADDTOOLW } else { TTM_UPDATETIPTEXTW };
+    SendMessageW!(tip, msg, WPARAM(0), LPARAM(&ti as *const TTTOOLINFOW as isize));
+}
+
+/// 展开态卡片内控件 id 集（收起时整组隐藏；档内多余阈值框/色点按档数二次隐藏）。
+const TIER_CHILDREN: [i32; 13] = [
+    IDC_LBL_TIER_COUNT,
+    IDC_TIER_COUNT,
+    IDC_LBL_TIER_TH,
+    IDC_TIER_TH0,
+    IDC_TIER_TH0 + 1,
+    IDC_TIER_TH0 + 2,
+    IDC_TIER_TH0 + 3,
+    IDC_LBL_TIER_COLOR,
+    IDC_TIER_DOT0,
+    IDC_TIER_DOT0 + 1,
+    IDC_TIER_DOT0 + 2,
+    IDC_TIER_DOT0 + 3,
+    IDC_TIER_DOT0 + 4,
+    // IDC_TIER_HINT 单列（随卡片隐藏）。
+];
+
+/// 布局刷新：分档卡展开/收起 → 下方控件上移 TIER_DELTA，窗口高度同步收缩。
+unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
+    ctx.expanded.set(expanded);
+    let dy = if expanded { 0 } else { -TIER_DELTA };
+    for &(id, x, y, w, h) in BELOW.iter() {
+        let w2 = match id {
+            IDC_COVER_HINT | IDC_INTERVAL_HINT => ctx.cw.get() - 104,
+            _ => w,
+        };
+        let _ = MoveWindow(ctl(hwnd, id), ctx.sc(x), ctx.sc(y + dy), ctx.sc(w2), ctx.sc(h), true);
+    }
+    // 状态行。
+    let _ = MoveWindow(
+        ctl(hwnd, IDC_STATUS),
+        ctx.sc(16),
+        ctx.sc(774 + dy),
+        ctx.sc(ctx.cw.get() - 32),
+        ctx.sc(30),
+        true,
+    );
+    // 分档卡可见性。
+    for id in TIER_CHILDREN {
+        let _ = ShowWindow(ctl(hwnd, id), if expanded { SW_SHOW } else { SW_HIDE });
+    }
+    let _ = ShowWindow(ctl(hwnd, IDC_TIER_HINT), if expanded { SW_SHOW } else { SW_HIDE });
+    // 窗口尺寸（客户区 → 外框）。
+    let client_h = if expanded { L_EXPANDED_H } else { L_COLLAPSED_H };
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: ctx.sc(ctx.cw.get()),
+        bottom: ctx.sc(client_h),
+    };
+    if AdjustWindowRectExForDpi(
+        &mut rc,
+        WINDOW_STYLE(SETTINGS_STYLE),
+        false,
+        WINDOW_EX_STYLE(0),
+        ctx.dpi.get(),
+    )
+    .is_ok()
+    {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            rc.right - rc.left,
+            rc.bottom - rc.top,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
+    }
+    let _ = InvalidateRect(Some(hwnd), None, true);
+}
+
 unsafe fn enum_fonts() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let hdc: HDC = GetDC(None);
@@ -1207,22 +1669,21 @@ fn ctl(hwnd: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(hwnd), id).unwrap_or_default() }
 }
 
-/// 显示/隐藏控件（分档模式下隐藏单一字体颜色入口、多余阈值框与色点）。
+/// 显示/隐藏控件。
 unsafe fn show_ctl(hwnd: HWND, id: i32, show: bool) {
     let _ = ShowWindow(ctl(hwnd, id), if show { SW_SHOW } else { SW_HIDE });
 }
 
-/// 呼出系统取色对话框（#3：CC_FULLOPEN 展开完整色轮 + 自定义色区）。
+/// 呼出系统取色对话框（CC_FULLOPEN 展开完整色轮 + 自定义色区）。
 /// 返回 None = 用户取消。模态期间不持有任何配置借用（WM_ACTIVATE 同步会重入）。
+/// v0.3.5 #1（D-52）：COLORREF ↔ #RRGGBB 统一走 config 的唯一转换函数对。
 unsafe fn pick_color(owner: HWND, initial: RgbColor) -> Option<RgbColor> {
     let mut custom = CUSTOM_COLORS.lock().unwrap_or_else(|e| e.into_inner());
     let mut cc = CHOOSECOLORW {
         lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
         hwndOwner: owner,
         hInstance: HWND::default(),
-        rgbResult: COLORREF(
-            (initial.b as u32) | ((initial.g as u32) << 8) | ((initial.r as u32) << 16),
-        ),
+        rgbResult: COLORREF(rgb_to_colorref(initial)),
         lpCustColors: custom.as_mut_ptr(),
         Flags: CC_RGBINIT | CC_FULLOPEN,
         lCustData: LPARAM(0),
@@ -1230,12 +1691,7 @@ unsafe fn pick_color(owner: HWND, initial: RgbColor) -> Option<RgbColor> {
         lpTemplateName: PCWSTR::null(),
     };
     if ChooseColorW(&mut cc).as_bool() {
-        let c = cc.rgbResult.0;
-        Some(RgbColor {
-            r: ((c >> 16) & 0xFF) as u8,
-            g: ((c >> 8) & 0xFF) as u8,
-            b: (c & 0xFF) as u8,
-        })
+        Some(colorref_to_rgb(cc.rgbResult.0))
     } else {
         None
     }
@@ -1245,7 +1701,7 @@ unsafe fn pick_color(owner: HWND, initial: RgbColor) -> Option<RgbColor> {
 fn tier_dot_bgra(c: RgbColor) -> Vec<u8> {
     let size = DOT_PX;
     let center = (size as f32 - 1.0) / 2.0;
-    let radius = (size as f32 / 2.0) - 1.5; // 留 1.5px 边距
+    let radius = (size as f32 / 2.0) - 1.0; // 16px 点留 1px 边距
     let mut v = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {
@@ -1264,10 +1720,8 @@ fn tier_dot_bgra(c: RgbColor) -> Vec<u8> {
     v
 }
 
-/// v0.3.4 #1（同类修复）：把直 alpha BGRA 打成**预乘 32bpp DIB**（HBITMAP）。
-/// SS_BITMAP 控件只对 32bpp DIB 按 alpha 混合；CreateBitmap 建的是 DDB，
-/// alpha 被忽略——抗锯齿圆点会画成实心色块（与托盘 CreateIcon 的
-/// DDB alpha 根因同类）。预乘公式 (v*a+127)/255 与图标渲染路径一致。
+/// 把直 alpha BGRA 打成**预乘 32bpp DIB**（HBITMAP）。SS_BITMAP 控件只对
+/// 32bpp DIB 按 alpha 混合；预乘公式 (v*a+127)/255 与图标渲染路径一致。
 unsafe fn bgra_dib_premultiplied(bgra: &[u8], w: i32, h: i32) -> HBITMAP {
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -1316,18 +1770,79 @@ unsafe fn draw_dot(hwnd: HWND, id: i32, color: RgbColor) {
     }
 }
 
-/// 校验外观对比度（M9：<3.0 仅警告不阻断）并刷新预览。
+/// 把颜色画到 swatch 控件（SS_BITMAP，40×24）。
+unsafe fn draw_swatch(ctx: &Ctx, hwnd: HWND, id: i32, color: RgbColor) {
+    let bgra = swatch_bgra(color, ctx.theme.border, 40, 24);
+    let target = ctl(hwnd, id);
+    let hbmp = bgra_dib_premultiplied(&bgra, 40, 24);
+    if !hbmp.is_invalid() {
+        let old = SendMessageW!(
+            target,
+            STM_SETIMAGE,
+            WPARAM(IMAGE_BITMAP.0 as usize),
+            LPARAM(hbmp.0 as isize)
+        );
+        if old != 0 {
+            let _ = DeleteObject(HGDIOBJ(old as *mut core::ffi::c_void));
+        }
+    }
+}
+
+/// owner-draw 按钮绘制（D-58：底色 = 按下 > 悬停 > 窗口；1px 边框；居中文本）。
+unsafe fn draw_owner_button(ctx: &Ctx, dis: &DRAWITEMSTRUCT) {
+    let t = ctx.theme;
+    let pressed = dis.itemState.contains(ODS_SELECTED);
+    // 悬停即时判定：光标位于按钮矩形内（父窗口客户坐标）。
+    let mut pt = POINT::default();
+    let mut hovered = false;
+    if GetCursorPos(&mut pt).is_ok() {
+        if let Ok(parent) = GetParent(dis.hwndItem) {
+            if !parent.0.is_null() {
+                let _ = ScreenToClient(parent, &mut pt);
+                let r = &dis.rcItem;
+                hovered = pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+            }
+        }
+    }
+    let bg = if pressed {
+        t.pressed
+    } else if hovered {
+        t.hover
+    } else {
+        t.window
+    };
+    let br = CreateSolidBrush(COLORREF(bg));
+    FillRect(dis.hDC, &dis.rcItem, br);
+    let br_border = ctx.brush(&ctx.br_border);
+    if !br_border.is_invalid() {
+        FrameRect(dis.hDC, &dis.rcItem, br_border);
+    }
+    let old = SelectObject(dis.hDC, HGDIOBJ(ctx.font(&ctx.f_base).0));
+    let mut buf = [0u16; 64];
+    let n = GetWindowTextW(dis.hwndItem, &mut buf);
+    let mut txt: Vec<u16> = buf[..n.max(0) as usize].to_vec();
+    SetTextColor(dis.hDC, COLORREF(t.text));
+    SetBkMode(dis.hDC, TRANSPARENT);
+    let mut rc = dis.rcItem;
+    DrawTextW(
+        dis.hDC,
+        &mut txt,
+        &mut rc,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    SelectObject(dis.hDC, old);
+    let _ = DeleteObject(HGDIOBJ(br.0));
+}
+
+/// 校验外观对比度（<3.0 仅警告不阻断）并刷新预览（1× + 4× 放大）。
 fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     let cfg = ctx.cfg.borrow();
-    // #4：分档启用时预览用当前电量对应的分档色（预览文本非数字则回退自动色）。
     let tiered = cfg.icon_font_tiers_enabled;
     let tiers: Option<&[RgbColor]> = if tiered {
         Some(cfg.icon_font_tier_colors.as_slice())
     } else {
         None
     };
-    // P3-3 修复：预览用色与托盘实显对齐——"满"=100 参与分档；
-    // 分档启用且非数字文本（?/--）用 Gray（托盘语义），而非 Default。
     let percent: Option<u8> = if ctx.preview_text == "满" {
         Some(100)
     } else {
@@ -1349,8 +1864,9 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         tiers,
     );
     let bg_opt = (cfg.icon_shape != IconShape::Transparent).then_some(cfg.icon_background.rgb());
+    let px = ctx.sc(PREVIEW_PX);
     let rgba = render_text_bitmap(
-        PREVIEW_PX as u32,
+        px as u32,
         &ctx.preview_text,
         rgb,
         bg_opt,
@@ -1361,15 +1877,12 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     );
 
     // 合成到 6 格棋盘底（同时示意深浅两种任务栏），再建 HBITMAP。
-    let n = (PREVIEW_PX * PREVIEW_PX) as usize;
+    let n = (px * px) as usize;
     let mut bgra = vec![0u8; n * 4];
-    let cell = (PREVIEW_PX / 6).max(1);
+    let cell = (px / 6).max(1);
     for i in 0..n {
-        let (py, px) = (
-            (i / PREVIEW_PX as usize) as i32,
-            (i % PREVIEW_PX as usize) as i32,
-        );
-        let checker = if ((px / cell) + (py / cell)) % 2 == 0 {
+        let (py, pxi) = ((i / px as usize) as i32, (i % px as usize) as i32);
+        let checker = if ((pxi / cell) + (py / cell)) % 2 == 0 {
             (0xEEu32, 0xEE, 0xEE)
         } else {
             (0x99u32, 0x99, 0x99)
@@ -1385,9 +1898,7 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     }
     unsafe {
         let preview = ctl(hwnd, IDC_PREVIEW);
-        // v0.3.4 #1：预览换预乘 DIB（此处 alpha 恒 255，预乘为恒等；
-        // 与托盘 HICON 同路径，保证「预览 = 托盘实显」的颜色语义一致）。
-        let hbmp = bgra_dib_premultiplied(&bgra, PREVIEW_PX, PREVIEW_PX);
+        let hbmp = bgra_dib_premultiplied(&bgra, px, px);
         if !hbmp.is_invalid() {
             let old = SendMessageW!(
                 preview,
@@ -1399,9 +1910,34 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
                 let _ = DeleteObject(HGDIOBJ(old as *mut core::ffi::c_void));
             }
         }
+        // 4× 放大预览（最近邻块放大，呈现像素级效果；规范：1× 与 4× 并排）。
+        let big = px * 4;
+        let mut big_bgra = vec![0u8; (big * big * 4) as usize];
+        for by in 0..big {
+            for bx in 0..big {
+                let sy = by / 4;
+                let sx = bx / 4;
+                let s = ((sy * px + sx) * 4) as usize;
+                let d = ((by * big + bx) * 4) as usize;
+                big_bgra[d..d + 4].copy_from_slice(&bgra[s..s + 4]);
+            }
+        }
+        let big_ctl = ctl(hwnd, IDC_PREVIEW_BIG);
+        let hbmp2 = bgra_dib_premultiplied(&big_bgra, big, big);
+        if !hbmp2.is_invalid() {
+            let old = SendMessageW!(
+                big_ctl,
+                STM_SETIMAGE,
+                WPARAM(IMAGE_BITMAP.0 as usize),
+                LPARAM(hbmp2.0 as isize)
+            );
+            if old != 0 {
+                let _ = DeleteObject(HGDIOBJ(old as *mut core::ffi::c_void));
+            }
+        }
     }
 
-    // 对比度提示（M9：仅警告）。分档模式取当前档颜色（无数字回退最高档）。
+    // 对比度提示（仅警告）。分档模式取当前档颜色（无数字回退最高档）。
     let font_c = if tiered {
         let t = match percent {
             Some(p) => font_tier_for_percent(&cfg.icon_font_tier_thresholds, p),
@@ -1455,23 +1991,26 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         match cfg.icon_background {
             IconBackground::Dark => combo_set_sel(bg, 0),
             IconBackground::Light => combo_set_sel(bg, 1),
-            IconBackground::Custom(c) => {
-                combo_set_sel(bg, 2);
-                let hex = c.to_hex();
-                let v = wide(&hex);
-                let _ = SetWindowTextW(ctl(hwnd, IDC_BG_HEX), PCWSTR(v.as_ptr()));
-            }
+            IconBackground::Custom(_) => combo_set_sel(bg, 2),
         }
+        draw_swatch(ctx, hwnd, IDC_BG_SWATCH, cfg.icon_background.rgb());
+
+        // 裁决 1：下拉选择即分档开关。自动 → 展开分档卡；自定义 → 单一选色。
+        let tiered = cfg.icon_font_tiers_enabled;
         let fc = ctl(hwnd, IDC_FONT_COLOR);
-        match cfg.icon_font_color {
-            IconFontColor::Auto => combo_set_sel(fc, 0),
-            IconFontColor::Fixed(c) => {
-                combo_set_sel(fc, 1);
-                let hex = c.to_hex();
-                let v = wide(&hex);
-                let _ = SetWindowTextW(ctl(hwnd, IDC_FONT_HEX), PCWSTR(v.as_ptr()));
-            }
-        }
+        combo_set_sel(fc, if tiered { 0 } else { 1 });
+        let font_color = match cfg.icon_font_color {
+            IconFontColor::Fixed(c) => c,
+            IconFontColor::Auto => RgbColor {
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF,
+            },
+        };
+        draw_swatch(ctx, hwnd, IDC_FONT_SWATCH, font_color);
+        show_ctl(hwnd, IDC_FONT_SWATCH, !tiered);
+        show_ctl(hwnd, IDC_FONT_PICK, !tiered);
+
         // 字体：精确找；找不到（自定义/已卸载）补到列表末尾并选中。
         let fam = ctl(hwnd, IDC_FONT_FAMILY);
         let family = cfg.icon_font_family.clone();
@@ -1490,22 +2029,7 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             .unwrap_or(0);
         combo_set_sel(iv, idx as i32);
 
-        // —— 字体颜色分档（#4）——
-        let tiered = cfg.icon_font_tiers_enabled;
-        SendMessageW!(
-            ctl(hwnd, IDC_TIERED),
-            BM_SETCHECK,
-            WPARAM(if tiered {
-                BST_CHECKED.0 as usize
-            } else {
-                BST_UNCHECKED.0 as usize
-            }),
-            LPARAM(0)
-        );
-        // 启用分档后隐藏单一字体颜色入口（用户原话：按钮右侧就不需要单一颜色选择）。
-        show_ctl(hwnd, IDC_FONT_COLOR, !tiered);
-        show_ctl(hwnd, IDC_FONT_HEX, !tiered);
-        show_ctl(hwnd, IDC_FONT_PICK, !tiered);
+        // —— 分档卡（裁决 2）——
         let n = cfg
             .icon_font_tier_colors
             .len()
@@ -1514,19 +2038,33 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         let ths = cfg.icon_font_tier_thresholds.clone();
         for i in 0..4usize {
             let e = ctl(hwnd, IDC_TIER_TH0 + i as i32);
-            let _ = ShowWindow(e, if i < n - 1 { SW_SHOW } else { SW_HIDE });
             if let Some(t) = ths.get(i) {
                 let v = wide(&t.to_string());
                 let _ = SetWindowTextW(e, PCWSTR(v.as_ptr()));
             }
         }
         let cols = cfg.icon_font_tier_colors.clone();
+        let tip = HWND(ctx.tooltip.get() as *mut core::ffi::c_void);
         for i in 0..5usize {
             let d = IDC_TIER_DOT0 + i as i32;
-            let _ = ShowWindow(ctl(hwnd, d), if i < n { SW_SHOW } else { SW_HIDE });
             if let Some(c) = cols.get(i) {
                 draw_dot(hwnd, d, *c);
             }
+            // tooltip 文案：档位区间 + 当前色 HEX（如「21–50 · #FFB900」）。
+            let lo = if i == 0 {
+                0
+            } else {
+                ths.get(i - 1).copied().unwrap_or(0) as i32 + 1
+            };
+            let hi = match ths.get(i) {
+                Some(t) => *t as i32,
+                None => 100,
+            };
+            let text = format!(
+                "{lo}–{hi} · {}",
+                cols.get(i).map(|c| c.to_hex()).unwrap_or_default()
+            );
+            tip_tool(tip, hwnd, ctl(hwnd, d), &text, false);
         }
 
         let blink = ctl(hwnd, IDC_BLINK);
@@ -1541,16 +2079,11 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             LPARAM(0)
         );
         let slider = ctl(hwnd, IDC_SLIDER);
-        SendMessageW!(
-            slider,
-            TBM_SETPOS,
-            WPARAM(1),
-            LPARAM(cfg.low_threshold as isize)
-        );
+        SendMessageW!(slider, TBM_SETPOS, WPARAM(1), LPARAM(cfg.low_threshold as isize));
         let tv = format!("{}%", cfg.low_threshold);
         let v = wide(&tv);
         let _ = SetWindowTextW(ctl(hwnd, IDC_THRESH_VAL), PCWSTR(v.as_ptr()));
-        // v0.3.4 #4（D-48）：文本/背景大小滑块回填。
+        // 文本/背景覆盖度滑块回填（D-57）。
         SendMessageW!(
             ctl(hwnd, IDC_TEXT_SLIDER),
             TBM_SETPOS,
@@ -1569,6 +2102,20 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         let bvs = format!("{}%", cfg.icon_bg_scale);
         let bv = wide(&bvs);
         let _ = SetWindowTextW(ctl(hwnd, IDC_BG_VAL), PCWSTR(bv.as_ptr()));
+
+        // 展开态变化才重排（收起回收 112px，展开还原）。
+        if ctx.expanded.get() != tiered {
+            relayout(hwnd, ctx, tiered);
+        }
+        // 档内二次可见性：N 档 = N-1 个阈值框 + N 个色点。
+        if tiered {
+            for i in 0..4usize {
+                show_ctl(hwnd, IDC_TIER_TH0 + i as i32, i < n - 1);
+            }
+            for i in 0..5usize {
+                show_ctl(hwnd, IDC_TIER_DOT0 + i as i32, i < n);
+            }
+        }
     }
     ctx.syncing.set(false);
     refresh_preview_and_hints(hwnd, ctx);
@@ -1579,19 +2126,7 @@ unsafe fn handle_color_pick(hwnd: HWND, ctx: &Ctx, id: i32) {
     let initial = {
         let cfg = ctx.cfg.borrow();
         match id {
-            IDC_BG_PICK => match cfg.icon_background {
-                IconBackground::Custom(c) => c,
-                IconBackground::Dark => RgbColor {
-                    r: 0x1F,
-                    g: 0x1F,
-                    b: 0x1F,
-                },
-                IconBackground::Light => RgbColor {
-                    r: 0xF2,
-                    g: 0xF2,
-                    b: 0xF2,
-                },
-            },
+            IDC_BG_PICK => cfg.icon_background.rgb(),
             IDC_FONT_PICK => match cfg.icon_font_color {
                 IconFontColor::Fixed(c) => c,
                 IconFontColor::Auto => RgbColor {
@@ -1621,7 +2156,6 @@ unsafe fn handle_color_pick(hwnd: HWND, ctx: &Ctx, id: i32) {
         match id {
             IDC_BG_PICK => {
                 cfg.icon_background = IconBackground::Custom(picked);
-                // 「自定义」档被选中，HEX 框与下拉在下一次 sync 对齐。
             }
             IDC_FONT_PICK => {
                 cfg.icon_font_color = IconFontColor::Fixed(picked);
@@ -1643,7 +2177,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         return;
     }
     let clicked = code == BN_CLICKED;
-    // #3：取色按钮 / 分档色点（STN_CLICKED 与 BN_CLICKED 同为 0）。
+    // 取色按钮 / 分档色点（STN_CLICKED 与 BN_CLICKED 同为 0）。
     if clicked
         && (id == IDC_BG_PICK
             || id == IDC_FONT_PICK
@@ -1673,29 +2207,20 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 0 => cfg.icon_background = IconBackground::Dark,
                 1 => cfg.icon_background = IconBackground::Light,
                 2 => {
-                    let text = unsafe { edit_text(ctl(hwnd, IDC_BG_HEX)) };
-                    match RgbColor::parse_hex(&text) {
-                        Some(c) => cfg.icon_background = IconBackground::Custom(c),
-                        None => {
-                            drop(cfg);
-                            set_text(ctx, IDC_STATUS, "背景色格式应为 #RRGGBB（如 #1F1F1F）");
-                            return;
-                        }
-                    }
+                    // 「自定义」保留既有自定义色；首次切换给默认深灰。
+                    cfg.icon_background = match cfg.icon_background {
+                        IconBackground::Custom(c) => IconBackground::Custom(c),
+                        _ => IconBackground::Custom(RgbColor {
+                            r: 0x1F,
+                            g: 0x1F,
+                            b: 0x1F,
+                        }),
+                    };
                 }
                 _ => return,
             }
             touched = true;
-        }
-        IDC_BG_HEX if change => {
-            if let IconBackground::Custom(_) = cfg.icon_background {
-                let text = unsafe { edit_text(ctl(hwnd, IDC_BG_HEX)) };
-                if let Some(c) = RgbColor::parse_hex(&text) {
-                    cfg.icon_background = IconBackground::Custom(c);
-                    touched = true;
-                }
-                // 输入中间态不落地也不提示。
-            }
+            resync = true; // swatch 刷新
         }
         IDC_FONT_FAMILY if selchange => {
             let name = combo_current_text(ctl(hwnd, IDC_FONT_FAMILY));
@@ -1705,43 +2230,30 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             cfg.icon_font_family = name;
             touched = true;
         }
+        // 裁决 1：下拉选择即模式开关（icon_font_tiers_enabled 由下拉派生）。
         IDC_FONT_COLOR if selchange => {
             match combo_sel(ctl(hwnd, IDC_FONT_COLOR)) {
-                0 => cfg.icon_font_color = IconFontColor::Auto,
+                0 => {
+                    cfg.icon_font_tiers_enabled = true;
+                    cfg.icon_font_color = IconFontColor::Auto;
+                }
                 1 => {
-                    let text = unsafe { edit_text(ctl(hwnd, IDC_FONT_HEX)) };
-                    match RgbColor::parse_hex(&text) {
-                        Some(c) => cfg.icon_font_color = IconFontColor::Fixed(c),
-                        None => {
-                            drop(cfg);
-                            set_text(ctx, IDC_STATUS, "字体颜色格式应为 #RRGGBB（如 #FFFFFF）");
-                            return;
-                        }
-                    }
+                    cfg.icon_font_tiers_enabled = false;
+                    cfg.icon_font_color = match cfg.icon_font_color {
+                        IconFontColor::Fixed(c) => IconFontColor::Fixed(c),
+                        IconFontColor::Auto => IconFontColor::Fixed(RgbColor {
+                            r: 0xFF,
+                            g: 0xFF,
+                            b: 0xFF,
+                        }),
+                    };
                 }
                 _ => return,
             }
             touched = true;
+            resync = true; // 分档卡展开/收起
         }
-        IDC_FONT_HEX if change => {
-            if let IconFontColor::Fixed(_) = cfg.icon_font_color {
-                let text = unsafe { edit_text(ctl(hwnd, IDC_FONT_HEX)) };
-                if let Some(c) = RgbColor::parse_hex(&text) {
-                    cfg.icon_font_color = IconFontColor::Fixed(c);
-                    touched = true;
-                }
-            }
-        }
-        // #4：分档开关——关闭恢复单一字体颜色选择（控件显隐在 sync_controls）。
-        IDC_TIERED if clicked => {
-            let checked =
-                unsafe { SendMessageW!(ctl(hwnd, IDC_TIERED), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
-            cfg.icon_font_tiers_enabled = checked == BST_CHECKED.0 as isize;
-            touched = true;
-            resync = true;
-        }
-        // #4：分档数量——调整阈值数组（增长时在上个阈值 +30、封顶 99），
-        // 再过一遍 normalize（钳制 + 修补严格递增 + 颜色补齐/截断）。
+        // 档数调整：增长时在 [上一档+1, 99] 区间均分剩余档位，再过 normalize。
         IDC_TIER_COUNT if selchange => {
             let idx = combo_sel(ctl(hwnd, IDC_TIER_COUNT));
             if idx < 0 {
@@ -1752,11 +2264,9 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             while ths.len() + 1 > n {
                 ths.pop();
             }
-            // P3-2 修复：+30 递增会让顶档只覆盖 100%（如 20/50/80/99）。
-            // 改为在 [上一档+1, 99] 区间均分剩余档位，保证顶档覆盖到 100%。
             while ths.len() + 1 < n {
                 let lo = ths.last().map(|t| *t as i32).unwrap_or(0);
-                let slots = n - ths.len() - 1; // 除顶档外还需生成的档数
+                let slots = n - ths.len() - 1;
                 let next = if slots > 0 {
                     (99 - lo) / (slots as i32 + 1) + lo
                 } else {
@@ -1774,7 +2284,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             touched = true;
             resync = true;
         }
-        // #4：阈值数字框——1–99、严格递增，非法即时提示且不落地。
+        // 阈值数字框：1–99、严格递增，非法即时提示且不落地。
         id if change && (IDC_TIER_TH0..IDC_TIER_TH0 + 4).contains(&id) => {
             let i = (id - IDC_TIER_TH0) as usize;
             let text = unsafe { edit_text(ctl(hwnd, id)) };
@@ -1790,11 +2300,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                     v as u8
                 }
                 _ => {
-                    set_text(
-                        ctx,
-                        IDC_STATUS,
-                        "分档阈值需为 1–99 的整数（数字及以下的电量归上一档）",
-                    );
+                    set_text(ctx, IDC_STATUS, "⚠ 阈值需为 1–99 的整数");
                     return;
                 }
             };
@@ -1807,7 +2313,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 set_text(
                     ctx,
                     IDC_STATUS,
-                    "分档阈值必须严格递增（如 20、50：0-20 一档、21-50 一档、51-100 一档）",
+                    "⚠ 阈值必须严格递增（如 20、50 → 0-20 / 21-50 / 51-100）",
                 );
                 return;
             }
@@ -1828,23 +2334,14 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             cfg.blink_enabled = checked == BST_CHECKED.0 as isize;
             touched = true;
         }
-        IDC_RESET_APPEAR if clicked => {
-            cfg.icon_shape = IconShape::Rounded;
-            cfg.icon_background = IconBackground::Dark;
-            cfg.icon_font_color = IconFontColor::Auto;
-            cfg.icon_font_family = "Segoe UI".to_string();
-            // #4：分档键一并恢复默认。
-            cfg.icon_font_tiers_enabled = false;
-            cfg.icon_font_tier_thresholds = DEFAULT_FONT_TIER_THRESHOLDS.to_vec();
-            cfg.icon_font_tier_colors = DEFAULT_FONT_TIER_COLORS.to_vec();
-            // v0.3.4 #4：文本/背景大小一并恢复默认。
+        // 行内重置（规范默认：底行 + 就地）。
+        IDC_TEXT_RESET if clicked => {
             cfg.icon_text_scale = 100;
-            cfg.icon_bg_scale = 100;
             touched = true;
             resync = true;
         }
-        IDC_RESET_REFRESH if clicked => {
-            cfg.poll_interval_secs = DEFAULT_POLL_SECS;
+        IDC_BG_RESET if clicked => {
+            cfg.icon_bg_scale = 100;
             touched = true;
             resync = true;
         }
@@ -1856,7 +2353,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         IDC_RESET_ALL if clicked => {
             *cfg = Config::default();
-            // P2-3：注册表自启态与默认值对齐，避免 TOML 与 HKCU Run 键分叉。
+            // 注册表自启态与默认值对齐，避免 TOML 与 HKCU Run 键分叉。
             let exe =
                 std::env::current_exe().unwrap_or_else(|_| PathBuf::from("volttray-tray.exe"));
             let _ = autostart::sync(cfg.autostart, &exe);

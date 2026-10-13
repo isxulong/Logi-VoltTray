@@ -9,12 +9,16 @@
 //! - 背景色（M9）：light/dark 预设或 #RRGGBB 自定义；透明语义由形状承担。
 //! - 字体（M9）：系统字体名（默认 Segoe UI），GDI 缺字体时静默回退。
 //! - 闪烁（M11）：低电触发时在常态与「提亮帧」两档间 1Hz 切换；
-//!   v0.3.4 #3 提亮帧改用 flash_rgb（向白/向深灰插值），两帧必有可感知差异。
+//!   v0.3.4 #3 提亮帧改用 flash_rgb（向白/向深灰插值），两帧必有可感知差异；
+//!   v0.3.5 #4（D-55）：透明形状的提亮帧走「文本帧路径」——字色跳变 +
+//!   文本透明度脉冲（背景不存在，闪烁必须作用于文本）。
 //! - HICON 构造（v0.3.4 #1 根因修复，详见 rgba_to_hicon 注释）。
 
 use std::collections::HashMap;
 use volttray_app::config::{
-    contrast_ratio, flash_rgb, IconBackground, IconFontColor, IconShape, RgbColor,
+    contrast_ratio, flash_rgb, pulse_alpha, IconBackground, IconFontColor, IconShape, RgbColor,
+    BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
+    ICON_TEXT_SCALE_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
@@ -183,9 +187,9 @@ pub struct IconCache {
     font_family: String,
     /// 分档颜色表（v0.3.3 #4）；None = 未启用分档（走 IconColor::ALL）。
     tier_colors: Option<Vec<RgbColor>>,
-    /// 文本大小（% 相对基准字号，D-48，60..=140）。
+    /// 文本大小（% 相对基准字号，D-48/D-57，40..=160）。
     text_scale: u8,
-    /// 背景块大小（% 相对位图内切块，D-48，60..=100）。
+    /// 背景覆盖度（% 相对位图内切块，D-48/D-57，20..=100；100% = 满出血）。
     bg_scale: u8,
     map: HashMap<(IconColor, String, bool), Vec<u8>>,
 }
@@ -211,8 +215,8 @@ impl IconCache {
             font,
             font_family,
             tier_colors: tiers,
-            text_scale: text_scale.clamp(60, 140),
-            bg_scale: bg_scale.clamp(60, 100),
+            text_scale: text_scale.clamp(ICON_TEXT_SCALE_MIN, ICON_TEXT_SCALE_MAX),
+            bg_scale: bg_scale.clamp(ICON_BG_SCALE_MIN, ICON_BG_SCALE_MAX),
             map: HashMap::new(),
         };
         cache.fill();
@@ -260,7 +264,7 @@ impl IconCache {
                     (rgb, (shape != IconShape::Transparent).then_some(bg_rgb))
                 };
                 for text in &texts {
-                    let rgba = render_text_bitmap(
+                    let mut rgba = render_text_bitmap(
                         self.size,
                         text,
                         fg,
@@ -270,6 +274,11 @@ impl IconCache {
                         self.text_scale,
                         self.bg_scale,
                     );
+                    // v0.3.5 #4（D-55）：透明背景的闪烁帧除字色跳变外再叠
+                    // 文本透明度脉冲——颜色对比弱（如深灰字）时帧间仍肉眼可见。
+                    if bright && shape == IconShape::Transparent {
+                        apply_alpha_pulse(&mut rgba, BLINK_TEXT_ALPHA_PULSE);
+                    }
                     self.map.insert((color, text.clone(), bright), rgba);
                 }
             }
@@ -291,8 +300,8 @@ impl IconCache {
         text_scale: u8,
         bg_scale: u8,
     ) {
-        let text_scale = text_scale.clamp(60, 140);
-        let bg_scale = bg_scale.clamp(60, 100);
+        let text_scale = text_scale.clamp(ICON_TEXT_SCALE_MIN, ICON_TEXT_SCALE_MAX);
+        let bg_scale = bg_scale.clamp(ICON_BG_SCALE_MIN, ICON_BG_SCALE_MAX);
         if size != self.size
             || dark_theme != self.dark_theme
             || shape != self.shape
@@ -329,6 +338,22 @@ impl IconCache {
         let rgba = self.map.get(&(color, text.to_string(), bright))?;
         let handle = rgba_to_hicon(rgba, self.size)?;
         Some(tray_icon::Icon::from_handle(handle))
+    }
+
+    /// 测试专用：直接取缓存帧字节（blink.rs 的闪烁帧路径验收等跨模块测试用）。
+    #[cfg(test)]
+    pub fn map_for_test(&self, color: IconColor, text: &str, bright: bool) -> Option<&[u8]> {
+        self.map
+            .get(&(color, text.to_string(), bright))
+            .map(Vec::as_slice)
+    }
+}
+
+/// 整体透明度脉冲（v0.3.5 #4，D-55）：每个像素的 alpha × (1 − factor)，
+/// 仅用于透明形状的闪烁提亮帧（文本帧路径）。
+fn apply_alpha_pulse(rgba: &mut [u8], factor: f64) {
+    for px in rgba.chunks_exact_mut(4) {
+        px[3] = pulse_alpha(px[3], factor);
     }
 }
 
@@ -389,8 +414,8 @@ pub fn render_text_bitmap(
     // v0.3.4 #4（D-48）：文本/背景缩放。100% 档与 v0.3.3 渲染逐字节一致。
     // ts/bs 先钳制；背景块 block = 位图 × bs%（transparent 恒满幅）；
     // 文本高度上限 cap = block × 15/16（背景块四周留 1px），超宽再按比例缩。
-    let ts = (text_scale as i32).clamp(60, 140);
-    let bs = (bg_scale as i32).clamp(60, 100);
+    let ts = (text_scale as i32).clamp(ICON_TEXT_SCALE_MIN as i32, ICON_TEXT_SCALE_MAX as i32);
+    let bs = (bg_scale as i32).clamp(ICON_BG_SCALE_MIN as i32, ICON_BG_SCALE_MAX as i32);
     let block = if matches!(shape, IconShape::Transparent) {
         size_i
     } else {
@@ -1038,6 +1063,78 @@ mod tests {
         assert!(solid > 0, "solid glyph core expected");
     }
 
+    /// v0.3.5 #4 验收：透明背景 + 低电 → 闪烁帧走「文本帧路径」——字色
+    /// 跳变之外，文本透明度被脉冲（255 → 115）；非透明形状维持背景闪烁、
+    /// 文本 alpha 不动。
+    #[test]
+    fn transparent_blink_frames_pulse_text_alpha() {
+        let size = 32u32;
+        let cache = IconCache::new(
+            size,
+            true,
+            IconShape::Transparent,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let normal = cache
+            .map
+            .get(&(IconColor::Default, "50".to_string(), false))
+            .expect("normal frame cached");
+        let bright = cache
+            .map
+            .get(&(IconColor::Default, "50".to_string(), true))
+            .expect("bright frame cached");
+        assert_ne!(normal, bright, "blink frames must differ on transparent bg");
+        // 实心字形像素：alpha 255 → pulse_alpha(255)（=115），颜色通道也变。
+        let solid = normal
+            .chunks_exact(4)
+            .position(|px| px[3] == 255)
+            .expect("solid glyph pixel expected");
+        let (n, b) = (&normal[solid * 4..solid * 4 + 4], &bright[solid * 4..solid * 4 + 4]);
+        assert_eq!(n[3], 255);
+        assert_eq!(b[3], pulse_alpha(255, BLINK_TEXT_ALPHA_PULSE));
+        assert_ne!(&n[..3], &b[..3], "text color must also jump");
+        // 透明形状下背景区像素两帧都全透明（没有背景可闪）。
+        let corner = 0usize;
+        assert_eq!(normal[corner + 3], 0);
+        assert_eq!(bright[corner + 3], 0);
+
+        // 对照：非透明形状维持背景闪烁路径——背景像素 alpha 恒 255，
+        // 文本像素 alpha 不脉冲，差异只在颜色通道。
+        let cache2 = IconCache::new(
+            size,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let normal2 = cache2
+            .map
+            .get(&(IconColor::Default, "50".to_string(), false))
+            .expect("normal frame cached");
+        let bright2 = cache2
+            .map
+            .get(&(IconColor::Default, "50".to_string(), true))
+            .expect("bright frame cached");
+        assert_ne!(normal2, bright2, "bg flash frames must differ");
+        let idx = ((2 * size + size / 2) * 4) as usize; // 背景采样点（同 P1-1 回归）
+        assert_eq!(normal2[idx + 3], 255);
+        assert_eq!(bright2[idx + 3], 255);
+        assert_ne!(
+            &normal2[idx..idx + 3],
+            &bright2[idx..idx + 3],
+            "background color must flash"
+        );
+    }
+
     /// #4：分档模式缓存 —— N 个分档色 + 灰共 N+1 个颜色档位可用。
     #[test]
     fn tier_cache_fills_tier_colors() {
@@ -1166,13 +1263,14 @@ mod tests {
             .all(|b| *b == 0));
     }
 
-    /// v0.3.4 #4 验收：缩放矩阵（文本 60/100/140 × 背景 60/80/100 × 圆/方）下，
-    /// 文字墨迹不超出背景块、背景块不超出位图边界。
+    /// v0.3.4 #4 / v0.3.5 #8（D-57）验收：缩放矩阵（文本 40/100/160 × 背景
+    /// 覆盖度 20/60/100 × 圆/方）下，文字墨迹不超出背景块、背景块不超出
+    /// 位图边界（100% = 满出血贴边）。
     #[test]
     fn scale_matrix_keeps_text_within_block_and_bitmap() {
         let size = 32u32;
-        for text_scale in [60u8, 100, 140] {
-            for bg_scale in [60u8, 80, 100] {
+        for text_scale in [40u8, 100, 160] {
+            for bg_scale in [20u8, 60, 100] {
                 for shape in [IconShape::Rounded, IconShape::Square] {
                     for text in ["50", "满"] {
                         let bg = (0x0A, 0x6C, 0xFF);
