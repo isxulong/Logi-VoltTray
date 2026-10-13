@@ -30,13 +30,14 @@ use volttray_app::config::{
     IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS,
     DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS,
     FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX,
-    LOW_THRESHOLD_MIN,
+    LOW_THRESHOLD_MIN, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
+    ICON_TEXT_SCALE_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC,
-    DEFAULT_CHARSET, DEFAULT_GUI_FONT, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, TEXTMETRICW,
+    CreateDIBSection, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC, DEFAULT_CHARSET, DEFAULT_GUI_FONT, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    TEXTMETRICW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -103,6 +104,12 @@ const IDC_SLIDER: i32 = 2013;
 const IDC_THRESH_VAL: i32 = 2014;
 const IDC_STATUS: i32 = 2015;
 const IDC_INTERVAL: i32 = 2016;
+/// 文本大小滑块（v0.3.4 #4，D-48）。
+const IDC_TEXT_SLIDER: i32 = 2036;
+const IDC_TEXT_VAL: i32 = 2037;
+/// 背景大小滑块（v0.3.4 #4，D-48）。
+const IDC_BG_SLIDER: i32 = 2038;
+const IDC_BG_VAL: i32 = 2039;
 /// 背景色「选色…」按钮（#3 色轮入口）。
 const IDC_BG_PICK: i32 = 2017;
 /// 字体颜色「选色…」按钮（#3 色轮入口）。
@@ -121,7 +128,9 @@ const PREVIEW_PX: i32 = 48;
 /// 分档色点边长（像素）。
 const DOT_PX: i32 = 26;
 
-const INTERVALS: [u64; 5] = [15, 30, 60, 120, 300];
+/// 刷新间隔档位（v0.3.4 #2 / D-45）：过短档位（15/30/120 秒）与零耗电理念
+/// 相悖且无收益（电量变化约 1%–2%/小时），收敛为 60/300/600/900/1800。
+const INTERVALS: [u64; 5] = [60, 300, 600, 900, 1800];
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -215,7 +224,7 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             510,
-            624,
+            724,
             None,
             None,
             Some(hinst),
@@ -254,20 +263,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_HSCROLL => {
-            // 阈值滑块（发给父窗口；lparam = 滑块 HWND）。
+            // 滑块（发给父窗口；lparam = 滑块 HWND）：低电阈值 + 文本/背景大小。
             if !ctx.is_null() {
                 let ctx = &*ctx;
-                let slider = GetDlgItem(Some(hwnd), IDC_SLIDER).unwrap_or_default();
-                if slider.0 == lparam.0 as *mut core::ffi::c_void && !ctx.syncing.get() {
-                    let pos = SendMessageW!(slider, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
-                    let snapped = ((pos as f64 / 5.0).round() * 5.0) as i64;
-                    let v = snapped.clamp(LOW_THRESHOLD_MIN as i64, LOW_THRESHOLD_MAX as i64) as u8;
-                    let mut cfg = ctx.cfg.borrow_mut();
-                    if cfg.low_threshold != v {
-                        cfg.low_threshold = v;
-                        let text = format!("{}%", v);
-                        set_text(ctx, IDC_THRESH_VAL, &text);
-                        ctx.apply(&cfg);
+                let lp = lparam.0 as *mut core::ffi::c_void;
+                if !ctx.syncing.get() {
+                    let slider = GetDlgItem(Some(hwnd), IDC_SLIDER).unwrap_or_default();
+                    let ts_ctl = GetDlgItem(Some(hwnd), IDC_TEXT_SLIDER).unwrap_or_default();
+                    let bs_ctl = GetDlgItem(Some(hwnd), IDC_BG_SLIDER).unwrap_or_default();
+                    if slider.0 == lp {
+                        let pos = SendMessageW!(slider, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
+                        let snapped = ((pos as f64 / 5.0).round() * 5.0) as i64;
+                        let v =
+                            snapped.clamp(LOW_THRESHOLD_MIN as i64, LOW_THRESHOLD_MAX as i64) as u8;
+                        let mut cfg = ctx.cfg.borrow_mut();
+                        if cfg.low_threshold != v {
+                            cfg.low_threshold = v;
+                            let text = format!("{}%", v);
+                            set_text(ctx, IDC_THRESH_VAL, &text);
+                            ctx.apply(&cfg);
+                        }
+                    } else if ts_ctl.0 == lp {
+                        // v0.3.4 #4（D-48）：文本大小 60..=140%，即时生效并持久化。
+                        let pos = SendMessageW!(ts_ctl, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
+                        let v = pos
+                            .clamp(ICON_TEXT_SCALE_MIN as i32, ICON_TEXT_SCALE_MAX as i32)
+                            as u8;
+                        let mut cfg = ctx.cfg.borrow_mut();
+                        if cfg.icon_text_scale != v {
+                            cfg.icon_text_scale = v;
+                            let text = format!("{v}%");
+                            set_text(ctx, IDC_TEXT_VAL, &text);
+                            ctx.apply(&cfg);
+                        }
+                    } else if bs_ctl.0 == lp {
+                        // v0.3.4 #4（D-48）：背景大小 60..=100%（>100% 会溢出内切块）。
+                        let pos = SendMessageW!(bs_ctl, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
+                        let v = pos.clamp(ICON_BG_SCALE_MIN as i32, ICON_BG_SCALE_MAX as i32) as u8;
+                        let mut cfg = ctx.cfg.borrow_mut();
+                        if cfg.icon_bg_scale != v {
+                            cfg.icon_bg_scale = v;
+                            let text = format!("{v}%");
+                            set_text(ctx, IDC_BG_VAL, &text);
+                            ctx.apply(&cfg);
+                        }
                     }
                 }
             }
@@ -394,6 +433,21 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         400,
         482,
         108,
+        0,
+        hinst,
+        hfont,
+    );
+    // v0.3.4 #4（D-48）：图标大小分组——文本 60..=140%、背景 60..=100%。
+    create_ctl(
+        hwnd,
+        "BUTTON",
+        Some("图标大小"),
+        ws(BS_GROUPBOX),
+        WINDOW_EX_STYLE(0),
+        8,
+        514,
+        482,
+        96,
         0,
         hinst,
         hfont,
@@ -752,7 +806,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
     create_ctl(
         hwnd,
         "STATIC",
-        Some("提示：更短的间隔会增加鼠标耗电"),
+        Some("提示：更短的间隔会增加鼠标耗电；电量变化很慢，默认档已足够及时"),
         ws(0),
         WINDOW_EX_STYLE(0),
         96,
@@ -850,6 +904,92 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         hfont,
     );
 
+    // —— 图标大小（v0.3.4 #4，D-48）——
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("文本大小"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        534,
+        60,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "msctls_trackbar32",
+        None,
+        ws(TBS_AUTOTICKS),
+        WINDOW_EX_STYLE(0),
+        96,
+        530,
+        180,
+        32,
+        IDC_TEXT_SLIDER,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("100%"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        534,
+        44,
+        20,
+        IDC_TEXT_VAL,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("背景大小"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        20,
+        570,
+        64,
+        20,
+        0,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "msctls_trackbar32",
+        None,
+        ws(TBS_AUTOTICKS),
+        WINDOW_EX_STYLE(0),
+        96,
+        566,
+        180,
+        32,
+        IDC_BG_SLIDER,
+        hinst,
+        hfont,
+    );
+    create_ctl(
+        hwnd,
+        "STATIC",
+        Some("100%"),
+        ws(0),
+        WINDOW_EX_STYLE(0),
+        290,
+        570,
+        44,
+        20,
+        IDC_BG_VAL,
+        hinst,
+        hfont,
+    );
+
     // —— 底部 ——
     create_ctl(
         hwnd,
@@ -858,7 +998,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         16,
-        520,
+        618,
         120,
         26,
         IDC_RESET_ALL,
@@ -872,7 +1012,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         16,
-        554,
+        652,
         466,
         20,
         IDC_STATUS,
@@ -920,6 +1060,23 @@ unsafe fn build_controls(hwnd: HWND, ctx: &Ctx) {
         LPARAM(((LOW_THRESHOLD_MAX as isize) << 16) | LOW_THRESHOLD_MIN as isize)
     );
     SendMessageW!(slider, TBM_SETTICFREQ, WPARAM(5), LPARAM(0));
+    // v0.3.4 #4（D-48）：文本 60..=140%、背景 60..=100%，刻度间隔 10%。
+    let ts = GetDlgItem(Some(hwnd), IDC_TEXT_SLIDER).unwrap_or_default();
+    SendMessageW!(
+        ts,
+        TBM_SETRANGE,
+        WPARAM(1),
+        LPARAM(((ICON_TEXT_SCALE_MAX as isize) << 16) | ICON_TEXT_SCALE_MIN as isize)
+    );
+    SendMessageW!(ts, TBM_SETTICFREQ, WPARAM(10), LPARAM(0));
+    let bs = GetDlgItem(Some(hwnd), IDC_BG_SLIDER).unwrap_or_default();
+    SendMessageW!(
+        bs,
+        TBM_SETRANGE,
+        WPARAM(1),
+        LPARAM(((ICON_BG_SCALE_MAX as isize) << 16) | ICON_BG_SCALE_MIN as isize)
+    );
+    SendMessageW!(bs, TBM_SETTICFREQ, WPARAM(10), LPARAM(0));
 
     sync_controls(hwnd, ctx);
 }
@@ -1107,17 +1264,45 @@ fn tier_dot_bgra(c: RgbColor) -> Vec<u8> {
     v
 }
 
+/// v0.3.4 #1（同类修复）：把直 alpha BGRA 打成**预乘 32bpp DIB**（HBITMAP）。
+/// SS_BITMAP 控件只对 32bpp DIB 按 alpha 混合；CreateBitmap 建的是 DDB，
+/// alpha 被忽略——抗锯齿圆点会画成实心色块（与托盘 CreateIcon 的
+/// DDB alpha 根因同类）。预乘公式 (v*a+127)/255 与图标渲染路径一致。
+unsafe fn bgra_dib_premultiplied(bgra: &[u8], w: i32, h: i32) -> HBITMAP {
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h, // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        bmiColors: [windows::Win32::Graphics::Gdi::RGBQUAD::default()],
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let Ok(hbmp) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+        return windows::Win32::Graphics::Gdi::HBITMAP::default();
+    };
+    if !bits.is_null() {
+        let dst = std::slice::from_raw_parts_mut(bits as *mut u8, bgra.len());
+        for (o, px) in dst.chunks_exact_mut(4).zip(bgra.chunks_exact(4)) {
+            let a = px[3] as u32;
+            o[0] = ((px[0] as u32 * a + 127) / 255) as u8;
+            o[1] = ((px[1] as u32 * a + 127) / 255) as u8;
+            o[2] = ((px[2] as u32 * a + 127) / 255) as u8;
+            o[3] = px[3];
+        }
+    }
+    hbmp
+}
+
 /// 把分档颜色画到色点控件（SS_BITMAP）。
 unsafe fn draw_dot(hwnd: HWND, id: i32, color: RgbColor) {
     let bgra = tier_dot_bgra(color);
     let dot = ctl(hwnd, id);
-    let hbmp = CreateBitmap(
-        DOT_PX,
-        DOT_PX,
-        1,
-        32,
-        Some(bgra.as_ptr() as *const core::ffi::c_void),
-    );
+    let hbmp = bgra_dib_premultiplied(&bgra, DOT_PX, DOT_PX);
     if !hbmp.is_invalid() {
         let old = SendMessageW!(
             dot,
@@ -1141,9 +1326,17 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     } else {
         None
     };
-    let percent: Option<u8> = ctx.preview_text.parse().ok();
+    // P3-3 修复：预览用色与托盘实显对齐——"满"=100 参与分档；
+    // 分档启用且非数字文本（?/--）用 Gray（托盘语义），而非 Default。
+    let percent: Option<u8> = if ctx.preview_text == "满" {
+        Some(100)
+    } else {
+        ctx.preview_text.parse().ok()
+    };
     let level = if let (true, Some(p)) = (tiered, percent) {
         IconColor::Tier(font_tier_for_percent(&cfg.icon_font_tier_thresholds, p) as u8)
+    } else if tiered && percent.is_none() {
+        IconColor::Gray
     } else {
         IconColor::Default
     };
@@ -1163,6 +1356,8 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         bg_opt,
         cfg.icon_shape,
         &cfg.icon_font_family,
+        cfg.icon_text_scale,
+        cfg.icon_bg_scale,
     );
 
     // 合成到 6 格棋盘底（同时示意深浅两种任务栏），再建 HBITMAP。
@@ -1190,13 +1385,9 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     }
     unsafe {
         let preview = ctl(hwnd, IDC_PREVIEW);
-        let hbmp = CreateBitmap(
-            PREVIEW_PX,
-            PREVIEW_PX,
-            1,
-            32,
-            Some(bgra.as_ptr() as *const core::ffi::c_void),
-        );
+        // v0.3.4 #1：预览换预乘 DIB（此处 alpha 恒 255，预乘为恒等；
+        // 与托盘 HICON 同路径，保证「预览 = 托盘实显」的颜色语义一致）。
+        let hbmp = bgra_dib_premultiplied(&bgra, PREVIEW_PX, PREVIEW_PX);
         if !hbmp.is_invalid() {
             let old = SendMessageW!(
                 preview,
@@ -1291,7 +1482,7 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             add_string(fam, &family);
             combo_set_sel(fam, combo_count(fam) - 1);
         }
-        // 间隔：取 ≤ 当前值的最大档；低于 15 取 15。
+        // 间隔：取 ≤ 当前值的最大档；低于 60 取 60（D-45）。
         let iv = ctl(hwnd, IDC_INTERVAL);
         let idx = INTERVALS
             .iter()
@@ -1359,6 +1550,25 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         let tv = format!("{}%", cfg.low_threshold);
         let v = wide(&tv);
         let _ = SetWindowTextW(ctl(hwnd, IDC_THRESH_VAL), PCWSTR(v.as_ptr()));
+        // v0.3.4 #4（D-48）：文本/背景大小滑块回填。
+        SendMessageW!(
+            ctl(hwnd, IDC_TEXT_SLIDER),
+            TBM_SETPOS,
+            WPARAM(1),
+            LPARAM(cfg.icon_text_scale as isize)
+        );
+        let tvs = format!("{}%", cfg.icon_text_scale);
+        let vv = wide(&tvs);
+        let _ = SetWindowTextW(ctl(hwnd, IDC_TEXT_VAL), PCWSTR(vv.as_ptr()));
+        SendMessageW!(
+            ctl(hwnd, IDC_BG_SLIDER),
+            TBM_SETPOS,
+            WPARAM(1),
+            LPARAM(cfg.icon_bg_scale as isize)
+        );
+        let bvs = format!("{}%", cfg.icon_bg_scale);
+        let bv = wide(&bvs);
+        let _ = SetWindowTextW(ctl(hwnd, IDC_BG_VAL), PCWSTR(bv.as_ptr()));
     }
     ctx.syncing.set(false);
     refresh_preview_and_hints(hwnd, ctx);
@@ -1542,15 +1752,21 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             while ths.len() + 1 > n {
                 ths.pop();
             }
+            // P3-2 修复：+30 递增会让顶档只覆盖 100%（如 20/50/80/99）。
+            // 改为在 [上一档+1, 99] 区间均分剩余档位，保证顶档覆盖到 100%。
             while ths.len() + 1 < n {
-                let next = ths
-                    .last()
-                    .map(|t| (*t as i32 + 30).min(FONT_TIER_THRESHOLD_MAX as i32))
-                    .unwrap_or(DEFAULT_FONT_TIER_THRESHOLDS[0] as i32);
-                if next <= *ths.last().unwrap_or(&0) as i32 {
-                    break; // 99 封顶后再无严格递增空间；normalize 会兜底。
+                let lo = ths.last().map(|t| *t as i32).unwrap_or(0);
+                let slots = n - ths.len() - 1; // 除顶档外还需生成的档数
+                let next = if slots > 0 {
+                    (99 - lo) / (slots as i32 + 1) + lo
+                } else {
+                    (99 + lo) / 2
+                };
+                let next = next.clamp(lo + 1, FONT_TIER_THRESHOLD_MAX as i32) as u8;
+                if next as i32 <= lo {
+                    break; // 无严格递增空间；normalize 会兜底。
                 }
-                ths.push(next as u8);
+                ths.push(next);
             }
             let (t2, c2, _) = normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
             cfg.icon_font_tier_thresholds = t2;
@@ -1621,6 +1837,9 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             cfg.icon_font_tiers_enabled = false;
             cfg.icon_font_tier_thresholds = DEFAULT_FONT_TIER_THRESHOLDS.to_vec();
             cfg.icon_font_tier_colors = DEFAULT_FONT_TIER_COLORS.to_vec();
+            // v0.3.4 #4：文本/背景大小一并恢复默认。
+            cfg.icon_text_scale = 100;
+            cfg.icon_bg_scale = 100;
             touched = true;
             resync = true;
         }
