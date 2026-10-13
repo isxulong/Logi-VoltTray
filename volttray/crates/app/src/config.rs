@@ -392,9 +392,8 @@ pub fn brighten((r, g, b): (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
 pub fn flash_rgb(c: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
     const DARK: (u8, u8, u8) = (0x1B, 0x1B, 0x1B);
     if contrast_ratio(c, (0xFF, 0xFF, 0xFF)) <= 1.2 {
-        let f = |v: u8| -> u8 {
-            ((v as f64 * (1.0 - factor)) + (DARK.0 as f64 * factor) + 0.5) as u8
-        };
+        let f =
+            |v: u8| -> u8 { ((v as f64 * (1.0 - factor)) + (DARK.0 as f64 * factor) + 0.5) as u8 };
         (f(c.0), f(c.1), f(c.2))
     } else {
         brighten(c, factor)

@@ -180,12 +180,18 @@ mod tests {
         // 去抖：DEBOUNCE_COUNT=2 次低读数才触发。
         core.record_success("m1", read(15, false), now);
         core.record_success("m1", read(15, false), now);
-        assert!(core.is_low_battery("m1"), "two low readings must arm low battery");
+        assert!(
+            core.is_low_battery("m1"),
+            "two low readings must arm low battery"
+        );
         assert!(blink.set_low_active(core.is_low_battery("m1")));
         assert!(blink.tick(true).blinking, "low battery must drive blink");
         // 充电：tracker 立即解除（充电设备不闪烁，D-30）。
         core.record_success("m1", read(15, true), now);
-        assert!(!core.is_low_battery("m1"), "charging must release low battery");
+        assert!(
+            !core.is_low_battery("m1"),
+            "charging must release low battery"
+        );
         assert!(blink.set_low_active(core.is_low_battery("m1")));
         let t = blink.tick(true);
         assert!(!t.blinking && !t.redraw, "charging release must stop blink");
