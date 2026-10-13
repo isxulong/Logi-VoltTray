@@ -18,8 +18,8 @@ use volttray_app::config::{
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
+    SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DEFAULT_CHARSET, DIB_RGB_COLORS, HGDIOBJ, RGBQUAD, TRANSPARENT,
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
@@ -815,8 +815,14 @@ mod tests {
                 "{text}: ink bbox center y {cy} vs {center}"
             );
             // 墨迹必须覆盖中心区域两侧（偏左/偏上直接被拦）。
-            assert!(x0 <= center && x1 >= center, "{text}: not spanning center x");
-            assert!(y0 <= center && y1 >= center, "{text}: not spanning center y");
+            assert!(
+                x0 <= center && x1 >= center,
+                "{text}: not spanning center x"
+            );
+            assert!(
+                y0 <= center && y1 >= center,
+                "{text}: not spanning center y"
+            );
         }
     }
 
@@ -841,10 +847,7 @@ mod tests {
             "anti-aliased edge pixels expected, got {partial}"
         );
         // 完全覆盖（实心）像素也存在（字形主体）。
-        let solid = rgba
-            .chunks_exact(4)
-            .filter(|px| px[3] == 255)
-            .count();
+        let solid = rgba.chunks_exact(4).filter(|px| px[3] == 255).count();
         assert!(solid > 0, "solid glyph core expected");
     }
 
@@ -879,13 +882,21 @@ mod tests {
         );
         for i in 0..3u8 {
             assert!(
-                cache.map.contains_key(&(IconColor::Tier(i), "50".to_string(), false)),
+                cache
+                    .map
+                    .contains_key(&(IconColor::Tier(i), "50".to_string(), false)),
                 "tier {i} bitmap missing"
             );
         }
-        assert!(cache.map.contains_key(&(IconColor::Gray, "50".to_string(), false)));
+        assert!(cache
+            .map
+            .contains_key(&(IconColor::Gray, "50".to_string(), false)));
         // 分档模式不渲染默认 4 档。
-        assert!(!cache.map.contains_key(&(IconColor::Default, "50".to_string(), false)));
-        assert!(!cache.map.contains_key(&(IconColor::Red, "50".to_string(), false)));
+        assert!(!cache
+            .map
+            .contains_key(&(IconColor::Default, "50".to_string(), false)));
+        assert!(!cache
+            .map
+            .contains_key(&(IconColor::Red, "50".to_string(), false)));
     }
 }
