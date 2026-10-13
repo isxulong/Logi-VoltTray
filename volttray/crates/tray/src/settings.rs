@@ -29,15 +29,16 @@ use volttray_app::config::{
     contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers, Config,
     IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR, DEFAULT_FONT_TIER_COLORS,
     DEFAULT_FONT_TIER_THRESHOLDS, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS,
-    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, LOW_THRESHOLD_MAX,
-    LOW_THRESHOLD_MIN, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
-    ICON_TEXT_SCALE_MIN,
+    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX,
+    ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX,
+    LOW_THRESHOLD_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateDIBSection, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC, DEFAULT_CHARSET, DEFAULT_GUI_FONT, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    TEXTMETRICW, HBITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    CreateDIBSection, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject, ReleaseDC,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
+    HBITMAP, HBRUSH, HDC, HFONT, HGDIOBJ, LOGFONTW, TEXTMETRICW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -286,9 +287,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     } else if ts_ctl.0 == lp {
                         // v0.3.4 #4（D-48）：文本大小 60..=140%，即时生效并持久化。
                         let pos = SendMessageW!(ts_ctl, TBM_GETPOS, WPARAM(0), LPARAM(0)) as i32;
-                        let v = pos
-                            .clamp(ICON_TEXT_SCALE_MIN as i32, ICON_TEXT_SCALE_MAX as i32)
-                            as u8;
+                        let v =
+                            pos.clamp(ICON_TEXT_SCALE_MIN as i32, ICON_TEXT_SCALE_MAX as i32) as u8;
                         let mut cfg = ctx.cfg.borrow_mut();
                         if cfg.icon_text_scale != v {
                             cfg.icon_text_scale = v;
