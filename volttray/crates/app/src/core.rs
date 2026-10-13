@@ -422,7 +422,10 @@ mod tests {
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
         // 默认档跟随反馈 2：DEFAULT_POLL_SECS = 600s（引用常量防再过时）。
-        assert_eq!(core.poll_interval(), Duration::from_secs(crate::config::DEFAULT_POLL_SECS));
+        assert_eq!(
+            core.poll_interval(),
+            Duration::from_secs(crate::config::DEFAULT_POLL_SECS)
+        );
         core.record_success("a", reading(30, true), now);
         assert_eq!(core.poll_interval(), POLL_CHARGING);
     }
