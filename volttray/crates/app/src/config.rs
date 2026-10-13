@@ -5,11 +5,11 @@
 //! 容错规则：未知键 / 非法值 → 回退默认 + 诊断警告；越界值 → **钳制到边界 +
 //! 警告**（M10：不再重置默认）；绝不 panic、绝不拒绝启动。
 //!
-//! 键位一览（v0.3.3，共 14 键；前 11 键同 v0.3.0）：
+//! 键位一览（v0.3.4，共 16 键）：
 //! | 键 | 类型 | 默认 | 取值范围 / 说明 |
 //! | --- | --- | --- | --- |
 //! | `autostart` | bool | `false` | 开机自启（写入启动快捷方式） |
-//! | `poll_interval_secs` | int | `60` | `15`–`300`，轮询间隔（越界钳制 + 警告） |
+//! | `poll_interval_secs` | int | `600` | 档位 `{60, 300, 600, 900, 1800}`（D-45；越界钳制 / 非档位吸附最近档 + 警告） |
 //! | `icon_style` | str | `"auto"` | `auto`/`light`/`dark`（整体风格提示键，v0.3.0 不参与渲染） |
 //! | `notifications_enabled` | bool | `true` | 低电量通知开关 |
 //! | `notification_silent` | bool | `false` | 通知静默（无提示音） |
@@ -22,6 +22,8 @@
 //! | `icon_font_tiers_enabled` | bool | `false` | 按电量分档着色（v0.3.3 #4；启用时单一字色入口隐藏） |
 //! | `icon_font_tier_thresholds` | int 数组 | `[20, 50]` | N-1 个边界（N 档 2..=5）；阈值含该值归上一档；1–99 严格递增（越界钳制 / 递进修复 + 警告） |
 //! | `icon_font_tier_colors` | str 数组 | `["#E81123", "#FFD21F", "#00CC6A"]` | N 个分档色（缺失补默认色、多余截断 + 警告） |
+//! | `icon_text_scale` | int | `100` | `60`–`140`，图标文本大小（%，D-48，越界钳制） |
+//! | `icon_bg_scale` | int | `100` | `60`–`100`，图标背景块大小（%，D-48；100% 已触及位图边界故为上限） |
 //!
 //! 废弃键（保留迁移语义）：
 //! - `low_threshold_warn`：迁移为 `low_threshold`（钳 5..=50）+ 警告；
@@ -32,12 +34,25 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-pub const DEFAULT_POLL_SECS: u64 = 60;
-pub const POLL_MIN_SECS: u64 = 15;
-pub const POLL_MAX_SECS: u64 = 300;
+/// 轮询间隔默认值（D-45：600 秒——电量变化约 1%–2%/小时，300s 偏勤快；
+/// 低电提醒及时性在阈值 ≥5% 时 10 分钟级延迟完全可接受）。
+pub const DEFAULT_POLL_SECS: u64 = 600;
+pub const POLL_MIN_SECS: u64 = 60;
+pub const POLL_MAX_SECS: u64 = 1800;
+/// 轮询档位（D-45）：设置窗口与配置解析共用；15/30/120 秒三档已移除
+/// （过短档位与零耗电理念相悖）。
+pub const POLL_TIERS_SECS: [u64; 5] = [60, 300, 600, 900, 1800];
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 pub const LOW_THRESHOLD_MIN: u8 = 5;
 pub const LOW_THRESHOLD_MAX: u8 = 50;
+/// 图标文本大小下限（%，D-48）。
+pub const ICON_TEXT_SCALE_MIN: u8 = 60;
+/// 图标文本大小上限（%，D-48）。
+pub const ICON_TEXT_SCALE_MAX: u8 = 140;
+/// 图标背景块大小下限（%，D-48）。
+pub const ICON_BG_SCALE_MIN: u8 = 60;
+/// 图标背景块大小上限（%，D-48）：100% 已触及位图边界，更大会溢出。
+pub const ICON_BG_SCALE_MAX: u8 = 100;
 /// 字体颜色与背景对比度下限（M9：<3.0 仅警告，不阻断）。
 pub const CONTRAST_FLOOR: f64 = 3.0;
 
@@ -347,18 +362,52 @@ pub fn contrast_ok(font: (u8, u8, u8), bg: (u8, u8, u8)) -> bool {
     contrast_ratio(font, bg) >= CONTRAST_FLOOR
 }
 
-/// 提亮（M11 闪烁：背景提亮约 40%，透明底时提亮字色）。
+/// 轮询间隔归一化（D-45）：先钳制到 [60, 1800]，再吸附到最近档位；
+/// 距离相同取更低档（更省电）。旧配置中被移除的 15/30/120 秒档由此归位
+/// （15/30 → 60，120 → 60）。设置窗口只写档位值，此函数保证 TOML 手改
+/// 任意值也落在档位上（设置窗口下拉才能正确回显）。
+pub fn normalize_poll_secs(v: u64) -> u64 {
+    let clamped = v.clamp(POLL_MIN_SECS, POLL_MAX_SECS);
+    POLL_TIERS_SECS
+        .iter()
+        .copied()
+        .min_by_key(|t| (t.abs_diff(clamped), *t))
+        .unwrap_or(DEFAULT_POLL_SECS)
+}
+
+/// 提亮（v0.3.4 #3 根因修复：向白色线性插值）。
+///
+/// 旧实现是乘法提亮 `v × (1 + factor)`：饱和通道封顶不动——纯红背景
+/// (255,0,0) 提亮后两帧位图完全相同；暗通道变化量 ~12/255 肉眼不可见。
+/// 这正是真机「低电闪烁未生效」的根因。改为向白插值
+/// `v + (255 − v) × factor` 后，任何非纯白色都有可感知的亮度跳变。
 pub fn brighten((r, g, b): (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
-    let f = |v: u8| -> u8 { ((v as f64 * (1.0 + factor)).min(255.0) + 0.5) as u8 };
+    let f = |v: u8| -> u8 { ((v as f64 + (255.0 - v as f64) * factor) + 0.5) as u8 };
     (f(r), f(g), f(b))
 }
 
-/// 配置（v0.3.0：11 键 + 废弃迁移）。
+/// 闪烁「提亮帧」取色（v0.3.4 #3）：一般颜色向白插值（`brighten`）；
+/// 近白色（对纯白对比度 ≤ 1.2，含纯白字 / 浅色底）反向向深灰 (0x1B,0x1B,0x1B)
+/// 插值——否则纯白文本的透明底图标闪烁两帧仍完全相同（可见性盲区）。
+pub fn flash_rgb(c: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
+    const DARK: (u8, u8, u8) = (0x1B, 0x1B, 0x1B);
+    if contrast_ratio(c, (0xFF, 0xFF, 0xFF)) <= 1.2 {
+        let f = |v: u8| -> u8 {
+            ((v as f64 * (1.0 - factor)) + (DARK.0 as f64 * factor) + 0.5) as u8
+        };
+        (f(c.0), f(c.1), f(c.2))
+    } else {
+        brighten(c, factor)
+    }
+}
+
+/// 配置（v0.3.4：16 键 + 废弃迁移）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// 开机自启（HKCU Run 单值）。
     pub autostart: bool,
-    /// 轮询间隔（秒），默认 60，范围 15..=300（越界钳制 + 警告）。
+    /// 轮询间隔（秒），默认 600（D-45），解析归一到档位
+    /// {60, 300, 600, 900, 1800}（越界钳制 / 非档位吸附最近档 + 警告）。
     pub poll_interval_secs: u64,
     /// 整体风格提示键（v0.2.0 遗留，v0.3.0 不参与渲染）。
     pub icon_style: IconStyle,
@@ -384,6 +433,11 @@ pub struct Config {
     pub icon_font_tier_thresholds: Vec<u8>,
     /// 分档颜色（N 个，默认红/黄/绿）。
     pub icon_font_tier_colors: Vec<RgbColor>,
+    /// 图标文本大小（% 相对基准字号，D-48），默认 100，范围 60..=140。
+    pub icon_text_scale: u8,
+    /// 图标背景块大小（% 相对位图内切块，D-48），默认 100，范围 60..=100
+    /// （100% 已触及位图边界，更大会溢出，故上限为 100）。
+    pub icon_bg_scale: u8,
 }
 
 impl Default for Config {
@@ -403,6 +457,8 @@ impl Default for Config {
             icon_font_tiers_enabled: false,
             icon_font_tier_thresholds: DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
             icon_font_tier_colors: DEFAULT_FONT_TIER_COLORS.to_vec(),
+            icon_text_scale: 100,
+            icon_bg_scale: 100,
         }
     }
 }
@@ -506,12 +562,24 @@ impl Config {
             match (key, &value) {
                 ("autostart", Value::Bool(b)) => cfg.autostart = *b,
                 ("poll_interval_secs", Value::Int(n)) => {
-                    // M10：越界钳制到 [15, 300] + 警告（不再重置默认）。
-                    let clamped = (*n).clamp(POLL_MIN_SECS, POLL_MAX_SECS);
-                    if clamped != *n {
-                        warn(key, &format!("out of range; clamped {n} -> {clamped}"));
+                    // D-45：钳制 [60, 1800] + 吸附最近档位（平局取更低档）。
+                    let norm = normalize_poll_secs(*n);
+                    if norm != *n {
+                        if *n < POLL_MIN_SECS || *n > POLL_MAX_SECS {
+                            warn(
+                                key,
+                                &format!("out of range {POLL_MIN_SECS}..={POLL_MAX_SECS}; clamped {n} -> {norm}"),
+                            );
+                        } else {
+                            warn(
+                                key,
+                                &format!(
+                                    "not a supported tier (one of {POLL_TIERS_SECS:?}); snapped {n} -> {norm}"
+                                ),
+                            );
+                        }
                     }
-                    cfg.poll_interval_secs = clamped;
+                    cfg.poll_interval_secs = norm;
                 }
                 ("icon_style", Value::Str(s)) => match s.as_str() {
                     "auto" => cfg.icon_style = IconStyle::Auto,
@@ -577,6 +645,23 @@ impl Config {
                     cfg.low_threshold = clamped as u8;
                 }
                 ("blink_enabled", Value::Bool(b)) => cfg.blink_enabled = *b,
+                ("icon_text_scale", Value::Int(n)) => {
+                    // D-48：越界钳制到 [60, 140] + 警告。
+                    let clamped =
+                        (*n).clamp(ICON_TEXT_SCALE_MIN as u64, ICON_TEXT_SCALE_MAX as u64);
+                    if clamped != *n {
+                        warn(key, &format!("out of range; clamped {n} -> {clamped}"));
+                    }
+                    cfg.icon_text_scale = clamped as u8;
+                }
+                ("icon_bg_scale", Value::Int(n)) => {
+                    // D-48：越界钳制到 [60, 100] + 警告（>100 会溢出位图）。
+                    let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
+                    if clamped != *n {
+                        warn(key, &format!("out of range; clamped {n} -> {clamped}"));
+                    }
+                    cfg.icon_bg_scale = clamped as u8;
+                }
                 ("icon_font_tiers_enabled", Value::Bool(b)) => {
                     cfg.icon_font_tiers_enabled = *b;
                 }
@@ -646,6 +731,8 @@ impl Config {
                     | "icon_font_family"
                     | "low_threshold"
                     | "blink_enabled"
+                    | "icon_text_scale"
+                    | "icon_bg_scale"
                     | "icon_font_tiers_enabled"
                     | "icon_font_tier_thresholds"
                     | "icon_font_tier_colors",
@@ -704,7 +791,9 @@ impl Config {
              blink_enabled = {}\n\
              icon_font_tiers_enabled = {}\n\
              icon_font_tier_thresholds = [{}]\n\
-             icon_font_tier_colors = [{}]\n",
+             icon_font_tier_colors = [{}]\n\
+             icon_text_scale = {}\n\
+             icon_bg_scale = {}\n",
             self.autostart,
             self.poll_interval_secs,
             self.icon_style.name(),
@@ -719,6 +808,8 @@ impl Config {
             self.icon_font_tiers_enabled,
             tier_thresholds,
             tier_colors,
+            self.icon_text_scale,
+            self.icon_bg_scale,
         )
     }
 
@@ -778,7 +869,8 @@ mod tests {
     fn defaults_match_v030_schema() {
         let c = Config::default();
         assert!(!c.autostart);
-        assert_eq!(c.poll_interval_secs, 60);
+        assert_eq!(c.poll_interval_secs, DEFAULT_POLL_SECS);
+        assert_eq!(c.poll_interval_secs, 600);
         assert_eq!(c.icon_style, IconStyle::Auto);
         assert!(c.notifications_enabled);
         assert!(!c.notification_silent);
@@ -788,12 +880,15 @@ mod tests {
         assert_eq!(c.icon_font_family, "Segoe UI");
         assert_eq!(c.low_threshold, 20);
         assert!(c.blink_enabled);
+        // D-48：文本/背景缩放默认 100%。
+        assert_eq!(c.icon_text_scale, 100);
+        assert_eq!(c.icon_bg_scale, 100);
     }
 
     #[test]
     fn parse_full_document() {
         let (c, w) = Config::parse(
-            "autostart = true\npoll_interval_secs = 30\nicon_style = \"dark\"\n\
+            "autostart = true\npoll_interval_secs = 300\nicon_style = \"dark\"\n\
              notifications_enabled = false\nnotification_silent = true\n\
              icon_shape = \"square\"\nicon_background = \"#0A6CFF\"\n\
              icon_font_color = \"#FFD21F\"\nicon_font_family = \"Consolas\"\n\
@@ -801,7 +896,7 @@ mod tests {
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.autostart);
-        assert_eq!(c.poll_interval_secs, 30);
+        assert_eq!(c.poll_interval_secs, 300);
         assert_eq!(c.icon_style, IconStyle::Dark);
         assert!(!c.notifications_enabled);
         assert!(c.notification_silent);
@@ -950,9 +1045,79 @@ mod tests {
         assert!((contrast_ratio((10, 10, 10), (10, 10, 10)) - 1.0).abs() < 1e-9);
         assert!(contrast_ok((255, 255, 255), (0x1F, 0x1F, 0x1F)));
         assert!(!contrast_ok((0x30, 0x30, 0x30), (0x1F, 0x1F, 0x1F)));
-        // 提亮 40%：31×1.4≈43.4 四舍五入 → 43 (0x2B)；封顶 255。
-        assert_eq!(brighten((0x1F, 0x1F, 0x1F), 0.4), (0x2B, 0x2B, 0x2B));
-        assert_eq!(brighten((255, 200, 0), 0.4), (255, 255, 0));
+        // 提亮 40%（v0.3.4 #3：向白插值）：31 → 31+224×0.4 = 120.6 → 121 (0x79)；
+        // 纯白封顶不动；纯红 → (255, 102, 102)（饱和通道也有可见跳变）。
+        assert_eq!(brighten((0x1F, 0x1F, 0x1F), 0.4), (0x79, 0x79, 0x79));
+        assert_eq!(brighten((255, 255, 255), 0.4), (255, 255, 255));
+        assert_eq!(brighten((255, 0, 0), 0.4), (255, 102, 102));
+        // flash_rgb：非近白色走 brighten；纯白（对白对比度 1.0 ≤ 1.2）反向
+        // 向深灰插值 255×0.6 + 0x1B×0.4 = 163.8 → 164，闪烁两帧必有差异。
+        assert_eq!(flash_rgb((255, 0, 0), 0.4), (255, 102, 102));
+        assert_eq!(flash_rgb((255, 255, 255), 0.4), (164, 164, 164));
+        // 近白浅底 #F2F2F2（对白对比度 ≈1.07）也走暗插值：242×0.6+27×0.4≈155。
+        let f = flash_rgb((0xF2, 0xF2, 0xF2), 0.4);
+        assert!(f.0 < 200, "{f:?}");
+    }
+
+    /// D-45：轮询间隔档位归一化——旧档位与任意值吸附最近档（平局取低）。
+    #[test]
+    fn poll_secs_snap_to_tiers() {
+        // 档位原值不动。
+        for t in POLL_TIERS_SECS {
+            assert_eq!(normalize_poll_secs(t), t);
+        }
+        // 被移除的旧档位：15/30/120 → 60。
+        assert_eq!(normalize_poll_secs(15), 60);
+        assert_eq!(normalize_poll_secs(30), 60);
+        assert_eq!(normalize_poll_secs(120), 60);
+        // 越界钳制：5 → 60，2400 → 1800。
+        assert_eq!(normalize_poll_secs(5), POLL_MIN_SECS);
+        assert_eq!(normalize_poll_secs(2400), POLL_MAX_SECS);
+        // 非档位值吸附最近档：200 → 300（|200-60|>|200-300|）；700 → 600。
+        assert_eq!(normalize_poll_secs(200), 300);
+        assert_eq!(normalize_poll_secs(700), 600);
+        // 平局取更低档：180 与 60/300 各差 120 → 取 60（更省电）。
+        assert_eq!(normalize_poll_secs(180), 60);
+        // 解析层：越界与非档位值都产生警告并落位。
+        let (c, w) = Config::parse("poll_interval_secs = 120\n");
+        assert_eq!(c.poll_interval_secs, 60);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].reason.contains("snapped"), "{w:?}");
+        let (c, w) = Config::parse("poll_interval_secs = 5\n");
+        assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].reason.contains("out of range"), "{w:?}");
+        // 档位值无警告。
+        let (c, w) = Config::parse("poll_interval_secs = 1800\n");
+        assert_eq!(c.poll_interval_secs, 1800);
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    /// D-48：文本/背景缩放键——解析、钳制、往返。
+    #[test]
+    fn icon_scale_keys_parse_clamp_roundtrip() {
+        let (c, w) = Config::parse("icon_text_scale = 130\nicon_bg_scale = 80\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.icon_text_scale, 130);
+        assert_eq!(c.icon_bg_scale, 80);
+        let (back, w2) = Config::parse(&c.to_toml());
+        assert!(w2.is_empty(), "{w2:?}");
+        assert_eq!(back, c);
+
+        // 越界钳制 + 警告：文本 200 → 140、20 → 60；背景 130 → 100（几何上限）。
+        let (c, w) = Config::parse("icon_text_scale = 200\nicon_bg_scale = 130\n");
+        assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MAX);
+        assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MAX);
+        assert_eq!(w.len(), 2);
+        assert!(w.iter().any(|x| x.key == "icon_text_scale"));
+        assert!(w.iter().any(|x| x.key == "icon_bg_scale"));
+        let (c, w) = Config::parse("icon_text_scale = 20\n");
+        assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MIN);
+        assert_eq!(w.len(), 1);
+        // 非整数 / 布尔 → 默认保留 + 警告。
+        let (c, w) = Config::parse("icon_text_scale = true\n");
+        assert_eq!(c.icon_text_scale, 100);
+        assert_eq!(w.len(), 1);
     }
 
     #[test]
