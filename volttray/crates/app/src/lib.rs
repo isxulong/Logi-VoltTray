@@ -11,6 +11,7 @@ pub mod config;
 pub mod core;
 pub mod debounce;
 pub mod observer;
+pub mod reconnect;
 
 pub use config::{
     brighten, contrast_ok, contrast_ratio, flash_rgb, font_tier_for_percent, normalize_font_tiers,
@@ -27,3 +28,6 @@ pub use core::{
 };
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
+pub use reconnect::{
+    EnumTransition, Reconnect, ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL,
+};

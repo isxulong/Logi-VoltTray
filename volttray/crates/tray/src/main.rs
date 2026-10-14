@@ -53,8 +53,8 @@ mod imp {
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
     use volttray_app::{
-        Alert, AppCore, Config, ConfigWatcher, Observer, PollDecision, SharedObserver, Snapshot,
-        TimeoutOutcome,
+        Alert, AppCore, Config, ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect,
+        SharedObserver, Snapshot, TimeoutOutcome, HANDLE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake};
@@ -141,6 +141,10 @@ mod imp {
         key: String,
         info: ChannelInfo,
         shared: SharedChannel,
+        /// 通道级连续查询超时计数（D-65）：单设备休眠只产生 2 次超时即
+        /// 停轮询；达到 HANDLE_INVALIDATE_THRESHOLD 说明整个通道（句柄）
+        /// 大概率已死（重启/重插/驱动重载），触发句柄失效 + 重枚举自愈。
+        timeout_streak: u32,
         slots: Vec<SlotState>,
     }
 
@@ -215,10 +219,25 @@ mod imp {
         let (features, is_hidpp1) = match hs {
             Handshake::Hidpp2(table) => (table, false),
             Handshake::Hidpp1 => (FeatureTable::new(), true),
-            Handshake::NoResponse => return None,
+            Handshake::NoResponse => {
+                // v0.3.9（A）：槽位扫描失败落设备层日志（状态变化/失败级）。
+                bootlog::note(&format!(
+                    "slot scan: {id} handshake no response (slot skipped)"
+                ));
+                return None;
+            }
         };
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
-        let reading = probe_battery(&mut t, &id, slot, &features, CURVE, is_hidpp1).ok()?;
+        let reading = match probe_battery(&mut t, &id, slot, &features, CURVE, is_hidpp1) {
+            Ok(r) => r,
+            Err(reason) => {
+                bootlog::note(&format!(
+                    "slot scan: {id} battery query failed reason={} (slot skipped)",
+                    reason.code()
+                ));
+                return None;
+            }
+        };
         // v0.3.0「?」修复：优先取真实设备名（HID++ DEVICE_NAME / 接收器配对名
         // 寄存器 0x2B5，见 name.rs 来源链）；取不到用干净回退，不出裸「?」。
         let raw_name = read_device_name(&mut t, slot, &features, is_hidpp1)
@@ -267,75 +286,157 @@ mod imp {
         let mut watcher = ConfigWatcher::new(cfg_path);
         // v0.3.6（D-62）：热重载告警去重——同一组迁移告警只上报一次。
         let mut last_reload_warnings: Vec<String> = Vec::new();
-        let mut last_enum = Instant::now() - Duration::from_secs(60);
+        // v0.3.9（D-65）：重枚举/重连状态机——无设备态退避重试、立即刷新
+        // 强制重枚举、句柄失效自愈的唯一裁决点（纯逻辑，app 层单测覆盖）。
+        let mut reconnect = Reconnect::new();
         'outer: loop {
             if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
                 return;
             }
 
-            // 30s 重新枚举一次（或当前无通道时每次循环都枚举）。
-            if last_enum.elapsed() >= Duration::from_secs(30) || channels.is_empty() {
-                last_enum = Instant::now();
-                if let Ok(api) = hidapi::HidApi::new() {
-                    let mut seen: Vec<String> = Vec::new();
-                    for info in enumerate_channels(&api) {
-                        let key = info.key();
-                        seen.push(key.clone());
-                        if let Some(state) = channels.iter_mut().find(|c| c.key == key) {
-                            // 已有通道：补扫新出现的槽位（休眠唤醒 / 新配对）。
-                            for slot in SCAN_SLOTS {
-                                if state.slots.iter().any(|s| s.index == slot) {
+            // 重枚举裁决（D-65）：正常态沿用 30s 门控；无设备且连候选通道
+            // 都没有时按 30s/60s/120s 退避（仅主机侧枚举、零射频，不违反
+            // 零耗电约束）；「立即刷新」/句柄失效置 force → 立即重枚举。
+            let enum_now = Instant::now();
+            if reconnect.should_enumerate(enum_now, !channels.is_empty()) {
+                match hidapi::HidApi::new() {
+                    Ok(api) => {
+                        // v0.3.9（A）：每次枚举结果落设备层日志（候选通道数 +
+                        // 路径/VID/PID），重启后「找不到设备」直接可见。
+                        let found = enumerate_channels(&api);
+                        bootlog::note(&format!(
+                            "hid enum: {} hidpp candidate channel(s)",
+                            found.len()
+                        ));
+                        for info in &found {
+                            let short = info
+                                .short_path
+                                .as_deref()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let long = info
+                                .long_path
+                                .as_deref()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            bootlog::note(&format!(
+                                "hid enum candidate: vid=0x{:04X} pid=0x{:04X} tag={} product={} short={} long={}",
+                                volttray_protocol::LOGITECH_VID,
+                                info.pid,
+                                info.tag,
+                                info.product,
+                                short,
+                                long
+                            ));
+                        }
+                        let mut seen: Vec<String> = Vec::new();
+                        for info in found {
+                            let key = info.key();
+                            seen.push(key.clone());
+                            if let Some(state) = channels.iter_mut().find(|c| c.key == key) {
+                                // 已有通道：补扫新出现的槽位（休眠唤醒 / 新配对）。
+                                for slot in SCAN_SLOTS {
+                                    if state.slots.iter().any(|s| s.index == slot) {
+                                        continue;
+                                    }
+                                    if let Some(s) =
+                                        try_slot(&core, &observer, &state.shared, &state.info, slot)
+                                    {
+                                        state.slots.push(s);
+                                    }
+                                }
+                                continue;
+                            }
+                            // v0.3.9（A）：通道打开成功/失败（含错误原因）落日志。
+                            let ch = match HidDeviceChannel::open(
+                                &api,
+                                info.short_path.as_deref(),
+                                info.long_path.as_deref(),
+                            ) {
+                                Ok(ch) => ch,
+                                Err(e) => {
+                                    bootlog::note(&format!(
+                                        "hid open failed: pid=0x{:04X} tag={}: {e}",
+                                        info.pid, info.tag
+                                    ));
                                     continue;
                                 }
-                                if let Some(s) =
-                                    try_slot(&core, &observer, &state.shared, &state.info, slot)
-                                {
-                                    state.slots.push(s);
+                            };
+                            bootlog::note(&format!(
+                                "hid open ok: pid=0x{:04X} tag={}",
+                                info.pid, info.tag
+                            ));
+                            let shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                            let mut slots = Vec::new();
+                            for slot in SCAN_SLOTS {
+                                if let Some(s) = try_slot(&core, &observer, &shared, &info, slot) {
+                                    slots.push(s);
                                 }
                             }
-                            continue;
+                            channels.push(ChannelState {
+                                key,
+                                info,
+                                shared,
+                                timeout_streak: 0,
+                                slots,
+                            });
                         }
-                        let Ok(ch) = HidDeviceChannel::open(
-                            &api,
-                            info.short_path.as_deref(),
-                            info.long_path.as_deref(),
-                        ) else {
-                            continue;
-                        };
-                        let shared = SharedChannel(Arc::new(Mutex::new(ch)));
-                        let mut slots = Vec::new();
-                        for slot in SCAN_SLOTS {
-                            if let Some(s) = try_slot(&core, &observer, &shared, &info, slot) {
-                                slots.push(s);
-                            }
-                        }
-                        channels.push(ChannelState {
-                            key,
-                            info,
-                            shared,
-                            slots,
-                        });
-                    }
-                    // 掉线通道整体移除（接收器拔出）。
-                    let mut i = 0;
-                    while i < channels.len() {
-                        if !seen.contains(&channels[i].key) {
-                            let gone = channels.remove(i);
-                            for s in &gone.slots {
-                                if let Ok(mut c) = core.lock() {
-                                    c.remove_device(&s.id);
+                        // 掉线通道整体移除（接收器拔出）。
+                        let mut i = 0;
+                        while i < channels.len() {
+                            if !seen.contains(&channels[i].key) {
+                                let gone = channels.remove(i);
+                                for s in &gone.slots {
+                                    if let Ok(mut c) = core.lock() {
+                                        c.remove_device(&s.id);
+                                    }
+                                    if let Ok(mut o) = observer.lock() {
+                                        o.push(DiagEvent::new(
+                                            Layer::App,
+                                            DiagKind::DeviceLost { id: s.id.clone() },
+                                        ));
+                                    }
                                 }
-                                if let Ok(mut o) = observer.lock() {
-                                    o.push(DiagEvent::new(
-                                        Layer::App,
-                                        DiagKind::DeviceLost { id: s.id.clone() },
-                                    ));
-                                }
+                            } else {
+                                i += 1;
                             }
-                        } else {
-                            i += 1;
                         }
                     }
+                    Err(e) => {
+                        bootlog::note(&format!("hid enum failed: HidApi init error: {e}"));
+                    }
+                }
+                // 进入/退出「无设备」态：事件级日志（诊断流 + bootlog 双写）。
+                let total_slots: usize = channels.iter().map(|c| c.slots.len()).sum();
+                match reconnect.record_result(enum_now, total_slots) {
+                    Some(EnumTransition::EnteredNoDevice) => {
+                        bootlog::note(
+                            "no-device: entered (0 registered slot after enum); \
+                             backoff enum retry 30s/60s/120s (host-side only, zero rf)",
+                        );
+                        if let Ok(mut o) = observer.lock() {
+                            o.push(DiagEvent::new(
+                                Layer::App,
+                                DiagKind::Info {
+                                    message: "no-device: entered; enum backoff 30s/60s/120s".into(),
+                                },
+                            ));
+                        }
+                    }
+                    Some(EnumTransition::ExitedNoDevice) => {
+                        bootlog::note(
+                            "no-device: exited (device registered); resume normal polling",
+                        );
+                        if let Ok(mut o) = observer.lock() {
+                            o.push(DiagEvent::new(
+                                Layer::App,
+                                DiagKind::Info {
+                                    message: "no-device: exited; resume normal polling".into(),
+                                },
+                            ));
+                        }
+                    }
+                    None => {}
                 }
             }
 
@@ -348,6 +449,9 @@ mod imp {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+                // D-65：本轮判定为「句柄已死」的通道 key，循环外统一移除并
+                // 触发重枚举（移除期间不能就地改 channels，先收集）。
+                let mut dead_channels: Vec<String> = Vec::new();
                 for ch_state in &mut channels {
                     let mut i = 0;
                     while i < ch_state.slots.len() {
@@ -373,6 +477,7 @@ mod imp {
                         match reading {
                             Ok(r) => {
                                 s.hard_failures = 0;
+                                ch_state.timeout_streak = 0;
                                 if let Some(a) = core.record_success(&s.id, r, now) {
                                     let name = core
                                         .entries()
@@ -387,7 +492,25 @@ mod imp {
                             Err(reason) => match reason {
                                 // 查询超时 = 疑似休眠：连击 2 次暂停轮询（不注销、
                                 // 不重试——对休眠中的鼠标发查询才是真费电，D-33）。
+                                // D-65：同时累计通道级超时连击——真休眠 2 次即
+                                // 停轮询；持续超时（含唤醒探测仍超时）说明句柄
+                                // 已死，达阈值走句柄失效 + 重枚举自愈。
                                 UnknownReason::QueryTimeout => {
+                                    ch_state.timeout_streak += 1;
+                                    bootlog::note(&format!(
+                                        "battery query failed id={} reason=query_timeout (sleep path, channel timeout streak {})",
+                                        s.id, ch_state.timeout_streak
+                                    ));
+                                    if ch_state.timeout_streak >= HANDLE_INVALIDATE_THRESHOLD {
+                                        bootlog::note(&format!(
+                                            "channel handle invalid: key={} consecutive timeouts {} >= {}; invalidate + re-enumerate",
+                                            ch_state.key,
+                                            ch_state.timeout_streak,
+                                            HANDLE_INVALIDATE_THRESHOLD
+                                        ));
+                                        dead_channels.push(ch_state.key.clone());
+                                        break;
+                                    }
                                     if core.record_timeout(&s.id) == TimeoutOutcome::EnteredSleep {
                                         if let Ok(mut o) = observer.lock() {
                                             o.push(DiagEvent::new(
@@ -404,6 +527,10 @@ mod imp {
                                 }
                                 // 接收器报告设备消失：立即注销（不等 3 次）。
                                 UnknownReason::DeviceGone => {
+                                    bootlog::note(&format!(
+                                        "battery query failed id={} reason=device_gone (deregistered immediately)",
+                                        s.id
+                                    ));
                                     core.record_failure(&s.id, true);
                                     let gone_slot = ch_state.slots.remove(i);
                                     if let Ok(mut o) = observer.lock() {
@@ -414,19 +541,26 @@ mod imp {
                                     }
                                 }
                                 // 其它持续失败（I/O / 映射 / 特性缺失等）：沿用
-                                // 3 连败注销，靠重枚举重新注册（原 v0.2.0 语义）。
+                                // 3 连败注销（D-65：阈值常量 HANDLE_INVALIDATE_THRESHOLD），
+                                // 句柄失效 + 重枚举自愈。
                                 _ => {
                                     s.hard_failures += 1;
-                                    let gone = s.hard_failures >= 3;
+                                    bootlog::note(&format!(
+                                        "battery query failed id={} reason={} (hard failure {}/{})",
+                                        s.id,
+                                        reason.code(),
+                                        s.hard_failures,
+                                        HANDLE_INVALIDATE_THRESHOLD
+                                    ));
+                                    let gone = s.hard_failures >= HANDLE_INVALIDATE_THRESHOLD;
                                     core.record_failure(&s.id, gone);
                                     if gone {
-                                        let gone_slot = ch_state.slots.remove(i);
-                                        if let Ok(mut o) = observer.lock() {
-                                            o.push(DiagEvent::new(
-                                                Layer::App,
-                                                DiagKind::DeviceLost { id: gone_slot.id },
-                                            ));
-                                        }
+                                        bootlog::note(&format!(
+                                            "channel handle invalid: key={} hard failures reached {}; invalidate + re-enumerate",
+                                            ch_state.key, HANDLE_INVALIDATE_THRESHOLD
+                                        ));
+                                        dead_channels.push(ch_state.key.clone());
+                                        break;
                                     } else {
                                         i += 1;
                                     }
@@ -434,6 +568,26 @@ mod imp {
                             },
                         }
                     }
+                }
+                // D-65：句柄失效自愈——整条通道（句柄 + 全部槽位缓存）作废，
+                // 剩余槽位置为离线，然后强制下一轮重枚举（主机侧操作，零射频）。
+                if !dead_channels.is_empty() {
+                    let mut removed_ids: Vec<String> = Vec::new();
+                    channels.retain(|c| {
+                        if dead_channels.contains(&c.key) {
+                            removed_ids.extend(c.slots.iter().map(|s| s.id.clone()));
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for id in removed_ids {
+                        core.record_failure(&id, true);
+                        if let Ok(mut o) = observer.lock() {
+                            o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id }));
+                        }
+                    }
+                    reconnect.invalidate_handles();
                 }
                 for id in core.newly_gray(now) {
                     alerts.push((
@@ -490,14 +644,22 @@ mod imp {
             }
 
             // 分片睡眠，响应立即刷新 / 唤醒信号 / 退出。
-            let interval = match core.lock() {
+            // D-65：睡眠预算由重连状态机裁决——正常态用轮询周期；无设备态
+            // 按退避节奏提前醒来重枚举；有强制重枚举请求时立即醒。
+            let poll = match core.lock() {
                 Ok(c) => c.poll_interval(),
                 Err(_) => Duration::from_secs(60),
             };
+            let interval = reconnect.next_wake(Instant::now(), !channels.is_empty(), poll);
             let deadline = Instant::now() + interval;
             while Instant::now() < deadline {
                 match cmd.recv_timeout(Duration::from_millis(200)) {
-                    Ok(IoCmd::RefreshNow) => continue 'outer,
+                    // D-65：「立即刷新」必须先重枚举再查询——重启/重插后
+                    // 缓存句柄可能已失效，只查旧句柄等于没刷。
+                    Ok(IoCmd::RefreshNow) => {
+                        reconnect.request_refresh();
+                        continue 'outer;
+                    }
                     // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
                     // 恢复延迟取决于用户动鼠标的那一刻，而不是轮询周期。
                     Ok(IoCmd::WakeSignal) => {
