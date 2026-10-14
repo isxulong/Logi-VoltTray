@@ -464,7 +464,9 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
         // 类可能已注册（重复打开）：已存在时 ATOM 为 0，属正常，不视为失败。
         let atom = RegisterClassW(&wc);
         if atom == 0 {
-            crate::bootlog::note("settings: RegisterClassW 返回 0（类注册失败；若类已存在则属正常）");
+            crate::bootlog::note(
+                "settings: RegisterClassW 返回 0（类注册失败；若类已存在则属正常）",
+            );
         }
 
         // v0.3.6：自定义字体颜色会话内保留（往返切换不丢已选色）。
