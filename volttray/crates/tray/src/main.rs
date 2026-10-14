@@ -610,7 +610,9 @@ mod imp {
                 (c, w)
             }
             Err(e) => {
-                bootlog::note(&format!("config load failed ({e}), falling back to defaults"));
+                bootlog::note(&format!(
+                    "config load failed ({e}), falling back to defaults"
+                ));
                 let c = Config::default();
                 if let Some(parent) = cfg_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -675,7 +677,10 @@ mod imp {
         let initial = icon_text(None, false);
         let Some(first_icon) = cache.icon_for(IconColor::Default, &initial, false) else {
             bootlog::note("icon cache init failed: default frame missing");
-            bootlog::fatal_box("LogiVoltTray 启动失败", "托盘图标预渲染失败（图标缓存未生成默认帧），程序即将退出。");
+            bootlog::fatal_box(
+                "LogiVoltTray 启动失败",
+                "托盘图标预渲染失败（图标缓存未生成默认帧），程序即将退出。",
+            );
             return 1;
         };
         let (menu_obj, mut ids) = build_menu(

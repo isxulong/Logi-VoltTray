@@ -62,11 +62,7 @@ fn open_in(dir: &Path) -> Option<File> {
             let _ = std::fs::remove_file(&path);
         }
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
+    OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 /// 初始化启动日志（幂等）：逐级尝试 APPDATA 配置目录 → EXE 同目录 → TEMP。
@@ -76,7 +72,9 @@ pub fn init() {
         return;
     }
     let appdata = std::env::var_os("APPDATA").map(|v| PathBuf::from(v).join("LogiVoltTray"));
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
     let temp = std::env::var_os("TEMP").map(PathBuf::from);
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(d) = appdata.as_ref() {
@@ -88,7 +86,10 @@ pub fn init() {
     if let Some(d) = temp.as_ref() {
         dirs.push(d.clone());
     }
-    let preferred = dirs.first().map(|d| d.join(LOG_FILE)).unwrap_or_else(|| PathBuf::from(LOG_FILE));
+    let preferred = dirs
+        .first()
+        .map(|d| d.join(LOG_FILE))
+        .unwrap_or_else(|| PathBuf::from(LOG_FILE));
     for d in &dirs {
         if let Some(f) = open_in(d) {
             let _ = LOG_PATH.set(d.join(LOG_FILE));
@@ -172,7 +173,10 @@ pub fn install_panic_hook() {
         let cur = unsafe { GetCurrentThreadId() };
         let on_main = MAIN_TID.get().is_some_and(|m| *m == cur);
         if on_main {
-            fatal_box("LogiVoltTray 发生错误", &format!("程序遇到内部错误，即将退出。\n\n{info}"));
+            fatal_box(
+                "LogiVoltTray 发生错误",
+                &format!("程序遇到内部错误，即将退出。\n\n{info}"),
+            );
         }
     }));
 }
@@ -201,7 +205,11 @@ mod tests {
     #[test]
     fn open_in_creates_dir_and_rotates_oversized_log() {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("volttray-bootlog-test-{}-{}", std::process::id(), line!()));
+        dir.push(format!(
+            "volttray-bootlog-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(open_in(&dir).is_some(), "missing dir must be auto-created");
         assert!(dir.join(LOG_FILE).is_file());
