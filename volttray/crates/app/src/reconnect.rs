@@ -1,6 +1,10 @@
 //! 重枚举与重连裁决（v0.3.9，D-65）：无设备态退避重试、「立即刷新」强制
 //! 重枚举、句柄失效自愈的纯逻辑唯一裁决点。
 //!
+//! v0.3.10（D-67）新增 [`ChannelLiveness`]：通道句柄活性改按「轮」裁决
+//! （整轮零应答才记一次连击），修复按「次」累计导致的多设备同睡误判死
+//! （P1）；唤醒探测静默单独计数（P3）。
+//!
 //! 背景（真机报告：系统重启后托盘常驻「?」且手动刷新无效）：
 //! - v0.3.8 的 IO 循环在开机自启早于 USB 接收器/驱动就绪时枚举到 0 个设备，
 //!   随后按轮询间隔（默认 600s）睡眠——「无设备」态下一次自动重试最晚
@@ -30,7 +34,13 @@ pub const ENUM_BACKOFF_STEPS: [Duration; 3] = [
 
 /// 连续非超时类硬失败（I/O 错误等）达到该次数即判定通道句柄失效：
 /// 作废缓存句柄并强制重新枚举一次（主机侧操作，零射频成本）。
+/// v0.3.10（D-67）起同时作为「整轮零应答静默连击」的判死轮数。
 pub const HANDLE_INVALIDATE_THRESHOLD: u32 = 3;
+
+/// 唤醒探测静默连击判死轮数（v0.3.10，D-67）：设备已知休眠，探测静默
+/// 是常态（深睡唤醒慢），单次偶发超时不足以判句柄死——放宽到 2 轮，
+/// 代价上限是偶发假离线 ≤ 一个重枚举周期（30s）自愈。
+pub const WAKE_PROBE_INVALIDATE_THRESHOLD: u32 = 2;
 
 /// 枚举结果的态迁移（供 IO 线程写诊断日志/事件）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +49,89 @@ pub enum EnumTransition {
     EnteredNoDevice,
     /// 本次枚举后退出「无设备」态（重新枚举到设备，恢复正常轮询）。
     ExitedNoDevice,
+}
+
+/// 一轮轮询中单个槽位的查询结果分类（v0.3.10，D-67），供
+/// [`ChannelLiveness`] 做「整轮零应答」裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOutcome {
+    /// 成功读到电量。
+    Success,
+    /// 有字节应答但无法产出电量（错误帧 / 格式异常 / 映射失败 / 设备消失
+    /// 通知等）——证明通道句柄活着，只是这台设备给不出电量。
+    Responded,
+    /// 查询超时（设备休眠与句柄死亡无法区分，只能按轮裁决）。
+    Timeout,
+    /// I/O 错误（句柄级证据；同样按轮裁决，避免单次抖动误杀）。
+    IoError,
+}
+
+/// 通道句柄活性裁决（v0.3.10，D-67）：按「轮」累计，不再按「次」。
+///
+/// v0.3.9 的通道级超时连击按次累计且跨槽位不去重：同一接收器挂 ≥2 台
+/// 设备同时休眠时，第 2 轮轮询内连击就达阈值，把正常休眠误判成句柄死亡
+/// （设备假离线、槽位缓存作废，且此后每 30s 对休眠槽位主动握手探测——
+/// 违反零鼠标电池红线）。本裁决把口径改为：
+///
+/// - **整轮零应答才记 1 次静默连击**：一轮内所有被查询槽位全部
+///   Timeout/IoError、没有任何 Success/Responded（字节应答证明句柄活着，
+///   立即清零）；本轮无可查询槽位（全部休眠 Skip）不裁决、计数冻结；
+/// - 普通轮询静默连击连续达 [`HANDLE_INVALIDATE_THRESHOLD`] 轮才判死；
+/// - **唤醒探测单独计数**（设备已知休眠、静默是常态）：连续达
+///   [`WAKE_PROBE_INVALIDATE_THRESHOLD`] 轮探测全静默才判死——单次偶发
+///   探测超时不再导致整通道重建（≤30s 自愈场景也不发生）；
+/// - 判死返回 true，由 IO 线程作废通道（句柄 + 槽位缓存）并强制重枚举
+///   自愈（主机侧操作，零射频）。
+///
+/// 每个通道一个实例（IO 线程按 ChannelState 持有），Instant 无关、纯计数。
+#[derive(Debug, Clone, Default)]
+pub struct ChannelLiveness {
+    /// 连续「普通轮询整轮零应答」的轮数。
+    silent_rounds: u32,
+    /// 连续「唤醒探测整轮静默」的轮数。
+    probe_silent_rounds: u32,
+}
+
+impl ChannelLiveness {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前普通轮询静默连击轮数（日志/测试观测用）。
+    pub fn silent_rounds(&self) -> u32 {
+        self.silent_rounds
+    }
+
+    /// 当前唤醒探测静默连击轮数（日志/测试观测用）。
+    pub fn probe_silent_rounds(&self) -> u32 {
+        self.probe_silent_rounds
+    }
+
+    /// 登记一轮轮询结果。`normal` = 本轮对非休眠槽位发起查询的结果；
+    /// `probe` = 本轮对休眠槽位发起唤醒探测的结果（两类都可能为空——
+    /// 全部 Skip 的轮次两个都传空切片，不裁决、计数冻结）。
+    /// 返回 true = 判定通道句柄已死，应作废并强制重枚举。
+    pub fn note_round(&mut self, normal: &[SlotOutcome], probe: &[SlotOutcome]) -> bool {
+        let alive = normal
+            .iter()
+            .chain(probe.iter())
+            .any(|o| matches!(o, SlotOutcome::Success | SlotOutcome::Responded));
+        if alive {
+            // 有字节应答 = 句柄活着，两类连击都清零。
+            self.silent_rounds = 0;
+            self.probe_silent_rounds = 0;
+            return false;
+        }
+        // 此后 normal / probe 中只可能剩 Timeout / IoError。
+        if !normal.is_empty() {
+            self.silent_rounds = self.silent_rounds.saturating_add(1);
+        }
+        if !probe.is_empty() {
+            self.probe_silent_rounds = self.probe_silent_rounds.saturating_add(1);
+        }
+        self.silent_rounds >= HANDLE_INVALIDATE_THRESHOLD
+            || self.probe_silent_rounds >= WAKE_PROBE_INVALIDATE_THRESHOLD
+    }
 }
 
 /// 重枚举/重连状态机（IO 线程持有，Instant 注入可测）。
@@ -340,5 +433,109 @@ mod tests {
             ),
             Duration::ZERO
         );
+    }
+
+    use super::{ChannelLiveness, SlotOutcome as SO, WAKE_PROBE_INVALIDATE_THRESHOLD};
+
+    /// D-67 回归断言 1（P1）：多设备通道部分/全部槽位正常休眠不判死——
+    /// 2 槽位通道两轮各全部超时（恰好是 D-33 的合法休眠边界，
+    /// SLEEP_AFTER_TIMEOUTS=2）→ 不得 invalidate；第 3 轮起两槽位都进入
+    /// Sleeping、本轮零查询（全 Skip）→ 计数冻结，永不 invalidate。
+    /// v0.3.9 按次累计时第 2 轮第 1 个超时就判死（streak 3 >= 3）。
+    #[test]
+    fn liveness_multi_device_normal_sleep_not_judged_dead() {
+        let mut l = ChannelLiveness::new();
+        // 第 1 轮：A、B 各超时 1 次 → 整轮零应答，连击 1，不判死。
+        assert!(!l.note_round(&[SO::Timeout, SO::Timeout], &[]));
+        assert_eq!(l.silent_rounds(), 1);
+        // 第 2 轮：A、B 第 2 次超时（合法休眠边界）→ 连击 2，仍不判死。
+        assert!(!l.note_round(&[SO::Timeout, SO::Timeout], &[]));
+        assert_eq!(l.silent_rounds(), 2);
+        // 第 3 轮起：两台都进 Sleeping，全 Skip，本轮零查询 → 不裁决、冻结。
+        for _ in 0..10 {
+            assert!(!l.note_round(&[], &[]));
+        }
+        assert_eq!(l.silent_rounds(), 2, "无可查询槽位的轮次不得改变连击");
+        // 3 槽位通道同理：一轮 3 次超时只记 1 轮连击，两轮不超阈值。
+        let mut l3 = ChannelLiveness::new();
+        assert!(!l3.note_round(&[SO::Timeout, SO::Timeout, SO::Timeout], &[]));
+        assert!(!l3.note_round(&[SO::Timeout, SO::Timeout, SO::Timeout], &[]));
+        assert_eq!(l3.silent_rounds(), 2);
+    }
+
+    /// D-67 回归断言 2（P1）：连续 3 轮整轮零应答才判死；任一轮有 1 次
+    /// 成功/字节应答即清零。
+    #[test]
+    fn liveness_only_full_silent_rounds_count_and_any_answer_resets() {
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        // 第 3 轮整轮静默 → 判死（句柄失效自愈路径）。
+        assert!(l.note_round(&[SO::Timeout], &[]));
+        // 任一轮有 1 次成功 → 连击清零。
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::Timeout, SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout, SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Success, SO::Timeout], &[]));
+        assert_eq!(l.silent_rounds(), 0, "一次成功即清零");
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        // 有字节应答但给不出电量（错误帧等）同样证明句柄活着 → 清零。
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Responded, SO::Timeout], &[]));
+        assert_eq!(l.silent_rounds(), 0, "字节应答（错误帧）即清零");
+    }
+
+    /// D-67（P2 配套）：句柄真死（接收器重插/驱动重载）时每个槽位每轮
+    /// 都 I/O 报错——IoError 与 Timeout 同属静默证据，3 轮判死并自愈。
+    #[test]
+    fn liveness_dead_handle_io_errors_invalidate_after_three_rounds() {
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::IoError, SO::IoError], &[]));
+        assert!(!l.note_round(&[SO::IoError, SO::IoError], &[]));
+        assert!(l.note_round(&[SO::IoError, SO::IoError], &[]));
+        // 单设备通道句柄死亡（P2 场景）：同样 3 轮判死 → 重枚举重开句柄。
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::IoError], &[]));
+        assert!(!l.note_round(&[SO::IoError], &[]));
+        assert!(l.note_round(&[SO::IoError], &[]));
+    }
+
+    /// D-67 回归（P3-唤醒探测）：设备已知休眠后的唤醒探测单独计数——
+    /// 深睡唤醒慢导致 1 次探测超时不判死（v0.3.9 会整通道重建、假离线），
+    /// 连续 2 轮探测全静默才判死；普通连击与探测连击互不混算。
+    #[test]
+    fn liveness_wake_probe_silence_needs_two_rounds() {
+        let mut l = ChannelLiveness::new();
+        // 设备经 2 次超时进入休眠（普通连击 2，未达阈值）。
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        // 休眠期全 Skip 的轮次冻结计数。
+        assert!(!l.note_round(&[], &[]));
+        // 第 1 次唤醒探测超时（深睡唤醒慢）：不判死——这是与 v0.3.9 的
+        // 行为差异点（旧实现此处 streak=3 直接整通道作废）。
+        assert!(!l.note_round(&[], &[SO::Timeout]));
+        assert_eq!(l.probe_silent_rounds(), 1);
+        assert_eq!(l.silent_rounds(), 2, "探测超时不计入普通连击");
+        // 连续第 2 轮探测仍静默 → 判死（句柄确死时仍能自愈）。
+        assert!(l.note_round(&[], &[SO::Timeout]));
+        assert_eq!(WAKE_PROBE_INVALIDATE_THRESHOLD, 2);
+        // 探测成功（设备唤醒）→ 两类连击都清零。
+        let mut l = ChannelLiveness::new();
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[SO::Timeout], &[]));
+        assert!(!l.note_round(&[], &[SO::Timeout]));
+        assert!(!l.note_round(&[], &[SO::Success]));
+        assert_eq!(l.silent_rounds(), 0);
+        assert_eq!(l.probe_silent_rounds(), 0);
+    }
+
+    /// D-67 常量锁定：判死阈值口径。
+    #[test]
+    fn liveness_thresholds_locked() {
+        assert_eq!(HANDLE_INVALIDATE_THRESHOLD, 3);
+        assert_eq!(WAKE_PROBE_INVALIDATE_THRESHOLD, 2);
     }
 }

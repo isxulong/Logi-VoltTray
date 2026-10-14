@@ -53,8 +53,9 @@ mod imp {
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
     use volttray_app::{
-        Alert, AppCore, Config, ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect,
-        SharedObserver, Snapshot, TimeoutOutcome, HANDLE_INVALIDATE_THRESHOLD,
+        Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer,
+        PollDecision, Reconnect, SharedObserver, SlotOutcome, Snapshot, TimeoutOutcome,
+        HANDLE_INVALIDATE_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake};
@@ -141,10 +142,10 @@ mod imp {
         key: String,
         info: ChannelInfo,
         shared: SharedChannel,
-        /// 通道级连续查询超时计数（D-65）：单设备休眠只产生 2 次超时即
-        /// 停轮询；达到 HANDLE_INVALIDATE_THRESHOLD 说明整个通道（句柄）
-        /// 大概率已死（重启/重插/驱动重载），触发句柄失效 + 重枚举自愈。
-        timeout_streak: u32,
+        /// 通道句柄活性裁决（v0.3.10，D-67）：按「轮」累计静默连击——
+        /// 整轮零应答才记 1 次；多设备同睡（正常休眠边界内）不判死；
+        /// 唤醒探测静默单独计数。判死才作废句柄 + 强制重枚举自愈。
+        liveness: ChannelLiveness,
         slots: Vec<SlotState>,
     }
 
@@ -289,6 +290,9 @@ mod imp {
         // v0.3.9（D-65）：重枚举/重连状态机——无设备态退避重试、立即刷新
         // 强制重枚举、句柄失效自愈的唯一裁决点（纯逻辑，app 层单测覆盖）。
         let mut reconnect = Reconnect::new();
+        // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
+        // 一次的例行枚举在集合未变时不重复全量落盘（单会话日志体积上限）。
+        let mut last_enum_sig: Option<String> = None;
         'outer: loop {
             if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
                 return;
@@ -301,39 +305,86 @@ mod imp {
             if reconnect.should_enumerate(enum_now, !channels.is_empty()) {
                 match hidapi::HidApi::new() {
                     Ok(api) => {
-                        // v0.3.9（A）：每次枚举结果落设备层日志（候选通道数 +
-                        // 路径/VID/PID），重启后「找不到设备」直接可见。
+                        // v0.3.10（P2）：本轮枚举是否由「立即刷新」/句柄失效
+                        // 强制触发——强制轮对已有通道一并重开句柄（通道 key
+                        // 不变不代表缓存句柄还活着：接收器同口重插/驱动重载
+                        // 后旧句柄已死，不重开则刷新仍打在死句柄上）。
+                        let forced = reconnect.pending_force();
                         let found = enumerate_channels(&api);
-                        bootlog::note(&format!(
-                            "hid enum: {} hidpp candidate channel(s)",
-                            found.len()
-                        ));
-                        for info in &found {
-                            let short = info
-                                .short_path
-                                .as_deref()
-                                .map(|p| p.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            let long = info
-                                .long_path
-                                .as_deref()
-                                .map(|p| p.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+                        // v0.3.10（P3-日志）：候选集合签名未变则例行枚举不落
+                        // 日志——仅集合变化（或下方 Err 臂的枚举失败）时记录，
+                        // 与「只记状态变化与失败」口径一致。
+                        let enum_sig = {
+                            let mut parts: Vec<String> = found.iter().map(|i| i.key()).collect();
+                            parts.sort();
+                            parts.join(";")
+                        };
+                        if last_enum_sig.as_deref() != Some(enum_sig.as_str()) {
+                            // v0.3.9（A）：枚举结果落设备层日志（候选通道数 +
+                            // 路径/VID/PID），重启后「找不到设备」直接可见。
                             bootlog::note(&format!(
-                                "hid enum candidate: vid=0x{:04X} pid=0x{:04X} tag={} product={} short={} long={}",
-                                volttray_protocol::LOGITECH_VID,
-                                info.pid,
-                                info.tag,
-                                info.product,
-                                short,
-                                long
+                                "hid enum: {} hidpp candidate channel(s)",
+                                found.len()
                             ));
+                            for info in &found {
+                                let short = info
+                                    .short_path
+                                    .as_deref()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                let long = info
+                                    .long_path
+                                    .as_deref()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                bootlog::note(&format!(
+                                    "hid enum candidate: vid=0x{:04X} pid=0x{:04X} tag={} product={} short={} long={}",
+                                    volttray_protocol::LOGITECH_VID,
+                                    info.pid,
+                                    info.tag,
+                                    info.product,
+                                    short,
+                                    long
+                                ));
+                            }
+                            last_enum_sig = Some(enum_sig);
                         }
                         let mut seen: Vec<String> = Vec::new();
                         for info in found {
                             let key = info.key();
                             seen.push(key.clone());
                             if let Some(state) = channels.iter_mut().find(|c| c.key == key) {
+                                // v0.3.10（P2）：强制枚举轮重开已有通道句柄——
+                                // 「立即刷新」第一次点击即生效（v0.3.9 只在
+                                // 死句柄上补扫槽位，需 3 连败才自愈）。
+                                if forced {
+                                    match HidDeviceChannel::open(
+                                        &api,
+                                        state.info.short_path.as_deref(),
+                                        state.info.long_path.as_deref(),
+                                    ) {
+                                        Ok(ch) => {
+                                            bootlog::note(&format!(
+                                                "hid reopen ok (forced enum): pid=0x{:04X} tag={}",
+                                                state.info.pid, state.info.tag
+                                            ));
+                                            state.shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                                            // 新句柄重新裁决活性；槽位连败清零。
+                                            state.liveness = ChannelLiveness::new();
+                                            for s in &mut state.slots {
+                                                s.hard_failures = 0;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            // 重开失败保留缓存句柄：活性裁决
+                                            // 会在后续轮次判死并触发失效自愈。
+                                            bootlog::note(&format!(
+                                                "hid reopen failed (forced enum): pid=0x{:04X} tag={}: {e}; keep cached handle",
+                                                state.info.pid, state.info.tag
+                                            ));
+                                        }
+                                    }
+                                }
                                 // 已有通道：补扫新出现的槽位（休眠唤醒 / 新配对）。
                                 for slot in SCAN_SLOTS {
                                     if state.slots.iter().any(|s| s.index == slot) {
@@ -377,7 +428,7 @@ mod imp {
                                 key,
                                 info,
                                 shared,
-                                timeout_streak: 0,
+                                liveness: ChannelLiveness::new(),
                                 slots,
                             });
                         }
@@ -449,10 +500,15 @@ mod imp {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-                // D-65：本轮判定为「句柄已死」的通道 key，循环外统一移除并
+                // D-67：本轮判定为「句柄已死」的通道 key，循环外统一移除并
                 // 触发重枚举（移除期间不能就地改 channels，先收集）。
                 let mut dead_channels: Vec<String> = Vec::new();
                 for ch_state in &mut channels {
+                    // D-67（P1）：本轮查询结果按槽位分类收集，轮末交
+                    // ChannelLiveness 统一裁决——整轮零应答才记一次连击，
+                    // 不再按「次」跨槽位累计（多设备同睡不误判死）。
+                    let mut normal_outcomes: Vec<SlotOutcome> = Vec::new();
+                    let mut probe_outcomes: Vec<SlotOutcome> = Vec::new();
                     let mut i = 0;
                     while i < ch_state.slots.len() {
                         let s = &mut ch_state.slots[i];
@@ -474,10 +530,17 @@ mod imp {
                         );
                         let reading =
                             probe_battery(&mut t, &s.id, s.index, &s.features, CURVE, s.is_hidpp1);
+                        // D-67：唤醒探测与普通轮询的静默分开计数——已知休眠
+                        // 的设备探测静默是常态，判死口径放宽（P3-唤醒探测）。
+                        let outcomes = if sleeping {
+                            &mut probe_outcomes
+                        } else {
+                            &mut normal_outcomes
+                        };
                         match reading {
                             Ok(r) => {
                                 s.hard_failures = 0;
-                                ch_state.timeout_streak = 0;
+                                outcomes.push(SlotOutcome::Success);
                                 if let Some(a) = core.record_success(&s.id, r, now) {
                                     let name = core
                                         .entries()
@@ -492,25 +555,14 @@ mod imp {
                             Err(reason) => match reason {
                                 // 查询超时 = 疑似休眠：连击 2 次暂停轮询（不注销、
                                 // 不重试——对休眠中的鼠标发查询才是真费电，D-33）。
-                                // D-65：同时累计通道级超时连击——真休眠 2 次即
-                                // 停轮询；持续超时（含唤醒探测仍超时）说明句柄
-                                // 已死，达阈值走句柄失效 + 重枚举自愈。
+                                // D-67：通道级判死改由轮末 ChannelLiveness 按
+                                // 「整轮零应答」裁决，此处只分类登记结果。
                                 UnknownReason::QueryTimeout => {
-                                    ch_state.timeout_streak += 1;
+                                    outcomes.push(SlotOutcome::Timeout);
                                     bootlog::note(&format!(
-                                        "battery query failed id={} reason=query_timeout (sleep path, channel timeout streak {})",
-                                        s.id, ch_state.timeout_streak
+                                        "battery query failed id={} reason=query_timeout (sleep path)",
+                                        s.id
                                     ));
-                                    if ch_state.timeout_streak >= HANDLE_INVALIDATE_THRESHOLD {
-                                        bootlog::note(&format!(
-                                            "channel handle invalid: key={} consecutive timeouts {} >= {}; invalidate + re-enumerate",
-                                            ch_state.key,
-                                            ch_state.timeout_streak,
-                                            HANDLE_INVALIDATE_THRESHOLD
-                                        ));
-                                        dead_channels.push(ch_state.key.clone());
-                                        break;
-                                    }
                                     if core.record_timeout(&s.id) == TimeoutOutcome::EnteredSleep {
                                         if let Ok(mut o) = observer.lock() {
                                             o.push(DiagEvent::new(
@@ -526,7 +578,9 @@ mod imp {
                                     i += 1;
                                 }
                                 // 接收器报告设备消失：立即注销（不等 3 次）。
+                                // 接收器回了字节 = 通道句柄活着（Responded）。
                                 UnknownReason::DeviceGone => {
+                                    outcomes.push(SlotOutcome::Responded);
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason=device_gone (deregistered immediately)",
                                         s.id
@@ -540,10 +594,18 @@ mod imp {
                                         ));
                                     }
                                 }
-                                // 其它持续失败（I/O / 映射 / 特性缺失等）：沿用
-                                // 3 连败注销（D-65：阈值常量 HANDLE_INVALIDATE_THRESHOLD），
-                                // 句柄失效 + 重枚举自愈。
+                                // 其它持续失败：设备级错误（错误帧/映射/特性
+                                // 缺失等）3 连败只注销本槽位（D-67 P3-1：恢复
+                                // v0.3.8 语义，不再误伤同通道健康槽位）；
+                                // io_error 是句柄级证据，另喂轮末活性裁决，
+                                // 由它按轮决定是否整通道作废。
                                 _ => {
+                                    if matches!(reason, UnknownReason::IoFailure) {
+                                        outcomes.push(SlotOutcome::IoError);
+                                    } else {
+                                        // 设备回了字节但给不出电量 = 句柄活着。
+                                        outcomes.push(SlotOutcome::Responded);
+                                    }
                                     s.hard_failures += 1;
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason={} (hard failure {}/{})",
@@ -556,17 +618,40 @@ mod imp {
                                     core.record_failure(&s.id, gone);
                                     if gone {
                                         bootlog::note(&format!(
-                                            "channel handle invalid: key={} hard failures reached {}; invalidate + re-enumerate",
-                                            ch_state.key, HANDLE_INVALIDATE_THRESHOLD
+                                            "slot deregistered: id={} hard failures reached {}; rescan on next enum",
+                                            s.id, HANDLE_INVALIDATE_THRESHOLD
                                         ));
-                                        dead_channels.push(ch_state.key.clone());
-                                        break;
+                                        let gone_slot = ch_state.slots.remove(i);
+                                        if let Ok(mut o) = observer.lock() {
+                                            o.push(DiagEvent::new(
+                                                Layer::App,
+                                                DiagKind::DeviceLost { id: gone_slot.id },
+                                            ));
+                                        }
                                     } else {
                                         i += 1;
                                     }
                                 }
                             },
                         }
+                    }
+                    // D-67 轮末裁决：整轮零应答才累计连击；普通静默连击达
+                    // HANDLE_INVALIDATE_THRESHOLD 轮、或唤醒探测静默连击达
+                    // WAKE_PROBE_INVALIDATE_THRESHOLD 轮才判句柄死。
+                    if (!normal_outcomes.is_empty() || !probe_outcomes.is_empty())
+                        && ch_state
+                            .liveness
+                            .note_round(&normal_outcomes, &probe_outcomes)
+                    {
+                        bootlog::note(&format!(
+                            "channel handle invalid: key={} silent rounds {} >= {} or probe silent rounds {} >= {}; invalidate + re-enumerate",
+                            ch_state.key,
+                            ch_state.liveness.silent_rounds(),
+                            HANDLE_INVALIDATE_THRESHOLD,
+                            ch_state.liveness.probe_silent_rounds(),
+                            WAKE_PROBE_INVALIDATE_THRESHOLD
+                        ));
+                        dead_channels.push(ch_state.key.clone());
                     }
                 }
                 // D-65：句柄失效自愈——整条通道（句柄 + 全部槽位缓存）作废，
