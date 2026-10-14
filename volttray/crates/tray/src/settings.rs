@@ -189,7 +189,7 @@ const IDC_TIER_HINT: i32 = 2044;
 const IDC_COVER_HINT: i32 = 2045;
 /// 4× 放大预览。
 const IDC_PREVIEW_BIG: i32 = 2046;
-/// 轮询间隔耗电提示。
+/// 轮询间隔说明提示。
 const IDC_INTERVAL_HINT: i32 = 2047;
 /// 分档卡内右侧红色错误提示（v0.3.6 F2：阈值非法反馈不占状态行）。
 const IDC_TIER_ERR: i32 = 2048;
@@ -233,8 +233,8 @@ const TIER_HINT_SAMPLE: &str =
     "阈值 1–99 严格递增；电量 ≤ 数值归入对应档（10/30/50/70 → 0–10 / 11–30 / 31–50 / 51–70 / 71–100）";
 /// 背景覆盖度说明（裁决 4：100% = 满出血）。
 const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个内切区域）";
-/// 轮询间隔耗电提示（D-33）。
-const INTERVAL_HINT_TEXT: &str = "更短的间隔会增加鼠标耗电；电量变化很慢，默认档已足够及时";
+/// 轮询间隔说明提示（D-66：如实说明轮询电耗可忽略，不再暗示「间隔越短越耗电」）。
+const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。";
 /// 最长状态文案（宽度实测样本）。
 const MSG_CONTRAST_SAMPLE: &str = "⚠ 字色与背景对比度 12.3 低于 3.0，可能不易读（不阻断使用）";
 
@@ -2286,7 +2286,7 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             add_string(fam, &family);
             combo_set_sel(fam, combo_count(fam) - 1);
         }
-        // 间隔：取 ≤ 当前值的最大档；低于 60 取 60（D-45）。
+        // 间隔：取 ≤ 当前值的最大档；低于最低档取最低档（D-66）。
         let iv = ctl(hwnd, IDC_INTERVAL);
         let idx = POLL_TIERS_SECS
             .iter()

@@ -9,7 +9,7 @@
 //! | 键 | 类型 | 默认 | 取值范围 / 说明 |
 //! | --- | --- | --- | --- |
 //! | `autostart` | bool | `false` | 开机自启（写入启动快捷方式） |
-//! | `poll_interval_secs` | int | `600` | 档位 `{60, 300, 600, 900, 1800}`（D-45；越界钳制 / 非档位吸附最近档 + 警告） |
+//! | `poll_interval_secs` | int | `1800` | 档位 `{300, 600, 1800, 3600, 7200}`（D-66；越界钳制 / 非档位吸附最近档 + 警告） |
 //! | `icon_style` | str | `"auto"` | `auto`/`light`/`dark`（整体风格提示键，v0.3.0 不参与渲染） |
 //! | `notifications_enabled` | bool | `true` | 低电量通知开关 |
 //! | `notification_silent` | bool | `false` | 通知静默（无提示音） |
@@ -34,14 +34,19 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// 轮询间隔默认值（D-45：600 秒——电量变化约 1%–2%/小时，300s 偏勤快；
-/// 低电提醒及时性在阈值 ≥5% 时 10 分钟级延迟完全可接受）。
-pub const DEFAULT_POLL_SECS: u64 = 600;
-pub const POLL_MIN_SECS: u64 = 60;
-pub const POLL_MAX_SECS: u64 = 1800;
-/// 轮询档位（D-45）：设置窗口与配置解析共用；15/30/120 秒三档已移除
-/// （过短档位与零耗电理念相悖）。
-pub const POLL_TIERS_SECS: [u64; 5] = [60, 300, 600, 900, 1800];
+/// 轮询间隔默认值（D-66：1800 秒 / 30 分钟——实测轮询本身的鼠标电耗可忽略
+/// （一次 HID++ 电量查询仅约 2 个射频短包，60s 轮询一天 ≈ 活跃使用约 3 秒的
+/// 无线电耗），间隔只需保证显示足够新鲜；1800s ≈ 耗电最快游戏鼠标 50% 电量
+/// 时长 X≈33 分钟，办公鼠标任意档都远快于其 X；低电提醒在阈值 ≥5% 时
+/// 30 分钟级延迟完全可接受）。
+pub const DEFAULT_POLL_SECS: u64 = 1800;
+pub const POLL_MIN_SECS: u64 = 300;
+pub const POLL_MAX_SECS: u64 = 7200;
+/// 轮询档位（D-66）：设置窗口与配置解析共用；60/900 秒两档已移除（X 跨设备
+/// 差 30 倍，无法用固定值精确命中「50%X」，档位按「显示新鲜度足够」排布）；
+/// 存量配置的 60/900 由 `normalize_poll_secs` 迁移到最近新档（60→300、
+/// 900→600）并写警告日志。
+pub const POLL_TIERS_SECS: [u64; 5] = [300, 600, 1800, 3600, 7200];
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 pub const LOW_THRESHOLD_MIN: u8 = 5;
 pub const LOW_THRESHOLD_MAX: u8 = 50;
@@ -363,10 +368,10 @@ pub fn contrast_ok(font: (u8, u8, u8), bg: (u8, u8, u8)) -> bool {
     contrast_ratio(font, bg) >= CONTRAST_FLOOR
 }
 
-/// 轮询间隔归一化（D-45）：先钳制到 [60, 1800]，再吸附到最近档位；
-/// 距离相同取更低档（更省电）。旧配置中被移除的 15/30/120 秒档由此归位
-/// （15/30 → 60，120 → 60）。设置窗口只写档位值，此函数保证 TOML 手改
-/// 任意值也落在档位上（设置窗口下拉才能正确回显）。
+/// 轮询间隔归一化（D-66）：先钳制到 [300, 7200]，再吸附到最近档位；
+/// 距离相同取更低档。存量配置中被移除的 60/900 秒档由此归位（60 → 300，
+/// 900 → 600），更早移除的 15/30/120 秒档同样吸附（→ 300）。设置窗口只写
+/// 档位值，此函数保证 TOML 手改任意值也落在档位上（设置窗口下拉才能正确回显）。
 pub fn normalize_poll_secs(v: u64) -> u64 {
     let clamped = v.clamp(POLL_MIN_SECS, POLL_MAX_SECS);
     POLL_TIERS_SECS
@@ -437,8 +442,8 @@ pub fn pulse_alpha(alpha: u8, factor: f64) -> u8 {
 pub struct Config {
     /// 开机自启（HKCU Run 单值）。
     pub autostart: bool,
-    /// 轮询间隔（秒），默认 600（D-45），解析归一到档位
-    /// {60, 300, 600, 900, 1800}（越界钳制 / 非档位吸附最近档 + 警告）。
+    /// 轮询间隔（秒），默认 1800（D-66），解析归一到档位
+    /// {300, 600, 1800, 3600, 7200}（越界钳制 / 非档位吸附最近档 + 警告）。
     pub poll_interval_secs: u64,
     /// 整体风格提示键（v0.2.0 遗留，v0.3.0 不参与渲染）。
     pub icon_style: IconStyle,
@@ -596,7 +601,7 @@ impl Config {
             match (key, &value) {
                 ("autostart", Value::Bool(b)) => cfg.autostart = *b,
                 ("poll_interval_secs", Value::Int(n)) => {
-                    // D-45：钳制 [60, 1800] + 吸附最近档位（平局取更低档）。
+                    // D-66：钳制 [300, 7200] + 吸附最近档位（平局取更低档）。
                     let norm = normalize_poll_secs(*n);
                     if norm != *n {
                         if *n < POLL_MIN_SECS || *n > POLL_MAX_SECS {
@@ -832,6 +837,7 @@ impl Config {
         format!(
             "# LogiVoltTray 配置（扁平键值；未知键会被忽略并产生诊断警告）\n\
              autostart = {}\n\
+             # 轮询间隔档位（秒）：300 / 600 / 1800 / 3600 / 7200（5/10/30/60/120 分钟），默认 1800\n\
              poll_interval_secs = {}\n\
              icon_style = \"{}\"\n\
              notifications_enabled = {}\n\
@@ -923,7 +929,7 @@ mod tests {
         let c = Config::default();
         assert!(!c.autostart);
         assert_eq!(c.poll_interval_secs, DEFAULT_POLL_SECS);
-        assert_eq!(c.poll_interval_secs, 600);
+        assert_eq!(c.poll_interval_secs, 1800);
         assert_eq!(c.icon_style, IconStyle::Auto);
         assert!(c.notifications_enabled);
         assert!(!c.notification_silent);
@@ -1112,28 +1118,44 @@ mod tests {
         assert!(f.0 < 200, "{f:?}");
     }
 
-    /// D-45：轮询间隔档位归一化——旧档位与任意值吸附最近档（平局取低）。
+    /// D-66：轮询档位枚举固定为 300/600/1800/3600/7200，默认档 1800 在档位内，
+    /// 且钳制边界与档位首末一致（防边界与档位表脱节）。
+    #[test]
+    fn poll_tiers_enum_and_default() {
+        assert_eq!(POLL_TIERS_SECS, [300, 600, 1800, 3600, 7200]);
+        assert_eq!(DEFAULT_POLL_SECS, 1800);
+        assert!(POLL_TIERS_SECS.contains(&DEFAULT_POLL_SECS));
+        assert_eq!(POLL_MIN_SECS, POLL_TIERS_SECS[0]);
+        assert_eq!(POLL_MAX_SECS, POLL_TIERS_SECS[POLL_TIERS_SECS.len() - 1]);
+        // 默认值即 Config::default() 的轮询间隔。
+        assert_eq!(Config::default().poll_interval_secs, 1800);
+    }
+
+    /// D-66：轮询间隔档位归一化——旧档位与任意值吸附最近档（平局取低）。
     #[test]
     fn poll_secs_snap_to_tiers() {
         // 档位原值不动。
         for t in POLL_TIERS_SECS {
             assert_eq!(normalize_poll_secs(t), t);
         }
-        // 被移除的旧档位：15/30/120 → 60。
-        assert_eq!(normalize_poll_secs(15), 60);
-        assert_eq!(normalize_poll_secs(30), 60);
-        assert_eq!(normalize_poll_secs(120), 60);
-        // 越界钳制：5 → 60，2400 → 1800。
+        // 被移除的旧档位：60 → 300，900 → 600；更早移除的 15/30/120 → 300。
+        assert_eq!(normalize_poll_secs(60), 300);
+        assert_eq!(normalize_poll_secs(900), 600);
+        assert_eq!(normalize_poll_secs(15), 300);
+        assert_eq!(normalize_poll_secs(30), 300);
+        assert_eq!(normalize_poll_secs(120), 300);
+        // 越界钳制：5 → 300，9999 → 7200。
         assert_eq!(normalize_poll_secs(5), POLL_MIN_SECS);
-        assert_eq!(normalize_poll_secs(2400), POLL_MAX_SECS);
-        // 非档位值吸附最近档：200 → 300（|200-60|>|200-300|）；700 → 600。
+        assert_eq!(normalize_poll_secs(9999), POLL_MAX_SECS);
+        // 非档位值吸附最近档：200 → 300（越界钳制）；700 → 600；2400 → 1800。
         assert_eq!(normalize_poll_secs(200), 300);
         assert_eq!(normalize_poll_secs(700), 600);
-        // 平局取更低档：180 与 60/300 各差 120 → 取 60（更省电）。
-        assert_eq!(normalize_poll_secs(180), 60);
+        assert_eq!(normalize_poll_secs(2400), 1800);
+        // 平局取更低档：1200 与 600/1800 各差 600 → 取 600。
+        assert_eq!(normalize_poll_secs(1200), 600);
         // 解析层：越界与非档位值都产生警告并落位。
-        let (c, w) = Config::parse("poll_interval_secs = 120\n");
-        assert_eq!(c.poll_interval_secs, 60);
+        let (c, w) = Config::parse("poll_interval_secs = 900\n");
+        assert_eq!(c.poll_interval_secs, 600);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.contains("snapped"), "{w:?}");
         let (c, w) = Config::parse("poll_interval_secs = 5\n");
@@ -1144,6 +1166,24 @@ mod tests {
         let (c, w) = Config::parse("poll_interval_secs = 1800\n");
         assert_eq!(c.poll_interval_secs, 1800);
         assert!(w.is_empty(), "{w:?}");
+    }
+
+    /// D-66：存量配置迁移映射——已移除档位 60 → 300、900 → 600（取最近新档），
+    /// 迁移各写一条警告（沿用 warnings 入日志机制）；合法旧值 300/600/1800
+    /// 原样保留且无警告。
+    #[test]
+    fn poll_legacy_tiers_migrate_with_warning() {
+        for (old, new) in [(60, 300), (900, 600)] {
+            let (c, w) = Config::parse(&format!("poll_interval_secs = {old}\n"));
+            assert_eq!(c.poll_interval_secs, new, "{old} should migrate to {new}");
+            assert_eq!(w.len(), 1, "{w:?}");
+            assert_eq!(w[0].key, "poll_interval_secs");
+        }
+        for keep in [300, 600, 1800] {
+            let (c, w) = Config::parse(&format!("poll_interval_secs = {keep}\n"));
+            assert_eq!(c.poll_interval_secs, keep);
+            assert!(w.is_empty(), "{keep} is a valid tier: {w:?}");
+        }
     }
 
     /// D-48：文本/背景缩放键——解析、钳制、往返。
