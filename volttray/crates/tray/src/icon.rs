@@ -1338,10 +1338,9 @@ mod tests {
         );
         // 根因证据（红态记录）：旧启动查询的 Default 档在分档模式下缺失。
         assert!(
-            cache
+            !cache
                 .map
-                .get(&(IconColor::Default, "?".to_string(), false))
-                .is_none(),
+                .contains_key(&(IconColor::Default, "?".to_string(), false)),
             "分档模式 fill 不含 Default 档——这正是 v0.3.7 真机日志的 \
              「default frame missing」"
         );
