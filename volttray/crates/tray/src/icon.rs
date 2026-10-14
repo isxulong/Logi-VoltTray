@@ -17,8 +17,8 @@
 use std::collections::HashMap;
 use volttray_app::config::{
     contrast_ratio, flash_rgb, pulse_alpha, Config, IconBackground, IconFontColor, IconShape,
-    RgbColor, BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN,
-    ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN,
+    RgbColor, BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
+    ICON_TEXT_SCALE_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
@@ -431,14 +431,15 @@ impl IconCache {
         text: &str,
         bright: bool,
     ) -> Result<tray_icon::Icon, FrameError> {
-        let rgba = self.map.get(&(color, text.to_string(), bright)).ok_or_else(|| {
-            FrameError::NotCached {
+        let rgba = self
+            .map
+            .get(&(color, text.to_string(), bright))
+            .ok_or_else(|| FrameError::NotCached {
                 color,
                 text: text.to_string(),
                 bright,
                 tiers_enabled: self.tier_colors.is_some(),
-            }
-        })?;
+            })?;
         let handle = rgba_to_hicon(rgba, self.size)?;
         Ok(tray_icon::Icon::from_handle(handle))
     }

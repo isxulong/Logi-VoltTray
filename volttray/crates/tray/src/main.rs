@@ -30,8 +30,7 @@ mod toast;
 /// v0.3.8（D-64/B-2）：启动时图标渲染回退出厂默认的原因；首次打开设置
 /// 窗口时提示一次后取走（None = 未发生回退或已提示过）。
 #[cfg(windows)]
-static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
+static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[cfg(windows)]
 mod imp {
@@ -68,8 +67,6 @@ mod imp {
     use volttray_transport::hid_impl::{enumerate_channels, ChannelInfo, HidDeviceChannel};
     use volttray_transport::Transport;
 
-    #[cfg(windows)]
-    use crate::APPEARANCE_FALLBACK_NOTE;
     use crate::bootlog;
     use crate::icon::{
         cache_from_config, dpi_bucket_size, icon_text, startup_frame_color, system_dark_theme,
@@ -79,6 +76,8 @@ mod imp {
     use crate::rawinput;
     use crate::single::{acquire, SingleInstance};
     use crate::toast;
+    #[cfg(windows)]
+    use crate::APPEARANCE_FALLBACK_NOTE;
 
     /// 接收器槽位扫描顺序（参考实现 `_scan_channel` 实证：1..=6 再 0xFF）。
     const SCAN_SLOTS: [u8; 7] = [1, 2, 3, 4, 5, 6, 0xFF];
@@ -689,7 +688,9 @@ mod imp {
         let first_icon = match cache.icon_for_checked(initial_color, &initial, false) {
             Ok(ic) => ic,
             Err(e) => {
-                bootlog::note(&format!("icon cache init failed with user appearance config: {e}"));
+                bootlog::note(&format!(
+                    "icon cache init failed with user appearance config: {e}"
+                ));
                 let factory = Config::default();
                 cache = cache_from_config(&factory, dpi_bucket_size(dpi), dark);
                 match cache.icon_for_checked(

@@ -11,12 +11,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // v0.3.8：版本字符串从 CARGO_PKG_VERSION 派生（此前手工同步，
         // 容易与 workspace 版本脱节）；数值版本按 major.minor.patch 打包。
-        let pkg_ver =
-            std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
-        let nums: Vec<u64> = pkg_ver
-            .split('.')
-            .map(|v| v.parse().unwrap_or(0))
-            .collect();
+        let pkg_ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+        let nums: Vec<u64> = pkg_ver.split('.').map(|v| v.parse().unwrap_or(0)).collect();
         let (major, minor, patch) = match nums.as_slice() {
             [ma, mi, pa] => (*ma, *mi, *pa),
             _ => (0, 0, 0),
