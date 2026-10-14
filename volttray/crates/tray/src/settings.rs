@@ -81,17 +81,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos,
     GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    IsWindow, LoadCursorW, LoadIconW, MoveWindow, RegisterClassW, SendMessageW,
+    IsWindow, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, RegisterClassW, SendMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK,
     BM_SETCHECK, BN_CLICKED, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_FINDSTRINGEXACT,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_SETCURSEL, CREATESTRUCTW,
     CW_USEDEFAULT, EN_CHANGE, GWLP_USERDATA, GWLP_WNDPROC, HCURSOR, HICON, HMENU, IDC_ARROW,
-    IMAGE_BITMAP, STM_SETIMAGE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WNDCLASS_STYLES,
-    WNDPROC, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
-    WS_VSCROLL,
+    IMAGE_BITMAP, MB_ICONWARNING, MB_OK, STM_SETIMAGE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW,
+    WNDCLASS_STYLES, WNDPROC, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE, WS_VSCROLL,
 };
 
 /// SendMessageW 包装（Option 参数形态见 0.62 绑定；返回 LRESULT 内层值）。
@@ -427,6 +427,26 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             if IsWindow(Some(hwnd)).as_bool() {
                 let _ = SetForegroundWindow(hwnd);
                 return;
+            }
+        }
+    }
+
+    // v0.3.8（D-64/B-2）：启动时图标渲染回退过出厂默认 → 首次打开设置
+    // 窗口时提示一次（取走后不再重复），原因即 bootlog 里的具体失败原因。
+    if let Ok(mut slot) = crate::APPEARANCE_FALLBACK_NOTE.lock() {
+        if let Some(reason) = slot.take() {
+            let text = wide(&format!(
+                "外观配置已回退默认（原因：{reason}）。\n\
+                 可在下方「外观」分区重新调整字体、颜色、形状与大小。"
+            ));
+            let caption = wide("LogiVoltTray");
+            unsafe {
+                let _ = MessageBoxW(
+                    None,
+                    PCWSTR(text.as_ptr()),
+                    PCWSTR(caption.as_ptr()),
+                    MB_OK | MB_ICONWARNING,
+                );
             }
         }
     }

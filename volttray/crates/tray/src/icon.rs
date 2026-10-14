@@ -16,9 +16,9 @@
 
 use std::collections::HashMap;
 use volttray_app::config::{
-    contrast_ratio, flash_rgb, pulse_alpha, IconBackground, IconFontColor, IconShape, RgbColor,
-    BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
-    ICON_TEXT_SCALE_MIN,
+    contrast_ratio, flash_rgb, pulse_alpha, Config, IconBackground, IconFontColor, IconShape,
+    RgbColor, BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN,
+    ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN,
 };
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
@@ -59,6 +59,91 @@ impl IconColor {
             Self::Default
         }
     }
+}
+
+/// 单帧获取失败的具体原因（v0.3.8 D-64/B-1：渲染失败定位与启动回退用）。
+///
+/// 启动容错原则（B-1）：图标渲染失败永远不能杀死程序——失败原因必须
+/// 落到 bootlog（哪个参数 / 哪个 GDI 阶段），随后用出厂默认渲染配置重试。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameError {
+    /// 缓存未含该帧：fill 的颜色集合不含该档位——分档模式下只有
+    /// Tier(i)/Gray 档（`tier_cache_fills_tier_colors` 锁定的设计），
+    /// 不含 Default/Red/Yellow 档。
+    NotCached {
+        color: IconColor,
+        text: String,
+        bright: bool,
+        /// 分档模式是否启用（决定 fill 的键集合）。
+        tiers_enabled: bool,
+    },
+    /// RGBA 缓冲长度与 size×size×4 不符（渲染管线内部不变量被破坏）。
+    BadBufferSize { expected: usize, actual: usize },
+    /// CreateCompatibleDC 失败（GDI 系统级）。
+    DcCreateFailed,
+    /// CreateDIBSection 失败（GDI 系统级）。
+    DibCreateFailed,
+    /// CreateIconIndirect 失败（GDI 系统级）。
+    IconCreateFailed,
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::NotCached {
+                color,
+                text,
+                bright,
+                tiers_enabled,
+            } => write!(
+                f,
+                "缓存无该帧（档位={color:?} 文本={text:?} 提亮={bright}；分档模式={tiers_enabled}，\
+                 分档启用时 fill 只缓存 Tier/Gray 档不含 Default 档）"
+            ),
+            FrameError::BadBufferSize { expected, actual } => write!(
+                f,
+                "RGBA 缓冲长度不符（期望 {expected} 字节，实际 {actual}）"
+            ),
+            FrameError::DcCreateFailed => write!(f, "CreateCompatibleDC 失败（GDI 系统级）"),
+            FrameError::DibCreateFailed => write!(f, "CreateDIBSection 失败（GDI 系统级）"),
+            FrameError::IconCreateFailed => write!(f, "CreateIconIndirect 失败（GDI 系统级）"),
+        }
+    }
+}
+
+/// v0.3.8（D-64 根因修复）：启动首帧（未知电量 "?"）的颜色档。
+///
+/// 必须与 pump 的 `percent == None` 分支保持**同一决策**：分档启用走
+/// Gray 档，否则走 Default 档。v0.3.5 D-56 迁移把「分档关 + 字色 auto」
+/// 的旧配置迁成分档开启后，fill 的键集合不再含 `IconColor::Default`——
+/// 而 v0.3.4 以来的启动代码固定查 Default 档，启动即
+/// 「default frame missing」退出（真机日志 stage: icon-cache）。
+pub fn startup_frame_color(tiers_enabled: bool) -> IconColor {
+    if tiers_enabled {
+        IconColor::Gray
+    } else {
+        IconColor::Default
+    }
+}
+
+/// v0.3.8（B-1）：从配置视图构建图标缓存——main 启动与「出厂默认渲染
+/// 配置重试」共用同一路径，保证回退后的缓存与默认配置渲染完全一致。
+pub fn cache_from_config(cfg: &Config, size: u32, dark: bool) -> IconCache {
+    IconCache::new(
+        size,
+        dark,
+        cfg.icon_shape,
+        cfg.icon_background,
+        cfg.icon_font_color,
+        cfg.icon_font_family.clone(),
+        if cfg.icon_font_tiers_enabled {
+            Some(cfg.icon_font_tier_colors.clone())
+        } else {
+            None
+        },
+        cfg.icon_text_scale,
+        cfg.icon_bg_scale,
+    )
 }
 
 /// 白/黑中选对背景对比度更高者（自定义背景 auto 字色用）。
@@ -335,9 +420,27 @@ impl IconCache {
     /// CreateIconIndirect，再走公开接口 `Icon::from_handle`（托盘销毁时
     /// DestroyIcon 由 tray-icon 负责）。
     pub fn icon_for(&self, color: IconColor, text: &str, bright: bool) -> Option<tray_icon::Icon> {
-        let rgba = self.map.get(&(color, text.to_string(), bright))?;
+        self.icon_for_checked(color, text, bright).ok()
+    }
+
+    /// v0.3.8（D-64/B-1）：取帧并给出失败的具体原因（哪个参数 / 哪个
+    /// GDI 阶段）——启动路径用本接口，失败原因可直接落 bootlog。
+    pub fn icon_for_checked(
+        &self,
+        color: IconColor,
+        text: &str,
+        bright: bool,
+    ) -> Result<tray_icon::Icon, FrameError> {
+        let rgba = self.map.get(&(color, text.to_string(), bright)).ok_or_else(|| {
+            FrameError::NotCached {
+                color,
+                text: text.to_string(),
+                bright,
+                tiers_enabled: self.tier_colors.is_some(),
+            }
+        })?;
         let handle = rgba_to_hicon(rgba, self.size)?;
-        Some(tray_icon::Icon::from_handle(handle))
+        Ok(tray_icon::Icon::from_handle(handle))
     }
 
     /// 测试专用：直接取缓存帧字节（blink.rs 的闪烁帧路径验收等跨模块测试用）。
@@ -614,16 +717,22 @@ pub fn and_mask_packed_from_alpha(rgba: &[u8], size: u32) -> Vec<u8> {
 /// `CreateIconIndirect` 组装。HICON 所有权经 `tray_icon::Icon::from_handle`
 /// 移交给 tray-icon（其 Drop 会 DestroyIcon），本函数返回后两个临时位图
 /// 立即 DeleteObject，不泄漏。
-pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
+///
+/// v0.3.8（B-1）：失败返回具体 GDI 阶段（DC / DIB / IconIndirect），
+/// 供启动路径的 bootlog 与出厂默认回退决策使用。
+pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Result<isize, FrameError> {
     let size_i = size as i32;
     let n = (size * size) as usize;
     if rgba.len() != n * 4 {
-        return None;
+        return Err(FrameError::BadBufferSize {
+            expected: n * 4,
+            actual: rgba.len(),
+        });
     }
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
-            return None;
+            return Err(FrameError::DcCreateFailed);
         }
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -641,12 +750,12 @@ pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
         let Ok(hcolor) = CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
         else {
             let _ = DeleteDC(hdc);
-            return None;
+            return Err(FrameError::DibCreateFailed);
         };
         if bits.is_null() {
             let _ = DeleteObject(HGDIOBJ(hcolor.0));
             let _ = DeleteDC(hdc);
-            return None;
+            return Err(FrameError::DibCreateFailed);
         }
         let bgra = premultiplied_bgra_from_rgba(rgba);
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, n * 4);
@@ -673,8 +782,8 @@ pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<isize> {
         let _ = DeleteObject(HGDIOBJ(hcolor.0));
         let _ = DeleteDC(hdc);
         match hicon {
-            Ok(h) if !h.is_invalid() => Some(h.0 as isize),
-            _ => None,
+            Ok(h) if !h.is_invalid() => Ok(h.0 as isize),
+            _ => Err(FrameError::IconCreateFailed),
         }
     }
 }
@@ -1187,6 +1296,116 @@ mod tests {
         assert!(!cache
             .map
             .contains_key(&(IconColor::Red, "50".to_string(), false)));
+    }
+
+    /// v0.3.8（D-64）根因回归测试：v0.3.5 D-56 迁移把「分档关 + 字色
+    /// auto」的旧配置迁成分档开启后，启动首帧查询必须与 pump 的
+    /// `percent == None` 分支同决策（Gray 档）。v0.3.4 以来的启动代码
+    /// 固定查 `IconColor::Default`——分档模式下该键不在 fill 的键集合里
+    /// （见 `tier_cache_fills_tier_colors`），启动即「default frame missing」
+    /// 退出（真机日志 stage: icon-cache / exit code=1）。
+    #[test]
+    fn tier_mode_startup_frame_resolves_after_root_fix() {
+        let tiers = vec![
+            RgbColor {
+                r: 0xE8,
+                g: 0x11,
+                b: 0x23,
+            },
+            RgbColor {
+                r: 0xFF,
+                g: 0xD2,
+                b: 0x1F,
+            },
+            RgbColor {
+                r: 0x00,
+                g: 0xCC,
+                b: 0x6A,
+            },
+        ];
+        // 模拟 v0.3.5 D-56 迁移后的用户配置视图（分档开启）。
+        let cache = IconCache::new(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            Some(tiers),
+            100,
+            100,
+        );
+        // 根因证据（红态记录）：旧启动查询的 Default 档在分档模式下缺失。
+        assert!(
+            cache
+                .map
+                .get(&(IconColor::Default, "?".to_string(), false))
+                .is_none(),
+            "分档模式 fill 不含 Default 档——这正是 v0.3.7 真机日志的 \
+             「default frame missing」"
+        );
+        // 修复后（绿）：启动取色与 pump 对齐（Gray 档），首帧存在。
+        let color = startup_frame_color(true);
+        assert_eq!(color, IconColor::Gray);
+        assert!(cache.icon_for_checked(color, "?", false).is_ok());
+        // 对照：非分档模式启动仍走 Default 档（v0.3.4 行为不变）。
+        assert_eq!(startup_frame_color(false), IconColor::Default);
+    }
+
+    /// v0.3.8（B-1）回退验收：分档开启的用户配置首帧查询失败后，用出厂
+    /// 默认渲染配置重建缓存（`cache_from_config(Config::default())`），
+    /// 默认帧必须生成成功——「该配置值 → 默认帧生成成功（回退后）」。
+    /// 同时验证失败原因携带具体参数（NotCached，含档位/文本/分档模式）。
+    #[test]
+    fn factory_default_cache_generates_first_frame_after_fallback() {
+        let tiers = vec![
+            RgbColor {
+                r: 0xE8,
+                g: 0x11,
+                b: 0x23,
+            },
+            RgbColor {
+                r: 0x00,
+                g: 0xCC,
+                b: 0x6A,
+            },
+        ];
+        // 用户配置（分档开启 + 自定义字体名——字体名与帧生成失败无关：
+        // CreateFontW 对缺失字体静默回退系统默认，见 render_text_bitmap 注释）。
+        let user = IconCache::new(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "NoSuchFontFamily".to_string(),
+            Some(tiers),
+            100,
+            100,
+        );
+        // 旧启动查询（Default 档）失败，失败原因必须可定位到具体参数。
+        let err = user
+            .icon_for_checked(IconColor::Default, "?", false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::NotCached {
+                color: IconColor::Default,
+                ref text,
+                bright: false,
+                tiers_enabled: true,
+            } if text == "?"
+        ));
+        // 出厂默认渲染配置重试（main 启动回退同一路径）。
+        let factory_cfg = Config::default();
+        let factory = cache_from_config(&factory_cfg, 16, true);
+        assert!(factory
+            .icon_for_checked(
+                startup_frame_color(factory_cfg.icon_font_tiers_enabled),
+                "?",
+                false
+            )
+            .is_ok());
     }
 
     /// v0.3.4 #1 验收：纯红 (255,0,0) 自定义背景，常态渲染位图背景像素

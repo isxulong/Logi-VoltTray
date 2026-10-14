@@ -27,6 +27,12 @@ mod single;
 #[cfg(windows)]
 mod toast;
 
+/// v0.3.8（D-64/B-2）：启动时图标渲染回退出厂默认的原因；首次打开设置
+/// 窗口时提示一次后取走（None = 未发生回退或已提示过）。
+#[cfg(windows)]
+static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
 #[cfg(windows)]
 mod imp {
     use std::path::{Path, PathBuf};
@@ -62,8 +68,13 @@ mod imp {
     use volttray_transport::hid_impl::{enumerate_channels, ChannelInfo, HidDeviceChannel};
     use volttray_transport::Transport;
 
+    #[cfg(windows)]
+    use crate::APPEARANCE_FALLBACK_NOTE;
     use crate::bootlog;
-    use crate::icon::{dpi_bucket_size, icon_text, system_dark_theme, IconCache, IconColor};
+    use crate::icon::{
+        cache_from_config, dpi_bucket_size, icon_text, startup_frame_color, system_dark_theme,
+        IconCache, IconColor,
+    };
     use crate::menu::build_menu;
     use crate::rawinput;
     use crate::single::{acquire, SingleInstance};
@@ -607,6 +618,11 @@ mod imp {
         let (cfg, load_warnings) = match Config::load(&cfg_path) {
             Ok((c, w)) => {
                 bootlog::note(&format!("config loaded, {} warning(s)", w.len()));
+                // v0.3.8（B-3）：警告内容逐条写入日志——上次真机排查只有
+                // 数量没有内容，迁移警告（D-56 等）正是本次根因的直接线索。
+                for warning in &w {
+                    bootlog::note(&format!("config warning: {warning}"));
+                }
                 (c, w)
             }
             Err(e) => {
@@ -653,21 +669,7 @@ mod imp {
         //    提亮档，M9/M11）+ 托盘。
         let dpi = unsafe { GetDpiForSystem() };
         let dark = system_dark_theme();
-        let mut cache = IconCache::new(
-            dpi_bucket_size(dpi),
-            dark,
-            cfg.icon_shape,
-            cfg.icon_background,
-            cfg.icon_font_color,
-            cfg.icon_font_family.clone(),
-            if cfg.icon_font_tiers_enabled {
-                Some(cfg.icon_font_tier_colors.clone())
-            } else {
-                None
-            },
-            cfg.icon_text_scale,
-            cfg.icon_bg_scale,
-        );
+        let mut cache = cache_from_config(&cfg, dpi_bucket_size(dpi), dark);
         let mut cur_size = dpi_bucket_size(dpi);
         let mut cur_dark = dark;
 
@@ -675,13 +677,52 @@ mod imp {
 
         bootlog::stage("icon-cache");
         let initial = icon_text(None, false);
-        let Some(first_icon) = cache.icon_for(IconColor::Default, &initial, false) else {
-            bootlog::note("icon cache init failed: default frame missing");
-            bootlog::fatal_box(
-                "LogiVoltTray 启动失败",
-                "托盘图标预渲染失败（图标缓存未生成默认帧），程序即将退出。",
-            );
-            return 1;
+        // v0.3.8（D-64 根因修复）：启动首帧取色与 pump 的 percent=None 分支
+        // 对齐——分档启用走 Gray 档。v0.3.4 以来的启动代码固定查
+        // IconColor::Default，而 v0.3.5 D-56 迁移把「分档关 + 字色 auto」的
+        // 旧配置迁成分档开启后，fill 的键集合不含 Default 档，启动即
+        // 「default frame missing」退出——即真机日志卡点。
+        let initial_color = startup_frame_color(cfg.icon_font_tiers_enabled);
+        // v0.3.8（B-1）：图标渲染失败永远不能杀死程序——先记录具体失败
+        // 原因（哪个参数 / 哪个 GDI 阶段），再用出厂默认渲染配置重试；
+        // 仅出厂默认也失败（系统级 GDI 问题）才走 fatal。
+        let first_icon = match cache.icon_for_checked(initial_color, &initial, false) {
+            Ok(ic) => ic,
+            Err(e) => {
+                bootlog::note(&format!("icon cache init failed with user appearance config: {e}"));
+                let factory = Config::default();
+                cache = cache_from_config(&factory, dpi_bucket_size(dpi), dark);
+                match cache.icon_for_checked(
+                    startup_frame_color(factory.icon_font_tiers_enabled),
+                    &initial,
+                    false,
+                ) {
+                    Ok(ic) => {
+                        bootlog::note(&format!(
+                            "appearance config reverted to factory defaults (reason: {e}); \
+                             tray continues with default look"
+                        ));
+                        // B-2：回退原因留给首次打开设置窗口时提示（一次性）。
+                        if let Ok(mut slot) = APPEARANCE_FALLBACK_NOTE.lock() {
+                            *slot = Some(e.to_string());
+                        }
+                        ic
+                    }
+                    Err(e2) => {
+                        bootlog::note(&format!(
+                            "icon cache init failed with factory defaults too: {e2}"
+                        ));
+                        bootlog::fatal_box(
+                            "LogiVoltTray 启动失败",
+                            &format!(
+                                "托盘图标预渲染失败（出厂默认渲染配置也无法生成默认帧，\
+                                 疑似系统级 GDI 故障）：{e2}。程序即将退出。"
+                            ),
+                        );
+                        return 1;
+                    }
+                }
+            }
         };
         let (menu_obj, mut ids) = build_menu(
             &[],
