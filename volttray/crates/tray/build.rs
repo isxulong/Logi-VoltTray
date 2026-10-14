@@ -18,10 +18,10 @@ fn main() {
         res.set("FileDescription", "LogiVoltTray 托盘电量显示器");
         // v0.3.4 遗留 + v0.3.5 #2：补齐版本字段（字符串 + 数值双写，
         // 文件属性页与资源管理器列都读得到）。
-        res.set("FileVersion", "0.3.6.0");
-        res.set("ProductVersion", "0.3.6.0");
-        res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0000_0003_0006_0000);
-        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, 0x0000_0003_0006_0000);
+        res.set("FileVersion", "0.3.7.0");
+        res.set("ProductVersion", "0.3.7.0");
+        res.set_version_info(winres::VersionInfo::FILEVERSION, 0x0000_0003_0007_0000);
+        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, 0x0000_0003_0007_0000);
         if let Err(e) = res.compile() {
             // 清单嵌入失败不阻断构建（运行时 DPI 设置为兜底），但留警告。
             println!("cargo:warning=winres manifest embed failed: {e}");

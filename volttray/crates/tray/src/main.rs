@@ -13,6 +13,8 @@
 #[cfg(windows)]
 mod blink;
 #[cfg(windows)]
+mod bootlog;
+#[cfg(windows)]
 mod icon;
 #[cfg(windows)]
 mod menu;
@@ -60,6 +62,7 @@ mod imp {
     use volttray_transport::hid_impl::{enumerate_channels, ChannelInfo, HidDeviceChannel};
     use volttray_transport::Transport;
 
+    use crate::bootlog;
     use crate::icon::{dpi_bucket_size, icon_text, system_dark_theme, IconCache, IconColor};
     use crate::menu::build_menu;
     use crate::rawinput;
@@ -557,12 +560,24 @@ mod imp {
     }
 
     pub fn run() -> i32 {
+        // v0.3.7（D-63）：启动可见化——最先初始化崩溃日志 + panic hook，
+        // 此后任何启动阶段失败都会留痕并弹中文错误，不再「双击没反应」。
+        bootlog::init();
+        bootlog::install_panic_hook();
+        bootlog::stage("single-instance");
         // 1. 单实例（P1-3）：第二实例发激活事件后退出。
         let _mutex = match acquire() {
             Ok(SingleInstance::First(h)) => h,
-            Ok(SingleInstance::Second) => return 0,
+            Ok(SingleInstance::Second) => {
+                // v0.3.7（D-63 B-3）：静默退出正是「双击没反应」的头号嫌疑
+                //（旧版本可能仍在托盘里）——退出前弹窗告知已在运行。
+                bootlog::note("second instance blocked: already running, notify and exit");
+                bootlog::already_running_box();
+                return 0;
+            }
             Err(e) => {
-                eprintln!("single instance: {e}");
+                bootlog::note(&format!("single instance error: {e}"));
+                bootlog::fatal_box("LogiVoltTray 启动失败", &format!("单实例初始化失败：{e}"));
                 return 1;
             }
         };
@@ -570,21 +585,32 @@ mod imp {
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
+        bootlog::stage("dpi-awareness");
 
         // 2. AUMID + 开始菜单快捷方式（P0-5，尽力而为）。
+        bootlog::stage("aumid-shortcut");
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("volttray-tray.exe"));
-        let _ = volttray_app::guarded("aumid", || {
+        if let Err(e) = volttray_app::guarded("aumid", || {
             let _ = aumid::set_process_aumid();
-        });
-        let _ = volttray_app::guarded("shortcut", || {
+        }) {
+            bootlog::note(&format!("aumid: {e}"));
+        }
+        if let Err(e) = volttray_app::guarded("shortcut", || {
             let _ = aumid::ensure_start_menu_shortcut(&exe);
-        });
+        }) {
+            bootlog::note(&format!("shortcut: {e}"));
+        }
 
         // 3. 配置：不存在则按 schema 默认值创建（P1-8）。
+        bootlog::stage("config-load");
         let cfg_path = Config::default_path();
         let (cfg, load_warnings) = match Config::load(&cfg_path) {
-            Ok((c, w)) => (c, w),
-            Err(_) => {
+            Ok((c, w)) => {
+                bootlog::note(&format!("config loaded, {} warning(s)", w.len()));
+                (c, w)
+            }
+            Err(e) => {
+                bootlog::note(&format!("config load failed ({e}), falling back to defaults"));
                 let c = Config::default();
                 if let Some(parent) = cfg_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -619,6 +645,7 @@ mod imp {
             let path = cfg_path.clone();
             std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path));
         }
+        bootlog::stage("io-thread-spawned");
 
         // 4. 图标缓存（评审 4.1：启动预渲染；v0.3.0：形状/背景/字色/字体 + 低电
         //    提亮档，M9/M11）+ 托盘。
@@ -644,9 +671,11 @@ mod imp {
 
         let mut state = GuiState::from_config(&cfg);
 
+        bootlog::stage("icon-cache");
         let initial = icon_text(None, false);
         let Some(first_icon) = cache.icon_for(IconColor::Default, &initial, false) else {
-            eprintln!("icon cache init failed");
+            bootlog::note("icon cache init failed: default frame missing");
+            bootlog::fatal_box("LogiVoltTray 启动失败", "托盘图标预渲染失败（图标缓存未生成默认帧），程序即将退出。");
             return 1;
         };
         let (menu_obj, mut ids) = build_menu(
@@ -658,6 +687,7 @@ mod imp {
             state.autostart_on,
             state.silent,
         );
+        bootlog::stage("tray-build");
         let tray = match TrayIconBuilder::new()
             .with_menu(Box::new(menu_obj))
             .with_tooltip("LogiVoltTray")
@@ -667,7 +697,8 @@ mod imp {
         {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("tray init: {e}");
+                bootlog::note(&format!("tray init failed: {e}"));
+                bootlog::fatal_box("LogiVoltTray 启动失败", &format!("创建托盘图标失败：{e}"));
                 return 1;
             }
         };
@@ -678,10 +709,28 @@ mod imp {
 
         // D-33 被动唤醒：注册鼠标 Raw Input（message-only 窗口，INPUTSINK）。
         // 失败则退化为仅正常轮询节奏——绝不主动保活（不向休眠设备发查询）。
-        let _raw_input = crate::rawinput::install();
+        let raw_input = crate::rawinput::install();
+        if raw_input.is_some() {
+            bootlog::stage("rawinput-installed");
+        } else {
+            bootlog::note("rawinput install failed; passive wake degraded to polling");
+        }
+        let _raw_input = raw_input;
+
+        // v0.3.7（D-63 B-4）：启动成功反馈——托盘应用无主窗口，用户双击后
+        // 必须有可感知的确认（静默 toast，不响铃；失败仅落日志，不阻断启动）。
+        bootlog::stage("startup-toast");
+        if let Err(e) = toast::notify(
+            "LogiVoltTray 正在运行",
+            "托盘图标位于任务栏右下角通知区域（若未见请展开溢出箭头「^」）；右键图标可打开设置或退出。",
+            true,
+        ) {
+            bootlog::note(&format!("startup toast failed: {e}"));
+        }
         let mut last_wake_sent = Instant::now() - Duration::from_secs(10);
 
         // 5. 消息泵：500ms 定时器驱动事件归并。
+        bootlog::stage("message-pump");
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -717,6 +766,7 @@ mod imp {
             }
             let _ = KillTimer(None, 1);
         }
+        bootlog::stage("message-pump-exit");
         0
     }
 
@@ -1181,6 +1231,7 @@ fn main() {
     #[cfg(windows)]
     {
         let code = std::panic::catch_unwind(imp::run).unwrap_or(3);
+        crate::bootlog::stage(&format!("exit code={code}"));
         std::process::exit(code);
     }
     #[cfg(not(windows))]

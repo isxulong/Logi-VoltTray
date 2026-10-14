@@ -418,6 +418,8 @@ impl Ctx {
 
 /// 打开（或前置）设置窗口。`preview_text` 为预览数字（如当前电量文本）。
 pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, preview_text: &str) {
+    // v0.3.7（D-63）：设置窗口注册/创建是启动后关键路径之一，失败留痕。
+    crate::bootlog::stage("settings-open");
     let existing = SETTINGS_HWND.load(Ordering::SeqCst);
     if existing != 0 {
         let hwnd = HWND(existing as *mut core::ffi::c_void);
@@ -438,7 +440,10 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
 
         let hinst = match GetModuleHandleW(None) {
             Ok(h) => HINSTANCE(h.0),
-            Err(_) => return,
+            Err(e) => {
+                crate::bootlog::note(&format!("settings: GetModuleHandleW failed: {e}"));
+                return;
+            }
         };
         // v0.3.5 #2（D-53）：EXE 版本资源中的 1 号图标（winres set_icon → ID 1）。
         let hicon = LoadIconW(Some(hinst), icon_resource()).unwrap_or(HICON::default());
@@ -457,7 +462,9 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             lpszClassName: PCWSTR(class.as_ptr()),
         };
         // 类可能已注册（重复打开）：忽略「类已存在」错误。
-        let _ = RegisterClassW(&wc);
+        if let Err(e) = RegisterClassW(&wc) {
+            crate::bootlog::note(&format!("settings: RegisterClassW: {e}"));
+        }
 
         // v0.3.6：自定义字体颜色会话内保留（往返切换不丢已选色）。
         let initial_custom = match arc.read() {
@@ -513,7 +520,10 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             Some(Box::into_raw(ctx) as *const core::ffi::c_void),
         ) {
             Ok(h) => h,
-            Err(_) => return,
+            Err(e) => {
+                crate::bootlog::note(&format!("settings: CreateWindowExW failed: {e}"));
+                return;
+            }
         };
         SETTINGS_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let _ = ShowWindow(hwnd, SW_SHOW);
