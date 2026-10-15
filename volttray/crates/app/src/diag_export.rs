@@ -40,8 +40,8 @@ pub struct ChannelEnumResult {
     pub key: String,
     /// PID，十六进制字符串（与日志口径一致，如 "0xC533"）。
     pub pid: String,
-    /// 接收器 tag。
-    pub tag: u8,
+    /// 接收器 tag（路径稳定标识，transport::ChannelInfo::tag 为 String）。
+    pub tag: String,
     /// open 结果：`"ok"`（新通道本轮打开成功）/ `"failed"`（打开失败）/
     /// `"cached"`（已有通道沿用缓存句柄）/ `"reopened"`（强制轮或扫槽
     /// 连败触发重开成功）/ `"cached-reopen-failed"`（重开失败但保留缓存句柄）。
@@ -270,14 +270,14 @@ mod tests {
                 ChannelEnumResult {
                     key: "usb:1234:C533".into(),
                     pid: "0xC533".into(),
-                    tag: 1,
+                    tag: "1".to_string(),
                     open: "cached".into(),
                     error: None,
                 },
                 ChannelEnumResult {
                     key: "usb:5678:C52B".into(),
                     pid: "0xC52B".into(),
-                    tag: 2,
+                    tag: "2".to_string(),
                     open: "failed".into(),
                     error: Some("hid open error".into()),
                 },
