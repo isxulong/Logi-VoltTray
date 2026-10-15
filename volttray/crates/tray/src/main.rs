@@ -97,7 +97,8 @@ mod imp {
     enum IoCmd {
         RefreshNow,
         /// 被动唤醒信号（D-33）：系统层观测到罗技鼠标活动（Raw Input）。
-        /// 仅装填一次唤醒探测资格，不直接发查询。
+        /// 有注册槽位时仅装填唤醒探测资格；0 注册槽位时（v0.3.11 F5）
+        /// 触发一次强制重枚举（设备已被用户物理唤醒，主机侧补读）。
         WakeSignal,
         Shutdown,
     }
@@ -334,6 +335,11 @@ mod imp {
                 // v0.3.11（F3）：本轮枚举是否重开过缓存句柄（无设备态
                 // 汇总日志用；声明在 match 外供轮末读取）。
                 let mut reopened_this_round = false;
+                // v0.3.11（P3，质检复审）：scrap 整通道作废的强制重枚举
+                // 须延迟到本轮 record_result **之后**置位——record_result
+                // 无条件清 force（main.rs 老代码先 invalidate 后 record，
+                // force 被同轮清掉，「立即重枚举」退化成下一个 30s 门控点）。
+                let mut force_after_record = false;
                 match hidapi::HidApi::new() {
                     Ok(api) => {
                         // v0.3.10（P2）：本轮枚举是否由「立即刷新」/句柄失效
@@ -566,7 +572,9 @@ mod imp {
                                     o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id }));
                                 }
                             }
-                            reconnect.invalidate_handles();
+                            // v0.3.11（P3）：不再在此处 invalidate——移到本轮
+                            // record_result 之后（见 force_after_record 声明处）。
+                            force_after_record = true;
                         }
                     }
                     Err(e) => {
@@ -604,6 +612,12 @@ mod imp {
                         }
                     }
                     None => {}
+                }
+                // v0.3.11（P3）：本轮有整通道作废（扫槽连败且重开失败）→
+                // 在 record_result 消费掉旧 force 之后置位，下一轮循环
+                // 立即全量重枚举（不再退化到下一个 30s 门控点）。
+                if force_after_record {
+                    reconnect.invalidate_handles();
                 }
                 // v0.3.11（F3）：无设备态每轮重扫落一行汇总日志。与枚举签名
                 // 去重独立（死锁场景候选集合不变、签名去重不落盘，没有这行
@@ -883,6 +897,21 @@ mod imp {
                     // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
                     // 恢复延迟取决于用户动鼠标的那一刻，而不是轮询周期。
                     Ok(IoCmd::WakeSignal) => {
+                        // v0.3.11（F5）：0 注册槽位时（重启后鼠标休眠、槽位
+                        // 空，未注册设备收不到唤醒探测资格）——唤醒信号 =
+                        // Raw Input 已观测到罗技鼠标活动，设备已被用户物理
+                        // 唤醒、处于活跃态：置 force 立即强制重枚举+扫槽
+                        // （主机侧发起的补读，不违反零鼠标电池红线——红线
+                        // 禁止主动唤醒休眠设备，不禁止设备已醒时补读）。
+                        // 防抖在 Reconnect::request_wake_enum（事件风暴
+                        // 合并，不形成枚举风暴）。
+                        let registered_slots: usize = channels.iter().map(|c| c.slots.len()).sum();
+                        if reconnect.request_wake_enum(Instant::now(), registered_slots) {
+                            bootlog::note(
+                                "wake signal with 0 registered slots: force re-enumerate \
+                                 (device physically awake; host-side scan)",
+                            );
+                        }
                         if let Ok(mut c) = core.lock() {
                             for id in c.sleeping_ids() {
                                 c.note_wake_signal(&id);

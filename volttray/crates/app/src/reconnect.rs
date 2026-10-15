@@ -142,6 +142,12 @@ impl ChannelLiveness {
 /// 连续「扫槽全败且含 I/O 类错误」触发强制重开的轮数（v0.3.11，F2/D-68）。
 pub const SLOT_SCAN_REOPEN_THRESHOLD: u32 = 3;
 
+/// Raw Input 唤醒信号触发强制重枚举的最小间隔（v0.3.11，F5）：鼠标持续
+/// 移动时唤醒事件每 2s 一次（GUI 侧合并），0 注册槽位期间若每次都强制
+/// 枚举会形成枚举风暴——不足该间隔的事件合并（不置位），留待下一次
+/// 循环唤醒点统一裁决（与 sleeping_ids 唤醒路径的 2s 合并同族做法）。
+pub const WAKE_ENUM_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// 槽位扫描失败的类别（v0.3.11，F1/F2）：区分「设备不应答」与「句柄可疑」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotScanFailure {
@@ -235,6 +241,9 @@ pub struct Reconnect {
     no_device: bool,
     /// 强制下一轮循环立即重枚举（「立即刷新」/句柄失效自愈置位）。
     force: bool,
+    /// 上次「Raw Input 唤醒信号触发强制重枚举」的时刻（v0.3.11，F5
+    /// 防抖：事件风暴合并，见 [`Self::request_wake_enum`]）。
+    last_wake_enum: Option<Instant>,
 }
 
 impl Default for Reconnect {
@@ -250,12 +259,38 @@ impl Reconnect {
             last_enum: None,
             no_device: false,
             force: false,
+            last_wake_enum: None,
         }
     }
 
     /// 「立即刷新」：下一轮循环必须先重新枚举再查询（怀疑方向 3 修复）。
     pub fn request_refresh(&mut self) {
         self.force = true;
+    }
+
+    /// Raw Input 唤醒信号裁决（v0.3.11，F5）：唤醒事件到达且当前注册槽位
+    /// 为 0 → 置 force 强制下一轮立即重枚举+扫槽（主机侧发起）。此前的
+    /// 唤醒路径只 arm `sleeping_ids`（已注册设备的探测资格），未注册设备
+    /// 收不到任何信号——重启后鼠标休眠、槽位空时，用户一动鼠标要等下一
+    /// 次退避重扫（最长 120s）才可能恢复。此时鼠标已被用户物理唤醒、处于
+    /// 活跃态，主机侧补扫不违反零鼠标电池红线（红线禁止「主动唤醒休眠
+    /// 设备」，不禁止「设备已醒时补读」）。防抖：距上次**唤醒触发**枚举
+    /// 不足 [`WAKE_ENUM_MIN_INTERVAL`] 的事件合并（不置位），事件风暴
+    /// 不得形成枚举风暴。
+    /// 返回 true = 本次事件触发了强制重枚举（供 IO 线程落日志）。
+    pub fn request_wake_enum(&mut self, now: Instant, registered_slots: usize) -> bool {
+        if registered_slots > 0 {
+            // 已有注册槽位：走原有 sleeping_ids 唤醒探测路径，不触发枚举。
+            return false;
+        }
+        if let Some(t) = self.last_wake_enum {
+            if now.saturating_duration_since(t) < WAKE_ENUM_MIN_INTERVAL {
+                return false;
+            }
+        }
+        self.last_wake_enum = Some(now);
+        self.force = true;
+        true
     }
 
     /// 缓存句柄失效（连续 I/O 硬失败达阈值）：作废句柄并在下一轮
@@ -526,6 +561,71 @@ mod tests {
     }
 
     use super::{ChannelLiveness, SlotOutcome as SO, WAKE_PROBE_INVALIDATE_THRESHOLD};
+
+    /// v0.3.11（F5）：Raw Input 唤醒信号 → 0 注册槽位时立即强制重枚举。
+    /// 重启后鼠标休眠、槽位空，用户一动鼠标（Raw Input 观测到罗技鼠标
+    /// 活动 = 设备已被物理唤醒）即触发，不等 30s 门控/退避重扫。
+    #[test]
+    fn wake_signal_with_zero_slots_forces_reenum() {
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        // 枚举到 0 槽位（接收器在、鼠标休眠未注册）→ 无设备态。
+        assert_eq!(
+            r.record_result(t0, 0),
+            Some(EnumTransition::EnteredNoDevice)
+        );
+        // 30s 门控内本不该重枚举（与唤醒时刻无关——防抖只看上一次
+        // 唤醒触发的枚举，不推迟首个唤醒响应）。
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(2), true));
+        // 用户动鼠标 → 强制重枚举立即生效。
+        assert!(r.request_wake_enum(t0 + Duration::from_secs(2), 0));
+        assert!(r.pending_force());
+        assert!(r.should_enumerate(t0 + Duration::from_secs(2), true));
+        // 枚举+扫槽注册成功 → 退出无设备态，强制位被消费。
+        assert_eq!(
+            r.record_result(t0 + Duration::from_secs(3), 1),
+            Some(EnumTransition::ExitedNoDevice)
+        );
+        assert!(!r.pending_force());
+    }
+
+    /// v0.3.11（F5）：已有注册槽位 → 唤醒事件不触发强制重枚举（走原
+    /// sleeping_ids 唤醒探测路径，仅装填已注册设备的探测资格）。
+    #[test]
+    fn wake_signal_with_registered_slots_does_not_force() {
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        assert_eq!(r.record_result(t0, 2), None);
+        // 设备休眠后用户动鼠标：唤醒信号到达，但槽位非 0 → 不置 force。
+        assert!(!r.request_wake_enum(t0 + Duration::from_secs(10), 2));
+        assert!(!r.pending_force());
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(10), true));
+    }
+
+    /// v0.3.11（F5）：唤醒事件风暴（鼠标持续移动，GUI 侧每 2s 合并一次）
+    /// 不得形成枚举风暴——距上次唤醒触发不足 WAKE_ENUM_MIN_INTERVAL 的
+    /// 事件合并，不重复置位。
+    #[test]
+    fn wake_signal_storm_is_coalesced() {
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        assert_eq!(
+            r.record_result(t0, 0),
+            Some(EnumTransition::EnteredNoDevice)
+        );
+        // 第一个事件（距上次枚举仅 1s，仍立即响应）：触发强制枚举。
+        assert!(r.request_wake_enum(t0 + Duration::from_secs(1), 0));
+        // 枚举消费 force，但注册仍落空（设备唤醒慢/首轮握手超时）。
+        assert_eq!(r.record_result(t0 + Duration::from_secs(2), 0), None);
+        // 风暴：t0+3 / t0+4 / t0+5 连发三次，均距上次唤醒触发 < 5s → 合并。
+        assert!(!r.request_wake_enum(t0 + Duration::from_secs(3), 0));
+        assert!(!r.request_wake_enum(t0 + Duration::from_secs(4), 0));
+        assert!(!r.request_wake_enum(t0 + Duration::from_secs(5), 0));
+        assert!(!r.pending_force(), "风暴期间的合并事件不得重复置位");
+        // t0+6（距上次唤醒触发 t0+1 已 5s）→ 下一次触发放行。
+        assert!(r.request_wake_enum(t0 + Duration::from_secs(6), 0));
+        assert!(r.pending_force());
+    }
 
     /// D-67 回归断言 1（P1）：多设备通道部分/全部槽位正常休眠不判死——
     /// 2 槽位通道两轮各全部超时（恰好是 D-33 的合法休眠边界，
