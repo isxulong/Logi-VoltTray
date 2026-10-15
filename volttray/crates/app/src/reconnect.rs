@@ -5,6 +5,11 @@
 //! （整轮零应答才记一次连击），修复按「次」累计导致的多设备同睡误判死
 //! （P1）；唤醒探测静默单独计数（P3）。
 //!
+//! v0.3.11（F2，D-68）新增 [`SlotScanStreak`]：通道级「扫槽连败」裁决——
+//! 修复「0 槽位 + 死缓存句柄」死锁（槽位为 0 时 ChannelLiveness 永不裁决，
+//! 缓存句柄永不重开）。连续 [`SLOT_SCAN_REOPEN_THRESHOLD`] 轮「扫槽全败且
+//! 至少一次 I/O 类错误」才强制重开句柄；纯超时轮清零（深睡不误判死）。
+//!
 //! 背景（真机报告：系统重启后托盘常驻「?」且手动刷新无效）：
 //! - v0.3.8 的 IO 循环在开机自启早于 USB 接收器/驱动就绪时枚举到 0 个设备，
 //!   随后按轮询间隔（默认 600s）睡眠——「无设备」态下一次自动重试最晚
@@ -131,6 +136,91 @@ impl ChannelLiveness {
         }
         self.silent_rounds >= HANDLE_INVALIDATE_THRESHOLD
             || self.probe_silent_rounds >= WAKE_PROBE_INVALIDATE_THRESHOLD
+    }
+}
+
+/// 连续「扫槽全败且含 I/O 类错误」触发强制重开的轮数（v0.3.11，F2/D-68）。
+pub const SLOT_SCAN_REOPEN_THRESHOLD: u32 = 3;
+
+/// 槽位扫描失败的类别（v0.3.11，F1/F2）：区分「设备不应答」与「句柄可疑」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotScanFailure {
+    /// 超时类：设备休眠 / 离线 / 不应答——句柄死亡之外有更平常的解释。
+    Timeout,
+    /// I/O 类错误（含设备消失）：缓存句柄可疑的直接证据。
+    Io,
+    /// 其它失败（协议错误帧 / 电量未知等）：设备或接收器回了字节，
+    /// 句柄本身大概率活着。
+    Other,
+}
+
+/// 通道级「扫槽连败」裁决（v0.3.11，F2/D-68）——修复「0 槽位 + 死缓存
+/// 句柄」死锁：重启后槽位注册不上时 ChannelLiveness 的轮询 outcomes 恒为
+/// 空、永不裁决，invalidate_handles 永不触发，30s 重扫永远复用已失效的
+/// 缓存句柄（永久「?」，唯一出口是手动刷新）。本裁决在**扫槽路径**上补出
+/// 句柄死亡的观测点：
+///
+/// - **跨槽位去重、按轮裁决**：一轮内全部已扫描槽位失败才记 1 次连败
+///   （7 个槽位全败只记 1 轮）；本轮有任一槽位注册成功 = 句柄活着，清零；
+///   本轮零扫描（槽位已全部注册）不裁决、计数冻结；
+/// - **纯超时（无 I/O 错误）不得触发重开且连败清零**：设备深睡不应答
+///   不是句柄死亡——避免把「设备深睡」误判成句柄死亡（v0.3.10 P1 质检
+///   打回的同族陷阱）；连败要求每轮都至少一次 I/O 类错误（死句柄的
+///   read 每轮都报错，深睡设备的通道每轮都是纯超时，两者可分）；
+/// - 连续 [`SLOT_SCAN_REOPEN_THRESHOLD`] 轮连败返回 true，由 IO 线程强制
+///   重开该通道句柄（`HidDeviceChannel::open` 是主机侧 HID API 操作，
+///   零射频——不对判定休眠的设备发起任何主动查询）。
+///
+/// 每个通道一个实例（IO 线程按 ChannelState 持有），Instant 无关、纯计数。
+#[derive(Debug, Clone, Default)]
+pub struct SlotScanStreak {
+    /// 连续「扫槽全败且含 I/O 类错误」的轮数。
+    streak: u32,
+}
+
+impl SlotScanStreak {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 当前连败轮数（日志/测试观测用）。
+    pub fn streak(&self) -> u32 {
+        self.streak
+    }
+
+    /// 登记一轮扫槽结果。`scanned` = 本轮实际发起扫描的槽位数；
+    /// `failures` = 其中**失败**槽位的失败类别（成功槽位不在其中）。
+    /// 返回 true = 连败达阈值，应对该通道强制重开句柄。
+    pub fn note_round(&mut self, scanned: usize, failures: &[SlotScanFailure]) -> bool {
+        if scanned == 0 {
+            // 本轮零扫描（槽位已全部注册）：不裁决、计数冻结。
+            return false;
+        }
+        if failures.len() < scanned {
+            // 有槽位注册成功 = 句柄活着，连败清零。
+            self.streak = 0;
+            return false;
+        }
+        if !failures.iter().any(|f| matches!(f, SlotScanFailure::Io)) {
+            // 全部失败但纯超时/协议类：设备深睡不应答，不是句柄死亡——
+            // 连败清零（深睡不误判死）。
+            self.streak = 0;
+            return false;
+        }
+        self.streak = self.streak.saturating_add(1);
+        self.streak >= SLOT_SCAN_REOPEN_THRESHOLD
+    }
+
+    /// 重开结果处置（F2）：成功 → 连败清零、重新观察，返回 false；
+    /// 失败 → 句柄重开无望，返回 true = 整通道作废（调用方移除通道
+    /// 并 `Reconnect::invalidate_handles` 走全量重枚举）。
+    pub fn note_reopen_result(&mut self, ok: bool) -> bool {
+        if ok {
+            self.streak = 0;
+            false
+        } else {
+            true
+        }
     }
 }
 
@@ -537,5 +627,81 @@ mod tests {
     fn liveness_thresholds_locked() {
         assert_eq!(HANDLE_INVALIDATE_THRESHOLD, 3);
         assert_eq!(WAKE_PROBE_INVALIDATE_THRESHOLD, 2);
+    }
+
+    use super::{SlotScanFailure as SF, SlotScanStreak, SLOT_SCAN_REOPEN_THRESHOLD};
+
+    /// F2 用例 1（连败计数触发重开 + 跨槽位去重按轮裁决）：连续 3 轮
+    /// 「扫槽全败且含 I/O 类错误」→ 触发强制重开；一轮 7 个槽位全败
+    /// 只记 1 轮连败（按轮裁决，不跨槽位累计）。
+    #[test]
+    fn scan_streak_three_io_rounds_trigger_reopen() {
+        let mut s = SlotScanStreak::new();
+        let all_io = [SF::Io; 7];
+        assert!(!s.note_round(7, &all_io));
+        assert_eq!(s.streak(), 1, "一轮 7 槽位全败只记 1 轮（跨槽位去重）");
+        assert!(!s.note_round(7, &all_io));
+        assert_eq!(s.streak(), 2);
+        assert!(s.note_round(7, &all_io), "第 3 轮连败触发强制重开");
+        assert_eq!(SLOT_SCAN_REOPEN_THRESHOLD, 3);
+    }
+
+    /// F2 用例 2（纯超时不触发）：全部超时（无 I/O 错误）永不触发重开，
+    /// 且打断既有连败——设备深睡不应答不是句柄死亡（v0.3.10 P1 质检
+    /// 打回的同族陷阱）。
+    #[test]
+    fn scan_streak_pure_timeout_never_triggers() {
+        let mut s = SlotScanStreak::new();
+        let all_timeout = [SF::Timeout; 7];
+        for _ in 0..10 {
+            assert!(!s.note_round(7, &all_timeout));
+        }
+        assert_eq!(s.streak(), 0, "纯超时轮不得累计连败");
+        // 2 轮 I/O 连败后插入纯超时轮 → 连败被打断清零，重新计。
+        let mut s = SlotScanStreak::new();
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(7, &all_timeout));
+        assert_eq!(s.streak(), 0, "纯超时轮打断连败（深睡不误判死）");
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert_eq!(s.streak(), 1);
+    }
+
+    /// F2 用例 3（重开失败整通道作废）：连败触发后重开失败 → 作废
+    /// （调用方移除通道 + invalidate_handles 全量重枚举）；重开成功 →
+    /// 连败清零、不作废。
+    #[test]
+    fn scan_streak_reopen_failure_scraps_channel() {
+        let mut s = SlotScanStreak::new();
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(s.note_round(7, &[SF::Io; 7]));
+        assert!(s.note_reopen_result(false), "重开失败 = 整通道作废");
+        // 重开成功：连败清零、不作废。
+        let mut s = SlotScanStreak::new();
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_reopen_result(true));
+        assert_eq!(s.streak(), 0, "重开成功后连败清零重新观察");
+    }
+
+    /// F2 用例 4（成功清零 / 零扫描冻结 / 混合失败含 I/O 计数）：
+    /// 任一槽位注册成功 = 句柄活着；本轮零扫描（槽位已满）不裁决；
+    /// 失败混合中只要含 I/O 类即满足连败条件。
+    #[test]
+    fn scan_streak_success_resets_and_idle_rounds_freeze() {
+        let mut s = SlotScanStreak::new();
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        // 7 扫描 6 失败 1 成功 → 句柄活着，清零。
+        assert!(!s.note_round(7, &[SF::Io; 6]));
+        assert_eq!(s.streak(), 0, "任一槽位成功即清零");
+        // 连败 1 轮后零扫描轮（槽位全部注册）：计数冻结。
+        assert!(!s.note_round(7, &[SF::Io; 7]));
+        assert!(!s.note_round(0, &[]));
+        assert_eq!(s.streak(), 1, "本轮零扫描不得改变连败");
+        // 混合失败含 I/O → 计数；第 3 轮触发。
+        assert!(!s.note_round(2, &[SF::Io, SF::Timeout]));
+        assert!(s.note_round(2, &[SF::Timeout, SF::Io]));
     }
 }

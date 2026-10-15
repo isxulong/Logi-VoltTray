@@ -8,6 +8,10 @@
 //!   处理留待重试，不得误判成 1.0 设备。
 //!
 //! 成功则逐个 GetFeatureIndex 解析 0x1004 / 0x1000 / 0x1001。超时按 NoResponse 处理。
+//!
+//! v0.3.11（F1）：无响应携带原因分类 [`NoResponseCause`]——此前 `Err(_)`
+//! 同判 NoResponse，I/O 错误（缓存句柄可疑）与超时（设备休眠）在日志中
+//! 不可区分，死句柄与深睡设备无法分辨。
 
 use volttray_protocol::commands::{feature_ids, QueryCommand};
 use volttray_protocol::error::ErrorFamily;
@@ -22,8 +26,20 @@ pub enum Handshake {
     Hidpp2(FeatureTable),
     /// HID++ 1.0 设备（对 IRoot 报 1.0 协议错误，错误码非 0x08）。
     Hidpp1,
-    /// 无响应（超时 / I/O 错误 / 1.0 休眠 0x08 / 2.0 ping 阶段异常错误帧）。
-    NoResponse,
+    /// 无响应（原因分类见 [`NoResponseCause`]，v0.3.11 F1）。
+    NoResponse(NoResponseCause),
+}
+
+/// 握手无响应的原因分类（v0.3.11，F1）：区分「设备不应答」与「句柄可疑」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoResponseCause {
+    /// 读超时：设备休眠 / 离线 / 不应答。
+    Timeout,
+    /// I/O 错误（含设备消失）：缓存句柄可疑。
+    Io,
+    /// 协议层异常：1.0 休眠 0x08 / 2.0 ping 阶段错误帧 / 请求不可编码——
+    /// 设备（或接收器）回了字节或本机编码失败，不是句柄死亡的直接证据。
+    Protocol,
 }
 
 /// 握手探测的 feature 全集（顺序即策略链顺序；0x0005 设备名 v0.3.0 新增）。
@@ -37,13 +53,16 @@ pub const PROBED_FEATURES: [u16; 4] = [
 /// 把 IRoot ping 阶段的设备错误帧分类为握手结论（红队差异 F5 的实证规则）。
 fn classify_ping_error(err: &HidppError) -> Handshake {
     let HidppError::Device { family, code, .. } = err else {
-        return Handshake::NoResponse;
+        return Handshake::NoResponse(NoResponseCause::Protocol);
     };
     match family {
         // 1.0 错误码 0x08 = UNKNOWN_DEVICE：设备休眠/离线，不是 1.0 协议的判据。
         ErrorFamily::Hidpp1 if code.code() != 0x08 => Handshake::Hidpp1,
         // 1.0 0x08（休眠）与 2.0 错误帧都按"本轮无响应"处理，留待下轮重试。
-        ErrorFamily::Hidpp1 | ErrorFamily::Hidpp2 => Handshake::NoResponse,
+        // 设备回了错误帧 = 句柄活着，归协议类（v0.3.11 F1）。
+        ErrorFamily::Hidpp1 | ErrorFamily::Hidpp2 => {
+            Handshake::NoResponse(NoResponseCause::Protocol)
+        }
     }
 }
 
@@ -55,14 +74,20 @@ pub fn handshake<C: HidChannel, S: EventSink>(
     let Ok(ping) =
         QueryCommand::GetProtocolVersion.encode_for(device_index, sw, &FeatureTable::new())
     else {
-        return Handshake::NoResponse;
+        return Handshake::NoResponse(NoResponseCause::Protocol);
     };
+    // v0.3.11（F1）：超时与 I/O 错误分判——死句柄（Io）与深睡设备
+    // （Timeout）向调用方透出不同类别，不再同判 NoResponse。
     match t.request(&ping, Some(feature_ids::IROOT)) {
         Ok(_) => {}
         Err(TransportError::Protocol(err @ HidppError::Device { .. })) => {
             return classify_ping_error(&err);
         }
-        Err(_) => return Handshake::NoResponse,
+        Err(TransportError::Protocol(_)) => {
+            return Handshake::NoResponse(NoResponseCause::Protocol);
+        }
+        Err(TransportError::Timeout) => return Handshake::NoResponse(NoResponseCause::Timeout),
+        Err(TransportError::Io(_)) => return Handshake::NoResponse(NoResponseCause::Io),
     }
 
     let mut table = FeatureTable::new();
@@ -159,8 +184,12 @@ mod tests {
     #[test]
     fn hidpp1_sleeping_code_0x08_is_no_response() {
         // 1.0 错误码 0x08 = UNKNOWN_DEVICE（休眠/离线）：不得误判成 1.0 设备。
+        // 设备回了错误帧 = 句柄活着，归协议类（v0.3.11 F1）。
         let mut t = stub(vec![Ok(vec![0x10, 0x02, 0x8F, 0x00, 0x00, 0x08, 0x00])]);
-        assert_eq!(handshake(&mut t, 0x02), Handshake::NoResponse);
+        assert_eq!(
+            handshake(&mut t, 0x02),
+            Handshake::NoResponse(NoResponseCause::Protocol)
+        );
     }
 
     #[test]
@@ -169,12 +198,30 @@ mod tests {
         let mut frame = vec![0x11, 0x02, 0xFF, 0x00, 0x11, 0x08];
         frame.resize(20, 0);
         let mut t = stub(vec![Ok(frame)]);
-        assert_eq!(handshake(&mut t, 0x02), Handshake::NoResponse);
+        assert_eq!(
+            handshake(&mut t, 0x02),
+            Handshake::NoResponse(NoResponseCause::Protocol)
+        );
     }
 
     #[test]
     fn no_response_on_timeout() {
+        // 读超时 = 设备休眠/离线/不应答（v0.3.11 F1：Timeout 类）。
         let mut t = stub(vec![]);
-        assert_eq!(handshake(&mut t, 0x01), Handshake::NoResponse);
+        assert_eq!(
+            handshake(&mut t, 0x01),
+            Handshake::NoResponse(NoResponseCause::Timeout)
+        );
+    }
+
+    #[test]
+    fn no_response_on_io_error() {
+        // I/O 错误（如死句柄 read 报错）单独成类（v0.3.11 F1）：与超时
+        // 可区分，供上层「扫槽连败」裁决把句柄可疑与设备深睡分开。
+        let mut t = stub(vec![Err(IoError::Other("invalid handle".into()))]);
+        assert_eq!(
+            handshake(&mut t, 0x01),
+            Handshake::NoResponse(NoResponseCause::Io)
+        );
     }
 }

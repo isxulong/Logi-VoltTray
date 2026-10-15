@@ -29,6 +29,7 @@ pub use core::{
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
 pub use reconnect::{
-    ChannelLiveness, EnumTransition, Reconnect, SlotOutcome, ENUM_BACKOFF_STEPS,
-    HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL, WAKE_PROBE_INVALIDATE_THRESHOLD,
+    ChannelLiveness, EnumTransition, Reconnect, SlotOutcome, SlotScanFailure, SlotScanStreak,
+    ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL, SLOT_SCAN_REOPEN_THRESHOLD,
+    WAKE_PROBE_INVALIDATE_THRESHOLD,
 };

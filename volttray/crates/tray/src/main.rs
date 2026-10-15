@@ -54,11 +54,12 @@ mod imp {
     };
     use volttray_app::{
         Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer,
-        PollDecision, Reconnect, SharedObserver, SlotOutcome, Snapshot, TimeoutOutcome,
-        HANDLE_INVALIDATE_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
+        PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
+        Snapshot, TimeoutOutcome, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
+        WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
-    use volttray_device::handshake::{handshake, Handshake};
+    use volttray_device::handshake::{handshake, Handshake, NoResponseCause};
     use volttray_device::name::read_device_name;
     use volttray_device::state::DeviceState;
     use volttray_device::{classify_pid, Device};
@@ -82,6 +83,9 @@ mod imp {
 
     /// 接收器槽位扫描顺序（参考实现 `_scan_channel` 实证：1..=6 再 0xFF）。
     const SCAN_SLOTS: [u8; 7] = [1, 2, 3, 4, 5, 6, 0xFF];
+    /// v0.3.11（F3）：无设备态每轮重扫的汇总日志单会话行数上限
+    /// （30s 一轮 ≈ 50 分钟覆盖；防长期无人值守时日志爆量）。
+    const RESCAN_LOG_CAP: u32 = 100;
     /// 电压曲线名（v0.2.0：参考实现 13 锚点实证曲线）。
     const CURVE: &str = "li-ion-logi";
 
@@ -146,6 +150,10 @@ mod imp {
         /// 整轮零应答才记 1 次；多设备同睡（正常休眠边界内）不判死；
         /// 唤醒探测静默单独计数。判死才作废句柄 + 强制重枚举自愈。
         liveness: ChannelLiveness,
+        /// 通道级「扫槽连败」裁决（v0.3.11，F2/D-68）：0 槽位时轮询
+        /// outcomes 恒空、liveness 永不裁决——扫槽路径上的句柄死亡观测点；
+        /// 连续全败且含 I/O 类才强制重开，纯超时（深睡）不触发。
+        scan_streak: SlotScanStreak,
         slots: Vec<SlotState>,
     }
 
@@ -206,26 +214,37 @@ mod imp {
     }
 
     /// 对单个通道扫描一个槽位：握手 → 电量探测；拿到电量才注册。
-    /// 返回注册成功的槽位（None = 未发现/电量未知，原因已进诊断流）。
+    /// 返回注册成功的槽位；Err 携带失败类别（v0.3.11 F1：供通道级
+    /// 「扫槽连败」裁决区分「设备深睡不应答」与「句柄可疑」，F2）。
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
         shared: &SharedChannel,
         info: &ChannelInfo,
         slot: u8,
-    ) -> Option<SlotState> {
+    ) -> Result<SlotState, SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
         let hs = handshake(&mut t, slot);
         let (features, is_hidpp1) = match hs {
             Handshake::Hidpp2(table) => (table, false),
             Handshake::Hidpp1 => (FeatureTable::new(), true),
-            Handshake::NoResponse => {
-                // v0.3.9（A）：槽位扫描失败落设备层日志（状态变化/失败级）。
-                bootlog::note(&format!(
-                    "slot scan: {id} handshake no response (slot skipped)"
-                ));
-                return None;
+            Handshake::NoResponse(cause) => {
+                // v0.3.11（F1）：slot scan 日志区分超时与 I/O 类失败——
+                // 死句柄与深睡设备在日志中可分辨（此前同判 no response）。
+                match cause {
+                    NoResponseCause::Io => bootlog::note(&format!(
+                        "slot scan: {id} io error (handle suspect) (slot skipped)"
+                    )),
+                    _ => bootlog::note(&format!(
+                        "slot scan: {id} handshake no response (slot skipped)"
+                    )),
+                }
+                return Err(match cause {
+                    NoResponseCause::Timeout => SlotScanFailure::Timeout,
+                    NoResponseCause::Io => SlotScanFailure::Io,
+                    NoResponseCause::Protocol => SlotScanFailure::Other,
+                });
             }
         };
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
@@ -236,7 +255,12 @@ mod imp {
                     "slot scan: {id} battery query failed reason={} (slot skipped)",
                     reason.code()
                 ));
-                return None;
+                // v0.3.11（F1/F2）：探测阶段 I/O 类失败同样是句柄可疑证据。
+                return Err(match reason {
+                    UnknownReason::QueryTimeout => SlotScanFailure::Timeout,
+                    UnknownReason::IoFailure | UnknownReason::DeviceGone => SlotScanFailure::Io,
+                    _ => SlotScanFailure::Other,
+                });
             }
         };
         // v0.3.0「?」修复：优先取真实设备名（HID++ DEVICE_NAME / 接收器配对名
@@ -266,7 +290,7 @@ mod imp {
                 },
             ));
         }
-        Some(SlotState {
+        Ok(SlotState {
             id,
             index: slot,
             features,
@@ -293,6 +317,10 @@ mod imp {
         // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
         // 一次的例行枚举在集合未变时不重复全量落盘（单会话日志体积上限）。
         let mut last_enum_sig: Option<String> = None;
+        // v0.3.11（F3）：无设备态重扫轮次计数（汇总日志用，单会话上限
+        // RESCAN_LOG_CAP 行——死锁场景枚举签名不变，签名去重不落日志，
+        // 没有这行汇总则「0 槽位 + 死缓存句柄」期间完全无观测）。
+        let mut rescan_round: u32 = 0;
         'outer: loop {
             if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
                 return;
@@ -303,6 +331,9 @@ mod imp {
             // 零耗电约束）；「立即刷新」/句柄失效置 force → 立即重枚举。
             let enum_now = Instant::now();
             if reconnect.should_enumerate(enum_now, !channels.is_empty()) {
+                // v0.3.11（F3）：本轮枚举是否重开过缓存句柄（无设备态
+                // 汇总日志用；声明在 match 外供轮末读取）。
+                let mut reopened_this_round = false;
                 match hidapi::HidApi::new() {
                     Ok(api) => {
                         // v0.3.10（P2）：本轮枚举是否由「立即刷新」/句柄失效
@@ -350,6 +381,9 @@ mod imp {
                             last_enum_sig = Some(enum_sig);
                         }
                         let mut seen: Vec<String> = Vec::new();
+                        // v0.3.11（F2）：「扫槽连败重开失败、待整通道作废」的
+                        // 通道 key（借用期内不能就地移除，循环外统一处理）。
+                        let mut scrapped_channels: Vec<String> = Vec::new();
                         for info in found {
                             let key = info.key();
                             seen.push(key.clone());
@@ -371,6 +405,10 @@ mod imp {
                                             state.shared = SharedChannel(Arc::new(Mutex::new(ch)));
                                             // 新句柄重新裁决活性；槽位连败清零。
                                             state.liveness = ChannelLiveness::new();
+                                            // v0.3.11（F2/F3）：扫槽连败同步清零；
+                                            // 本轮汇总日志标记重开过句柄。
+                                            state.scan_streak = SlotScanStreak::new();
+                                            reopened_this_round = true;
                                             for s in &mut state.slots {
                                                 s.hard_failures = 0;
                                             }
@@ -386,14 +424,68 @@ mod imp {
                                     }
                                 }
                                 // 已有通道：补扫新出现的槽位（休眠唤醒 / 新配对）。
+                                // v0.3.11（F2）：扫槽结果按轮收集，轮末交
+                                // SlotScanStreak 裁决——连续 SLOT_SCAN_REOPEN_THRESHOLD
+                                // 轮「全部失败且至少一次 I/O 类」才强制重开句柄
+                                // （跨槽位去重、按轮计；纯超时轮清零——设备深睡
+                                // 不误判成句柄死亡，P1 同族陷阱）。
+                                let mut scanned = 0usize;
+                                let mut scan_failures: Vec<SlotScanFailure> = Vec::new();
                                 for slot in SCAN_SLOTS {
                                     if state.slots.iter().any(|s| s.index == slot) {
                                         continue;
                                     }
-                                    if let Some(s) =
-                                        try_slot(&core, &observer, &state.shared, &state.info, slot)
-                                    {
-                                        state.slots.push(s);
+                                    scanned += 1;
+                                    match try_slot(
+                                        &core,
+                                        &observer,
+                                        &state.shared,
+                                        &state.info,
+                                        slot,
+                                    ) {
+                                        Ok(s) => state.slots.push(s),
+                                        Err(f) => scan_failures.push(f),
+                                    }
+                                }
+                                if state.scan_streak.note_round(scanned, &scan_failures) {
+                                    // 连败达阈值：缓存句柄可疑，强制重开——
+                                    // 主机侧 HID open，零射频，不触碰任何
+                                    // 休眠设备（零鼠标电池红线）。
+                                    match HidDeviceChannel::open(
+                                        &api,
+                                        state.info.short_path.as_deref(),
+                                        state.info.long_path.as_deref(),
+                                    ) {
+                                        Ok(ch) => {
+                                            bootlog::note(&format!(
+                                                "hid reopen ok (scan-streak {} rounds): pid=0x{:04X} tag={}",
+                                                SLOT_SCAN_REOPEN_THRESHOLD,
+                                                state.info.pid,
+                                                state.info.tag
+                                            ));
+                                            state.shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                                            // 新句柄重新裁决活性；各类连败清零。
+                                            state.liveness = ChannelLiveness::new();
+                                            for s in &mut state.slots {
+                                                s.hard_failures = 0;
+                                            }
+                                            state.scan_streak.note_reopen_result(true);
+                                            reopened_this_round = true;
+                                        }
+                                        Err(e) => {
+                                            // 重开失败 = 句柄重开无望：整通道
+                                            // 作废（循环外统一移除）+ 强制全量
+                                            // 重枚举。
+                                            bootlog::note(&format!(
+                                                "hid reopen failed (scan-streak {} rounds): pid=0x{:04X} tag={}: {e}; scrap channel + re-enumerate",
+                                                SLOT_SCAN_REOPEN_THRESHOLD,
+                                                state.info.pid,
+                                                state.info.tag
+                                            ));
+                                            if state.scan_streak.note_reopen_result(false) {
+                                                scrapped_channels.push(state.key.clone());
+                                            }
+                                        }
                                     }
                                 }
                                 continue;
@@ -420,7 +512,7 @@ mod imp {
                             let shared = SharedChannel(Arc::new(Mutex::new(ch)));
                             let mut slots = Vec::new();
                             for slot in SCAN_SLOTS {
-                                if let Some(s) = try_slot(&core, &observer, &shared, &info, slot) {
+                                if let Ok(s) = try_slot(&core, &observer, &shared, &info, slot) {
                                     slots.push(s);
                                 }
                             }
@@ -429,6 +521,7 @@ mod imp {
                                 info,
                                 shared,
                                 liveness: ChannelLiveness::new(),
+                                scan_streak: SlotScanStreak::new(),
                                 slots,
                             });
                         }
@@ -451,6 +544,29 @@ mod imp {
                             } else {
                                 i += 1;
                             }
+                        }
+                        // v0.3.11（F2）：扫槽连败且重开失败的通道整通道作废
+                        // （句柄重开无望），剩余槽位置为离线，强制全量重枚举
+                        // （主机侧操作，零射频）。
+                        if !scrapped_channels.is_empty() {
+                            let mut removed_ids: Vec<String> = Vec::new();
+                            channels.retain(|c| {
+                                if scrapped_channels.contains(&c.key) {
+                                    removed_ids.extend(c.slots.iter().map(|s| s.id.clone()));
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                            for id in removed_ids {
+                                if let Ok(mut c) = core.lock() {
+                                    c.record_failure(&id, true);
+                                }
+                                if let Ok(mut o) = observer.lock() {
+                                    o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id }));
+                                }
+                            }
+                            reconnect.invalidate_handles();
                         }
                     }
                     Err(e) => {
@@ -488,6 +604,25 @@ mod imp {
                         }
                     }
                     None => {}
+                }
+                // v0.3.11（F3）：无设备态每轮重扫落一行汇总日志。与枚举签名
+                // 去重独立（死锁场景候选集合不变、签名去重不落盘，没有这行
+                // 则「0 槽位 + 死缓存句柄」期间完全无观测）；单会话上限
+                // RESCAN_LOG_CAP 行防爆量。
+                if reconnect.no_device() {
+                    rescan_round = rescan_round.saturating_add(1);
+                    if rescan_round <= RESCAN_LOG_CAP {
+                        bootlog::note(&format!(
+                            "rescan round {}: channels={} slots={} cached_handle reopen={}",
+                            rescan_round,
+                            channels.len(),
+                            total_slots,
+                            if reopened_this_round { "yes" } else { "no" }
+                        ));
+                        if rescan_round == RESCAN_LOG_CAP {
+                            bootlog::note("rescan summary log capped for this session");
+                        }
+                    }
                 }
             }
 
