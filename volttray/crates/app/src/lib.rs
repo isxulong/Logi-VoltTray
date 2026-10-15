@@ -10,6 +10,7 @@ pub mod autostart;
 pub mod config;
 pub mod core;
 pub mod debounce;
+pub mod diag_export;
 pub mod observer;
 pub mod reconnect;
 

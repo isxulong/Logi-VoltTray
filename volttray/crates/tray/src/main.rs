@@ -52,6 +52,9 @@ mod imp {
     use volttray_app::config::{
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
+    use volttray_app::diag_export::{
+        read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot, LOG_TAIL_MAX_LINES,
+    };
     use volttray_app::{
         Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer,
         PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
@@ -301,12 +304,14 @@ mod imp {
     }
 
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
+    /// v0.3.12（D-69）：`enum_snap` 接收每轮枚举快照（导出诊断时 GUI 线程读取）。
     fn io_loop(
         core: Arc<Mutex<AppCore>>,
         observer: Arc<Mutex<Observer>>,
         gui: mpsc::Sender<GuiMsg>,
         cmd: mpsc::Receiver<IoCmd>,
         cfg_path: PathBuf,
+        enum_snap: Arc<Mutex<Option<EnumSnapshot>>>,
     ) {
         let mut channels: Vec<ChannelState> = Vec::new();
         let mut watcher = ConfigWatcher::new(cfg_path);
@@ -340,6 +345,12 @@ mod imp {
                 // 无条件清 force（main.rs 老代码先 invalidate 后 record，
                 // force 被同轮清掉，「立即重枚举」退化成下一个 30s 门控点）。
                 let mut force_after_record = false;
+                // v0.3.12（D-69）：本轮枚举快照素材（诊断导出用）——
+                // 候选数 / 各通道 open 结果 / 枚举失败原因 / 是否强制轮。
+                let mut enum_channels: Vec<ChannelEnumResult> = Vec::new();
+                let mut enum_candidates = 0usize;
+                let mut enum_error: Option<String> = None;
+                let mut forced_round = false;
                 match hidapi::HidApi::new() {
                     Ok(api) => {
                         // v0.3.10（P2）：本轮枚举是否由「立即刷新」/句柄失效
@@ -347,7 +358,9 @@ mod imp {
                         // 不变不代表缓存句柄还活着：接收器同口重插/驱动重载
                         // 后旧句柄已死，不重开则刷新仍打在死句柄上）。
                         let forced = reconnect.pending_force();
+                        forced_round = forced;
                         let found = enumerate_channels(&api);
+                        enum_candidates = found.len();
                         // v0.3.10（P3-日志）：候选集合签名未变则例行枚举不落
                         // 日志——仅集合变化（或下方 Err 臂的枚举失败）时记录，
                         // 与「只记状态变化与失败」口径一致。
@@ -394,6 +407,11 @@ mod imp {
                             let key = info.key();
                             seen.push(key.clone());
                             if let Some(state) = channels.iter_mut().find(|c| c.key == key) {
+                                // v0.3.12（D-69）：已有通道本轮 open 状态
+                                // （cached / reopened / cached-reopen-failed），
+                                // 供诊断导出快照。
+                                let mut open_status = "cached".to_string();
+                                let mut open_error: Option<String> = None;
                                 // v0.3.10（P2）：强制枚举轮重开已有通道句柄——
                                 // 「立即刷新」第一次点击即生效（v0.3.9 只在
                                 // 死句柄上补扫槽位，需 3 连败才自愈）。
@@ -418,6 +436,7 @@ mod imp {
                                             for s in &mut state.slots {
                                                 s.hard_failures = 0;
                                             }
+                                            open_status = "reopened".to_string();
                                         }
                                         Err(e) => {
                                             // 重开失败保留缓存句柄：活性裁决
@@ -426,6 +445,8 @@ mod imp {
                                                 "hid reopen failed (forced enum): pid=0x{:04X} tag={}: {e}; keep cached handle",
                                                 state.info.pid, state.info.tag
                                             ));
+                                            open_status = "cached-reopen-failed".to_string();
+                                            open_error = Some(e.to_string());
                                         }
                                     }
                                 }
@@ -477,6 +498,8 @@ mod imp {
                                             }
                                             state.scan_streak.note_reopen_result(true);
                                             reopened_this_round = true;
+                                            open_status = "reopened".to_string();
+                                            open_error = None;
                                         }
                                         Err(e) => {
                                             // 重开失败 = 句柄重开无望：整通道
@@ -488,12 +511,22 @@ mod imp {
                                                 state.info.pid,
                                                 state.info.tag
                                             ));
+                                            open_status = "cached-reopen-failed".to_string();
+                                            open_error = Some(e.to_string());
                                             if state.scan_streak.note_reopen_result(false) {
                                                 scrapped_channels.push(state.key.clone());
                                             }
                                         }
                                     }
                                 }
+                                // v0.3.12（D-69）：记入本轮枚举快照。
+                                enum_channels.push(ChannelEnumResult {
+                                    key: state.key.clone(),
+                                    pid: format!("0x{:04X}", state.info.pid),
+                                    tag: state.info.tag,
+                                    open: open_status,
+                                    error: open_error,
+                                });
                                 continue;
                             }
                             // v0.3.9（A）：通道打开成功/失败（含错误原因）落日志。
@@ -508,6 +541,14 @@ mod imp {
                                         "hid open failed: pid=0x{:04X} tag={}: {e}",
                                         info.pid, info.tag
                                     ));
+                                    // v0.3.12（D-69）：打开失败也记入快照。
+                                    enum_channels.push(ChannelEnumResult {
+                                        key: key.clone(),
+                                        pid: format!("0x{:04X}", info.pid),
+                                        tag: info.tag,
+                                        open: "failed".to_string(),
+                                        error: Some(e.to_string()),
+                                    });
                                     continue;
                                 }
                             };
@@ -515,6 +556,14 @@ mod imp {
                                 "hid open ok: pid=0x{:04X} tag={}",
                                 info.pid, info.tag
                             ));
+                            // v0.3.12（D-69）：新通道本轮打开成功。
+                            enum_channels.push(ChannelEnumResult {
+                                key: key.clone(),
+                                pid: format!("0x{:04X}", info.pid),
+                                tag: info.tag,
+                                open: "ok".to_string(),
+                                error: None,
+                            });
                             let shared = SharedChannel(Arc::new(Mutex::new(ch)));
                             let mut slots = Vec::new();
                             for slot in SCAN_SLOTS {
@@ -579,10 +628,28 @@ mod imp {
                     }
                     Err(e) => {
                         bootlog::note(&format!("hid enum failed: HidApi init error: {e}"));
+                        // v0.3.12（D-69）：枚举本身失败也更新快照（error 字段
+                        // 说明原因，候选数 0、通道明细空）。
+                        enum_error = Some(format!("HidApi init failed: {e}"));
                     }
                 }
                 // 进入/退出「无设备」态：事件级日志（诊断流 + bootlog 双写）。
                 let total_slots: usize = channels.iter().map(|c| c.slots.len()).sum();
+                // v0.3.12（D-69）：本轮枚举快照写入共享内存（GUI 线程导出诊断
+                // 时读取）。锁中毒则本轮跳过（下次枚举再写），绝不影响主流程。
+                if let Ok(mut snap) = enum_snap.lock() {
+                    *snap = Some(EnumSnapshot {
+                        at_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0),
+                        forced: forced_round,
+                        candidate_channels: enum_candidates,
+                        channels: enum_channels,
+                        registered_slots: total_slots,
+                        error: enum_error,
+                    });
+                }
                 match reconnect.record_result(enum_now, total_slots) {
                     Some(EnumTransition::EnteredNoDevice) => {
                         bootlog::note(
@@ -1050,6 +1117,10 @@ mod imp {
 
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
+        // v0.3.12（D-69）：最近一次枚举快照——IO 线程每轮枚举后写入，
+        // GUI 线程「导出诊断」时读取（重启后识别失败场景下，导出不再
+        // 只有空设备列表，还能带上枚举现场）。
+        let enum_snap = Arc::new(Mutex::new(None::<EnumSnapshot>));
         // P2-1：启动加载的钳制/未知键警告进入诊断流（M9 AC3）。
         // v0.3.3 卫生项①：空警告不再推 ConfigReloaded（噪声事件）。
         if !load_warnings.is_empty() {
@@ -1071,7 +1142,8 @@ mod imp {
             let core = core.clone();
             let observer = observer.clone();
             let path = cfg_path.clone();
-            std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path));
+            let enum_snap = enum_snap.clone();
+            std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path, enum_snap));
         }
         bootlog::stage("io-thread-spawned");
 
@@ -1403,7 +1475,7 @@ mod imp {
                     .unwrap_or_else(|| "50".to_string());
                 crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, &preview);
             } else if e.id == ids.diag {
-                export_diag(observer);
+                export_diag(observer, &enum_snap);
             } else if e.id == ids.blink {
                 state.blink_enabled = !state.blink_enabled;
                 if let Ok(mut guard) = cfg_arc.write() {
@@ -1589,17 +1661,45 @@ mod imp {
         Ok(path)
     }
 
-    /// 诊断导出（P1-6：脱敏 JSON 落盘 + 弹窗告知路径）。
-    fn export_diag(observer: &Arc<Mutex<Observer>>) {
-        let json = match observer.lock() {
-            Ok(o) => o.export_json(true),
-            Err(_) => "[]".to_string(),
+    /// 诊断导出（P1-6：脱敏；v0.3.12 D-69：导出重构为对象——devices +
+    /// log_tail + last_enum + exported_at/app_version）。**导出永远成功**：
+    /// 任何子项失败（日志缺失/锁中毒/枚举未发生）降级为空 + reason，
+    /// 绝不整体报错（v0.3.2 的 os error 3 教训）。
+    fn export_diag(observer: &Arc<Mutex<Observer>>, enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>) {
+        // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
+        let (devices, devices_reason) = match observer.lock() {
+            Ok(o) => (o.export_value(true), None),
+            Err(_) => (
+                serde_json::Value::Array(Vec::new()),
+                Some("observer lock poisoned".to_string()),
+            ),
         };
-        let secs = std::time::SystemTime::now()
+        // log_tail：bootlog 登记的真实日志路径（APPDATA → EXE 目录 → TEMP
+        // 逐级兜底后的实际落点）；文件不存在/不可读由 read_log_tail 降级。
+        let log_tail = read_log_tail(
+            std::path::Path::new(&bootlog::path_str()),
+            LOG_TAIL_MAX_LINES,
+        );
+        // last_enum：最近一次枚举快照（内存状态）；未枚举为 null。
+        let (last_enum, last_enum_reason) = match enum_snap.lock() {
+            Ok(g) => (g.clone(), None),
+            Err(_) => (None, Some("enum snapshot lock poisoned".to_string())),
+        };
+        let exported_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let filename = format!("LogiVoltTray-diag-export-{secs}.json");
+        let json = DiagExport {
+            devices,
+            devices_reason,
+            log_tail,
+            last_enum,
+            last_enum_reason,
+            exported_at,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+        .to_json_string();
+        let filename = format!("LogiVoltTray-diag-export-{exported_at}.json");
         let msg = match write_diag_export(
             Config::default_path()
                 .parent()
@@ -1607,7 +1707,11 @@ mod imp {
             &filename,
             &json,
         ) {
-            Ok(path) => format!("诊断事件流已脱敏导出：\n{}", path.display()),
+            Ok(path) => format!(
+                "诊断已导出（设备事件流 + 日志尾部 {} 行 + 最近枚举快照）：\n{}",
+                LOG_TAIL_MAX_LINES,
+                path.display()
+            ),
             Err(e) => format!("诊断导出失败：{e}"),
         };
         let text = wide(&msg);

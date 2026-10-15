@@ -63,8 +63,10 @@ impl Observer {
         self.buf.iter()
     }
 
-    /// 导出 JSON。`mask=true` 时对帧 hex 按 sensitive_params 遮蔽（P1-6）。
-    pub fn export_json(&self, mask: bool) -> String {
+    /// 导出 JSON 的值形态（v0.3.12，D-69）：供 `diag_export::DiagExport`
+    /// 作为 `devices` 字段嵌入导出对象。`mask=true` 时对帧 hex 按
+    /// sensitive_params 遮蔽（P1-6，逻辑与 `export_json` 同源）。
+    pub fn export_value(&self, mask: bool) -> serde_json::Value {
         let events: Vec<DiagEvent> = self
             .buf
             .iter()
@@ -76,7 +78,12 @@ impl Observer {
                 e
             })
             .collect();
-        serde_json::to_string_pretty(&events).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_value(&events).unwrap_or(serde_json::Value::Array(Vec::new()))
+    }
+
+    /// 导出 JSON。`mask=true` 时对帧 hex 按 sensitive_params 遮蔽（P1-6）。
+    pub fn export_json(&self, mask: bool) -> String {
+        serde_json::to_string_pretty(&self.export_value(mask)).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// 渲染为人类可读文本（诊断面板用）。

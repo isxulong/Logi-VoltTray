@@ -15,6 +15,7 @@ volttray-protocol = { path = "../protocol" }
 volttray-transport = { path = "../transport" }
 volttray-device = { path = "../device" }
 volttray-app = { path = "../app" }
+serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26.1"

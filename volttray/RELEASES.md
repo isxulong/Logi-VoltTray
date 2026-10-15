@@ -1,5 +1,24 @@
 # 发布说明
 
+## v0.3.12
+
+诊断导出增强（D-69）：真机实证——重启后识别失败时，导出的诊断 JSON 只有空数组 `[]`（旧格式 = 裸设备事件流数组，零设备时毫无信息量），远程排障还要二次索取 logi-volttray.log。本版把导出重构为对象，一次导出即带齐「设备事件流 + 日志尾部 + 最近枚举现场」。
+
+### 修复
+
+- **导出 JSON 由裸数组重构为对象（不兼容变更，向后兼容说明）**：旧格式是设备事件流的裸 JSON 数组（`[...]`）；新格式为对象，原事件流整体迁入 `devices` 字段（脱敏逻辑不动，P1-6 语义不变）。旧读端若直接把顶层当数组解析会失败——请改为取 `devices` 字段。新结构：`devices`（原设备事件流，锁中毒降级为空数组 + `devices_reason`）；`log_tail`（日志尾部 `{path, lines, reason}`，约 200 行）；`last_enum`（最近一次枚举快照，见下）或 `null`；`exported_at`（Unix 秒）；`app_version`。
+- **`log_tail`：logi-volttray.log 尾部约 200 行**（`LOG_TAIL_MAX_LINES=200`）。三态语义：正常 → `lines` 尾部 200 行（顺序保持）；文件不存在 → `lines: []` + `reason: "log file not found: ..."`；文件为空 → `lines: []` + `reason: "log file is empty"`；其它 I/O 错误 → 空数组 + reason。**任何情况下导出不因此失败**（v0.3.2 「os error 3 让导出整体报错」教训：子项降级，不整体抛错）。
+- **`last_enum`：最近一次枚举快照（内存状态）**：IO 线程每轮枚举后写入 `{at_ms, forced, candidate_channels, channels[{key, pid, tag, open, error}], registered_slots, error}`——候选通道数、各通道 open 结果（ok / failed / cached / reopened / cached-reopen-failed，含错误原因）、已注册槽位数、HidApi 初始化失败原因。导出时直接读内存，不打扰设备（零射频）；从未枚举（如导出先于首轮枚举）为 `null`；锁中毒降级为 `null` + `last_enum_reason`。快照写入锁中毒则本轮跳过，绝不影响主流程。
+- **导出永远成功**：devices / log_tail / last_enum 任何子项失败各自降级为空 + reason 字段，导出整体永不报错；最终序列化失败兜底 `"{}"`。
+
+### 零鼠标电池约束
+
+导出为纯读操作：读内存（observer 事件流、枚举快照）+ 读日志文件，不对设备发起任何 HID 查询，零射频。
+
+### 未验证项
+
+tray 层（Windows 专属代码）无法在 Linux CI 编译之外的本地环境验证，Windows 运行时行为（菜单导出、枚举快照写入、日志路径解析）待真机验证；`read_log_tail` 三态（缺失/空/正常 250 行取尾 200）、快照 null/非空序列化、devices 脱敏保持已由 app 层单测锁定（6 例，diag_export.rs）。
+
 ## v0.3.11
 
 真机复盘锁定的「重启后 0 槽位 + 死缓存句柄」死锁修复：重启后槽位注册不上时，活性裁决（ChannelLiveness）的轮询 outcomes 恒为空、永不裁决，缓存句柄永不重开，30s 重扫永远打在已失效句柄上——托盘永久「?」，唯一出口是手动刷新。本版按复盘 F1+F2+F3 实施；用户真机补充反馈「出日志时鼠标一直没动、处于休眠」后，F5（动鼠标立即恢复）由暂缓提为必做，连同质检复审指出的 P3 一行修复并入本版（F4 活性裁决与轮询档位解耦仍留待排期确认）。
