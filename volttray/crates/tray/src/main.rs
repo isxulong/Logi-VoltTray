@@ -1477,7 +1477,7 @@ mod imp {
                     .unwrap_or_else(|| "50".to_string());
                 crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, &preview);
             } else if e.id == ids.diag {
-                export_diag(observer, &enum_snap);
+                export_diag(observer, enum_snap);
             } else if e.id == ids.blink {
                 state.blink_enabled = !state.blink_enabled;
                 if let Ok(mut guard) = cfg_arc.write() {
