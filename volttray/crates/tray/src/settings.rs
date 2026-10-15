@@ -221,7 +221,7 @@ const L_CLIENT_W: i32 = 500;
 /// 分档卡片逻辑高（3 行 + 提示行；规范 96 的微调：避免 8pt 提示贴边）。
 const L_CARD_H: i32 = 104;
 /// 展开态客户区逻辑高。
-const L_EXPANDED_H: i32 = 812;
+const L_EXPANDED_H: i32 = 830;
 /// 收起分档卡后回收的逻辑高度（卡片 104 + 间距 8）。
 const TIER_DELTA: i32 = L_CARD_H + 8;
 /// 收起态客户区逻辑高。
@@ -234,6 +234,8 @@ const TIER_HINT_SAMPLE: &str =
 /// 背景覆盖度说明（裁决 4：100% = 满出血）。
 const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个内切区域）";
 /// 轮询间隔说明提示（D-66：如实说明轮询电耗可忽略，不再暗示「间隔越短越耗电」）。
+/// 单行放不下 → IDC_INTERVAL_HINT 为两行高静态控件（默认 SS_LEFT 自动换行，
+/// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断）。
 const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。";
 /// 最长状态文案（宽度实测样本）。
 const MSG_CONTRAST_SAMPLE: &str = "⚠ 字色与背景对比度 12.3 低于 3.0，可能不易读（不阻断使用）";
@@ -279,15 +281,15 @@ const BELOW: [(i32, i32, i32, i32, i32); 26] = [
     (IDC_SEC_REFRESH, 16, 566, 80, 18),
     (IDC_LBL_INTERVAL, 16, 592, 64, 20),
     (IDC_INTERVAL, 88, 588, 160, 220),
-    (IDC_INTERVAL_HINT, 88, 620, 396, 14),
-    (IDC_SEC_LOW, 16, 646, 96, 18),
-    (IDC_BLINK, 16, 672, 240, 22),
-    (IDC_LBL_LOW, 16, 702, 64, 20),
-    (IDC_SLIDER, 88, 698, 196, 26),
-    (IDC_THRESH_VAL, 292, 702, 44, 20),
-    (IDC_RESET_LOW, 344, 698, 48, 24),
-    (IDC_LOW_RANGE, 400, 704, 84, 14),
-    (IDC_RESET_ALL, 16, 738, 120, 28),
+    (IDC_INTERVAL_HINT, 88, 620, 396, 32),
+    (IDC_SEC_LOW, 16, 664, 96, 18),
+    (IDC_BLINK, 16, 690, 240, 22),
+    (IDC_LBL_LOW, 16, 720, 64, 20),
+    (IDC_SLIDER, 88, 716, 196, 26),
+    (IDC_THRESH_VAL, 292, 720, 44, 20),
+    (IDC_RESET_LOW, 344, 716, 48, 24),
+    (IDC_LOW_RANGE, 400, 722, 84, 14),
+    (IDC_RESET_ALL, 16, 756, 120, 28),
     // IDC_STATUS 单列（宽度按实测覆盖）。
 ];
 
@@ -1545,7 +1547,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
         ws(0),
         WINDOW_EX_STYLE(0),
         sc(16),
-        sc(774),
+        sc(792),
         sc(cw - 32),
         sc(30),
         IDC_STATUS,
@@ -1734,7 +1736,7 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     let _ = MoveWindow(
         ctl(hwnd, IDC_STATUS),
         ctx.sc(16),
-        ctx.sc(774 + dy),
+        ctx.sc(792 + dy),
         ctx.sc(ctx.cw.get() - 32),
         ctx.sc(30),
         true,
