@@ -523,7 +523,7 @@ mod imp {
                                 enum_channels.push(ChannelEnumResult {
                                     key: state.key.clone(),
                                     pid: format!("0x{:04X}", state.info.pid),
-                                    tag: state.info.tag,
+                                    tag: state.info.tag.clone(),
                                     open: open_status,
                                     error: open_error,
                                 });
@@ -545,7 +545,7 @@ mod imp {
                                     enum_channels.push(ChannelEnumResult {
                                         key: key.clone(),
                                         pid: format!("0x{:04X}", info.pid),
-                                        tag: info.tag,
+                                        tag: info.tag.clone(),
                                         open: "failed".to_string(),
                                         error: Some(e.to_string()),
                                     });
@@ -560,7 +560,7 @@ mod imp {
                             enum_channels.push(ChannelEnumResult {
                                 key: key.clone(),
                                 pid: format!("0x{:04X}", info.pid),
-                                tag: info.tag,
+                                tag: info.tag.clone(),
                                 open: "ok".to_string(),
                                 error: None,
                             });
