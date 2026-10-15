@@ -55,7 +55,8 @@ use volttray_app::config::{
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
+    RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
 use windows::Win32::Graphics::Gdi::{
@@ -411,10 +412,48 @@ impl Ctx {
 
     /// 即时生效：写入共享配置 + 持久化 TOML（无确定/取消）。
     fn apply(&self, cfg: &Config) {
+        // v0.3.14（红蓝共识 B9 必修）：设置应用落 bootlog（含键级 diff）——
+        // 此前 apply 零日志，真机反馈「改了不生效」时无从确认是否到达。
+        let prev = self.arc.read().map(|c| c.clone()).unwrap_or_default();
         if let Ok(mut guard) = self.arc.write() {
             *guard = cfg.clone();
         }
         let _ = std::fs::write(&self.path, cfg.to_toml());
+        crate::bootlog::note(&settings_applied_note(&prev, cfg));
+    }
+}
+
+/// 「settings applied」日志行（v0.3.14，B9）：列出发生变化的用户可感知键
+/// （阈值/闪烁/静音/通知/轮询/自启 + 外观键）；无变化时明确标注。
+fn settings_applied_note(prev: &Config, next: &Config) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    macro_rules! cmp {
+        ($field:ident) => {
+            if prev.$field != next.$field {
+                parts.push(format!(
+                    "{} {:?}->{:?}",
+                    stringify!($field),
+                    prev.$field,
+                    next.$field
+                ));
+            }
+        };
+    }
+    cmp!(low_threshold);
+    cmp!(blink_enabled);
+    cmp!(notification_silent);
+    cmp!(notifications_enabled);
+    cmp!(poll_interval_secs);
+    cmp!(autostart);
+    cmp!(icon_shape);
+    cmp!(icon_background);
+    cmp!(icon_font_color);
+    cmp!(icon_text_scale);
+    cmp!(icon_bg_scale);
+    if parts.is_empty() {
+        "settings applied (no tracked key changed)".to_string()
+    } else {
+        format!("settings applied: {}", parts.join(", "))
     }
 }
 
@@ -486,9 +525,13 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
         // 类可能已注册（重复打开）：已存在时 ATOM 为 0，属正常，不视为失败。
         let atom = RegisterClassW(&wc);
         if atom == 0 {
-            crate::bootlog::note(
-                "settings: RegisterClassW 返回 0（类注册失败；若类已存在则属正常）",
-            );
+            // v0.3.14（红蓝共识 B7 必修）：「类已存在」是重复打开窗口的
+            // 正常路径，不再落「类注册失败」字样（真机日志 52 秒 6 条
+            // 「注册失败」严重误导诊断）；仅真实失败（其它错误码）留痕。
+            let err = GetLastError();
+            if err != ERROR_CLASS_ALREADY_EXISTS {
+                crate::bootlog::note(&format!("settings: RegisterClassW 类注册失败: {err:?}"));
+            }
         }
 
         // v0.3.6：自定义字体颜色会话内保留（往返切换不丢已选色）。

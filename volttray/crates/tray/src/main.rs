@@ -10,7 +10,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(windows)]
+// 闪烁状态机是纯逻辑（无 Win32 依赖），跨平台编译以便在非 Windows
+// 环境跑单元测试；Windows 渲染侧集成测试在模块内单独 cfg(windows) 门控。
+#[cfg_attr(not(windows), allow(dead_code))]
 mod blink;
 #[cfg(windows)]
 mod bootlog;
@@ -40,8 +42,9 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use tray_icon::menu::MenuEvent;
-    use tray_icon::{TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -909,40 +912,26 @@ mod imp {
                 }
             };
             for (title, body) in alerts {
+                // v0.3.14（红蓝共识 B9 必修）：toast 派发/抑制/失败全部
+                // 落 bootlog（此前失败静默吞掉，真机无从确认通知是否到达）。
                 if notify_enabled {
-                    let _ = toast::notify(&title, &body, silent);
+                    match toast::notify(&title, &body, silent) {
+                        Ok(()) => bootlog::note(&format!("toast dispatched: {title}")),
+                        Err(e) => {
+                            bootlog::note(&format!("toast dispatch failed title={title}: {e}"))
+                        }
+                    }
+                } else {
+                    bootlog::note(&format!(
+                        "toast suppressed (notifications disabled): {title}"
+                    ));
                 }
                 let _ = gui.send(GuiMsg::Alert);
             }
 
-            // 配置热重载（P1-2：所有权在 app 层）。
-            if let Some(Ok((cfg, warnings))) = watcher.poll() {
-                if let Ok(c) = core.lock() {
-                    c.swap_config(cfg);
-                }
-                if let Ok(mut o) = observer.lock() {
-                    // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
-                    // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
-                    // v0.3.6（D-62）：迁移告警幂等但每次加载都重复出现，
-                    // 同一组告警只上报一次，不随每次热重载重复刷屏。
-                    let ws: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
-                    let kind = if ws.is_empty() {
-                        Some(DiagKind::Info {
-                            message: "config reloaded".into(),
-                        })
-                    } else if ws != last_reload_warnings {
-                        Some(DiagKind::ConfigReloaded {
-                            warnings: ws.clone(),
-                        })
-                    } else {
-                        None
-                    };
-                    last_reload_warnings = ws;
-                    if let Some(kind) = kind {
-                        o.push(DiagEvent::new(Layer::App, kind));
-                    }
-                }
-            }
+            // 配置热重载（P1-2：所有权在 app 层）。每轮 io round 检查一次；
+            // 分片睡眠内还会按 ~5s 节奏补查（见下），保证 TOML 手改秒级生效。
+            handle_config_reload(&mut watcher, &core, &observer, &mut last_reload_warnings);
 
             // 分片睡眠，响应立即刷新 / 唤醒信号 / 退出。
             // D-65：睡眠预算由重连状态机裁决——正常态用轮询周期；无设备态
@@ -953,6 +942,11 @@ mod imp {
             };
             let interval = reconnect.next_wake(Instant::now(), !channels.is_empty(), poll);
             let deadline = Instant::now() + interval;
+            // v0.3.14：watcher 原本一轮 io round 才 poll 一次——默认轮询
+            // 周期 1800s 意味着手改 TOML 最长 ~30 分钟才生效（用户体感
+            // 「改配置不生效」的另一半根因）。mtime stat 是主机侧零射频
+            // 操作，不触碰设备、不构成设备轮询，~5s 查一次零耗电代价。
+            let mut last_cfg_check = Instant::now();
             while Instant::now() < deadline {
                 match cmd.recv_timeout(Duration::from_millis(200)) {
                     // D-65：「立即刷新」必须先重枚举再查询——重启/重插后
@@ -987,8 +981,55 @@ mod imp {
                         continue 'outer;
                     }
                     Ok(IoCmd::Shutdown) => return,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if last_cfg_check.elapsed() >= Duration::from_secs(5) {
+                            last_cfg_check = Instant::now();
+                            handle_config_reload(
+                                &mut watcher,
+                                &core,
+                                &observer,
+                                &mut last_reload_warnings,
+                            );
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        }
+    }
+
+    /// 配置热重载处理（P1-2：所有权在 app 层）。从 io 循环体抽出，
+    /// 供「每轮 io round」与「分片睡眠内 ~5s 节奏」两处调用，逻辑唯一。
+    fn handle_config_reload(
+        watcher: &mut ConfigWatcher,
+        core: &Arc<Mutex<AppCore>>,
+        observer: &Arc<Mutex<Observer>>,
+        last_reload_warnings: &mut Vec<String>,
+    ) {
+        if let Some(Ok((cfg, warnings))) = watcher.poll() {
+            if let Ok(c) = core.lock() {
+                c.swap_config(cfg);
+            }
+            if let Ok(mut o) = observer.lock() {
+                // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
+                // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
+                // v0.3.6（D-62）：迁移告警幂等但每次加载都重复出现，
+                // 同一组告警只上报一次，不随每次热重载重复刷屏。
+                let ws: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+                let kind = if ws.is_empty() {
+                    Some(DiagKind::Info {
+                        message: "config reloaded".into(),
+                    })
+                } else if ws != *last_reload_warnings {
+                    Some(DiagKind::ConfigReloaded {
+                        warnings: ws.clone(),
+                    })
+                } else {
+                    None
+                };
+                *last_reload_warnings = ws;
+                if let Some(kind) = kind {
+                    o.push(DiagEvent::new(Layer::App, kind));
                 }
             }
         }
@@ -1017,6 +1058,8 @@ mod imp {
         menu_sig: String,
         /// 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，见 blink.rs）。
         blink: crate::blink::BlinkState,
+        /// 上一 tick 的闪烁状态（v0.3.14，B9：闪烁启停 bootlog 的沿检测）。
+        prev_blinking: bool,
         /// 图标文本/背景缩放镜像（v0.3.4 #4，D-48）。
         icon_text_scale: u8,
         icon_bg_scale: u8,
@@ -1041,6 +1084,7 @@ mod imp {
                 tier_colors: cfg.icon_font_tier_colors.clone(),
                 menu_sig: String::new(),
                 blink: crate::blink::BlinkState::new(),
+                prev_blinking: false,
                 icon_text_scale: cfg.icon_text_scale,
                 icon_bg_scale: cfg.icon_bg_scale,
             }
@@ -1233,8 +1277,17 @@ mod imp {
             }
         };
 
-        unsafe {
-            let _ = SetTimer(None, 1, 500, None);
+        // v0.3.14（真机反馈 #3「两种频率叠加闪烁」根因修复）：hwnd=NULL 的
+        // SetTimer 由系统分配 timer id（传入的 nIDEvent 被忽略，返回值才是
+        // 真实 id），WM_TIMER 进入线程队列时 wParam 携带该 id。消息泵只响应
+        // 本定时器——线程上其它窗口的定时器消息（设置窗口 tooltip 控件的
+        // reshow 定时器约 100ms 级）若也驱动闪烁相位翻转，就会在正常 1Hz
+        // 闪烁上叠加出「极快闪烁」。
+        // windows crate 0.62：SetTimer 直接返回 usize 系统分配 id，0 = 失败
+        // （GetLastError 语义）；失败时退化为不闪烁（bootlog 留痕，不 panic）。
+        let blink_timer = unsafe { SetTimer(None, 0, 500, None) };
+        if blink_timer == 0 {
+            bootlog::note("blink SetTimer failed (returned 0); blink degraded off");
         }
 
         // D-33 被动唤醒：注册鼠标 Raw Input（message-only 窗口，INPUTSINK）。
@@ -1264,7 +1317,14 @@ mod imp {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if msg.message == WM_TIMER {
+                // 只响应本程序的 500ms 闪烁定时器（按 timer id + 线程定时器
+                // 的 NULL hwnd 双重过滤；v0.3.14 #3：外来 WM_TIMER——如设置
+                // 窗口 tooltip 的 reshow 定时器——不得驱动闪烁相位）。
+                if msg.message == WM_TIMER
+                    && blink_timer != 0
+                    && msg.wParam.0 == blink_timer
+                    && msg.hwnd == HWND::default()
+                {
                     pump(
                         &tray,
                         &gui_rx,
@@ -1305,7 +1365,9 @@ mod imp {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            let _ = KillTimer(None, 1);
+            if blink_timer != 0 {
+                let _ = KillTimer(None, blink_timer);
+            }
         }
         bootlog::stage("message-pump-exit");
         0
@@ -1449,25 +1511,97 @@ mod imp {
         // 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，逻辑级测试见 blink.rs）：
         // 500ms tick 翻相位 → 1Hz；活跃 = 开 && 展示设备处于低电触发态 &&
         // 未被点击停闪；解除后重新武装。提亮帧差异由渲染侧 flash_rgb 保证。
-        let low_active = shown_device(state).is_some_and(|d| {
-            !d.gray
-                && core
-                    .lock()
-                    .map(|c| c.is_low_battery(&d.id))
-                    .unwrap_or(false)
-        });
+        // v0.3.14（蓝队 B3 必修）：设备灰显/休眠时**不改写**低电态——休眠
+        // 并非低电解除，若按 gray → set_low_active(false) 会无条件清掉用户
+        // 的单击停闪锁存（ack），唤醒后违背「停闪保持到本低电期结束」重新
+        // 开闪。灰显期间保持既有 low_active，唤醒恢复后由 tracker 重新裁决。
+        let low_active = match shown_device(state) {
+            Some(d) if !d.gray => core
+                .lock()
+                .map(|mut c| c.is_low_battery(&d.id))
+                .unwrap_or(false),
+            _ => state.blink.low_active(),
+        };
+        // v0.3.14（红蓝共识 B1 必修）：阈值热改即时重估产生的告警走与
+        // 轮询路径相同的 toast 派发（此前被丢弃，本次低电期 toast 永久
+        // 丢失）。去重由 tracker 状态保证（每个低电期至多一条）。
+        let pending = core
+            .lock()
+            .map(|mut c| c.take_pending_alerts())
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            let (notify_enabled, silent) = cfg_arc
+                .read()
+                .map(|c| (c.notifications_enabled, c.notification_silent))
+                .unwrap_or((true, false));
+            for (id, alert) in pending {
+                let name = state
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.devices.iter().find(|d| d.id == id))
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| "设备".into());
+                let (title, body) = alert_text(alert, &name);
+                if notify_enabled {
+                    match toast::notify(&title, &body, silent) {
+                        Ok(()) => bootlog::note(&format!(
+                            "toast dispatched (threshold hot-change): {title}"
+                        )),
+                        Err(e) => {
+                            bootlog::note(&format!("toast dispatch failed title={title}: {e}"))
+                        }
+                    }
+                } else {
+                    bootlog::note(&format!(
+                        "toast suppressed (notifications disabled): {title}"
+                    ));
+                }
+            }
+        }
         if state.blink.set_low_active(low_active) {
             snap_changed = true;
         }
         let outcome = state.blink.tick(state.blink_enabled);
+        // v0.3.14（红蓝共识 B9 必修）：闪烁启停落 bootlog（此前零日志，
+        // 真机反馈无从定位「闪没闪 / 为什么停」）。
+        if outcome.blinking != state.prev_blinking {
+            if outcome.blinking {
+                bootlog::note(&format!(
+                    "blink start (threshold={}, switch on)",
+                    state.low_threshold
+                ));
+            } else {
+                let reason = if !state.blink_enabled {
+                    "switch off"
+                } else if state.blink.acked() {
+                    "user click (ack)"
+                } else {
+                    "low released"
+                };
+                bootlog::note(&format!("blink stop: {reason}"));
+            }
+            state.prev_blinking = outcome.blinking;
+        }
 
         if snap_changed || outcome.blinking {
             refresh_ui(tray, state, cache, ids);
         }
 
-        // 托盘图标事件：任意点击本次停闪（M11）；菜单左键弹出不在此列。
+        // 托盘图标事件：仅「左键按下」停闪（M11「单击停闪」原意）。
+        // v0.3.14（真机反馈 #2 根因修复）：此前任意 Click 事件（含右键）
+        // 都停闪——右键恰恰是打开菜单的按键，用户「低电中右键开菜单 →
+        // 重新勾选低电闪烁」时，开菜单这一下已把本次低电期的闪烁永久
+        // 压住（ack 锁存到低电解除才复位），表现为「开了也不闪」。
         while let Ok(e) = TrayIconEvent::receiver().try_recv() {
-            if matches!(e, TrayIconEvent::Click { .. }) && state.blink.acknowledge_click() {
+            let stop_blink_click = matches!(
+                e,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    ..
+                }
+            );
+            if stop_blink_click && state.blink.acknowledge_click() {
                 refresh_ui(tray, state, cache, ids);
             }
         }
@@ -1494,6 +1628,11 @@ mod imp {
                     guard.blink_enabled = state.blink_enabled;
                 }
                 persist_bool(cfg_path, "blink_enabled", state.blink_enabled);
+                // v0.3.14（B9）：菜单开关切换落日志。
+                bootlog::note(&format!(
+                    "menu toggle: blink_enabled -> {}",
+                    state.blink_enabled
+                ));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.autostart {
                 let now_on = if state.autostart_on {
@@ -1506,6 +1645,7 @@ mod imp {
                     guard.autostart = state.autostart_on;
                 }
                 persist_bool(cfg_path, "autostart", state.autostart_on);
+                bootlog::note(&format!("menu toggle: autostart -> {}", state.autostart_on));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.silent {
                 state.silent = !state.silent;
@@ -1513,6 +1653,10 @@ mod imp {
                     guard.notification_silent = state.silent;
                 }
                 persist_bool(cfg_path, "notification_silent", state.silent);
+                bootlog::note(&format!(
+                    "menu toggle: notification_silent -> {}",
+                    state.silent
+                ));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.exit {
                 let _ = cmd_tx.send(IoCmd::Shutdown);

@@ -109,6 +109,9 @@ pub struct AppCore {
     config: Arc<RwLock<Config>>,
     entries: Vec<DeviceEntry>,
     lowbats: HashMap<String, LowBatteryTracker>,
+    /// 阈值热改即时重估产生的待派发告警（v0.3.14 红蓝共识 B1 修复）：
+    /// `is_low_battery` 的重估告警不再丢弃，暂存于此由 GUI 侧取走派发。
+    pending_alerts: Vec<(String, Alert)>,
     snap_seq: u64,
 }
 
@@ -118,6 +121,7 @@ impl AppCore {
             config,
             entries: Vec::new(),
             lowbats: HashMap::new(),
+            pending_alerts: Vec::new(),
             snap_seq: 0,
         }
     }
@@ -175,18 +179,69 @@ impl AppCore {
         entry.device.state = mark_online(entry.device.state);
         entry.device.battery = Some(reading);
         let cfg = self.config();
+        // v0.3.14（蓝队 B2 必修）：进程内该设备的**首次**成功读数（重启 /
+        // 开机自启后的注册探测）立即按当前阈值即判（evaluate_now），不再走
+        // 2 连击去抖——旧逻辑下重启后低电提醒态要等第 2 次读数（默认轮询
+        // 1800s，最长约 30 分钟无闪无通知），且第 2 次读数还会把本低电期的
+        // toast 重发一次。纯主机侧状态判定，零射频。取舍（已裁决）：首读数
+        // 放弃去抖，极端情况下一次异常首读数可能立即告警一次；tracker 一经
+        // 创建，后续读数恢复 M11 去抖语义。
+        let is_first_reading = !self.lowbats.contains_key(id);
         let tracker = self
             .lowbats
             .entry(id.to_string())
             .or_insert_with(|| LowBatteryTracker::new(cfg.low_threshold));
         // 阈值热更新（设置窗口 / TOML 改动均经共享配置生效）。
         tracker.set_threshold(cfg.low_threshold);
-        tracker.update(reading.percent, reading.charging)
+        if is_first_reading {
+            tracker.evaluate_now(reading.percent, reading.charging)
+        } else {
+            tracker.update(reading.percent, reading.charging)
+        }
     }
 
     /// 指定设备当前是否处于低电触发状态（M11 托盘闪烁判定用）。
-    pub fn is_low_battery(&self, id: &str) -> bool {
-        self.lowbats.get(id).is_some_and(|t| t.is_active())
+    ///
+    /// v0.3.14（真机反馈「调阈值不生效」修复）：每次调用先对账配置阈值——
+    /// 阈值被设置窗口 / TOML 热改后，立即用最后一次已知读数重估低电态
+    /// （`LowBatteryTracker::evaluate_now`），不再等下一次轮询读数
+    /// （默认 1800s 一轮，旧逻辑下阈值改动最长约 1 小时才体现）。
+    /// 纯主机侧状态重估，零射频，不违反休眠设备零主动查询红线。
+    /// 注意取 `&mut self`：阈值对账会更新 tracker。
+    pub fn is_low_battery(&mut self, id: &str) -> bool {
+        let cfg_threshold = self.config().low_threshold;
+        let last_reading = self
+            .entries
+            .iter()
+            .find(|e| e.device.id == id)
+            .and_then(|e| e.device.battery);
+        let Some(tracker) = self.lowbats.get_mut(id) else {
+            return false;
+        };
+        let mut fired = None;
+        if tracker.threshold() != cfg_threshold {
+            tracker.set_threshold(cfg_threshold);
+            if let Some(b) = last_reading {
+                // v0.3.14（红蓝共识 B1 必修）：重估告警不再丢弃——暂存
+                // pending_alerts，由 GUI 侧经 `take_pending_alerts` 取走、
+                // 走与轮询路径相同的 toast 派发。去重由 tracker 状态保证：
+                // evaluate_now 仅在「未激活 → 激活」沿返回告警，同一低电期
+                // 不会重复入队，也不会与 record_success 路径重复派发。
+                fired = tracker.evaluate_now(b.percent, b.charging);
+            }
+        }
+        let active = tracker.is_active();
+        if let Some(alert) = fired {
+            self.pending_alerts.push((id.to_string(), alert));
+        }
+        active
+    }
+
+    /// 取走阈值热改即时重估产生的待派发告警（v0.3.14，B1）。
+    /// 调用方（GUI pump）负责走既有 toast 派发路径（含通知总开关 /
+    /// 静音配置与派发日志）。
+    pub fn take_pending_alerts(&mut self) -> Vec<(String, Alert)> {
+        std::mem::take(&mut self.pending_alerts)
     }
 
     /// 记录一次查询超时（D-33）：连续 `SLEEP_AFTER_TIMEOUTS` 次超时 →
@@ -448,12 +503,85 @@ mod tests {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
-        assert_eq!(core.record_success("a", reading(19, false), now), None);
+        // v0.3.14（B2）：首读数即按阈值即判——19 ≤ 20 立即告警并进入低电。
         assert_eq!(
-            core.record_success("a", reading(18, false), now),
-            Some(Alert::LowBattery(18))
+            core.record_success("a", reading(19, false), now),
+            Some(Alert::LowBattery(19))
         );
+        // 同一低电期内后续读数不再重复告警（去重）。
+        assert_eq!(core.record_success("a", reading(18, false), now), None);
         assert!(core.is_low_battery("a"));
+    }
+
+    /// v0.3.14（蓝队 B2 必修）：重启/自启后低电提醒态不再丢失——进程内
+    /// 首次成功读数（注册探测）立即按当前阈值即判，消除默认 1800s 轮询档
+    /// 下最长约 30 分钟的「无闪无通知」盲区；且 toast 只发一次（旧逻辑
+    /// 第 2 次读数会重发）。非首读数恢复 M11 去抖（首读高于阈值后，
+    /// 仍需连续 2 次越限才触发）。
+    #[test]
+    fn first_reading_after_restart_evaluates_immediately() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        // 首读数低于阈值 → 立即告警（不等下一个轮询周期）。
+        assert_eq!(
+            core.record_success("a", reading(15, false), now),
+            Some(Alert::LowBattery(15)),
+            "重启后首读数必须立即恢复低电提醒"
+        );
+        // 首读数高于阈值 → 不触发；之后恢复 2 连击去抖。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core.upsert_device(dev("b", 1));
+        assert_eq!(core.record_success("b", reading(30, false), now), None);
+        assert_eq!(core.record_success("b", reading(19, false), now), None);
+        assert_eq!(
+            core.record_success("b", reading(19, false), now),
+            Some(Alert::LowBattery(19)),
+            "首读数之后恢复 M11 去抖语义"
+        );
+    }
+
+    /// v0.3.14（红蓝共识 B1 必修）：阈值热改触发的即时重估告警进入
+    /// pending 队列等待派发（此前被丢弃，本次低电期 toast 永久丢失）；
+    /// 取走后清空，同一低电期不重复入队。
+    #[test]
+    fn threshold_hot_change_alert_queued_for_dispatch() {
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let mut core = AppCore::new(cfg.clone());
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(30, false), now); // 30 > 20
+        assert!(core.take_pending_alerts().is_empty());
+        // 阈值调到电量之上 → 重估告警入队，且只入队一次。
+        core.swap_config(Config {
+            low_threshold: 35,
+            ..Config::default()
+        });
+        assert!(core.is_low_battery("a"));
+        let pending = core.take_pending_alerts();
+        assert_eq!(
+            pending,
+            vec![("a".to_string(), Alert::LowBattery(30))],
+            "阈值热改告警必须留给 GUI 派发"
+        );
+        assert!(core.take_pending_alerts().is_empty(), "取走后清空");
+        assert!(core.is_low_battery("a"));
+        assert!(
+            core.take_pending_alerts().is_empty(),
+            "同一低电期不得重复入队"
+        );
+        // 阈值调回 → 立即解除；再次调高 → 新的低电期重新告警一次。
+        core.swap_config(Config {
+            low_threshold: 20,
+            ..Config::default()
+        });
+        assert!(!core.is_low_battery("a"));
+        core.swap_config(Config {
+            low_threshold: 35,
+            ..Config::default()
+        });
+        assert!(core.is_low_battery("a"));
+        assert_eq!(core.take_pending_alerts().len(), 1, "新低电期重新告警");
     }
 
     #[test]
@@ -477,6 +605,34 @@ mod tests {
             Some(Alert::LowBattery(30))
         );
         assert!(core.is_low_battery("a"));
+    }
+
+    /// v0.3.14（真机反馈「调阈值不生效」）：阈值热改后，`is_low_battery`
+    /// 立即按最后一次已知读数重估——抬高立即进入低电、降低立即解除，
+    /// 全程不再等待任何新的轮询读数。
+    #[test]
+    fn threshold_change_takes_effect_immediately_via_is_low_battery() {
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let mut core = AppCore::new(cfg.clone());
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(30, false), now);
+        assert!(!core.is_low_battery("a")); // 30 > 默认阈值 20
+                                            // 阈值调到电量之上 → 立即低电（不等下一个轮询周期）。
+        core.swap_config(Config {
+            low_threshold: 35,
+            ..Config::default()
+        });
+        assert!(
+            core.is_low_battery("a"),
+            "阈值调高必须立即按最后已知读数进入低电"
+        );
+        // 阈值调到电量之下 → 立即解除。
+        core.swap_config(Config {
+            low_threshold: 25,
+            ..Config::default()
+        });
+        assert!(!core.is_low_battery("a"), "阈值调低必须立即解除低电");
     }
 
     #[test]
