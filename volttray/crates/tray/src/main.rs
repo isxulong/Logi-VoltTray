@@ -1257,7 +1257,7 @@ mod imp {
         ) {
             bootlog::note(&format!("startup toast failed: {e}"));
         }
-        let mut last_wake_sent = Instant::now() - Duration::from_secs(10);
+        let mut last_wake_sent: Option<Instant> = None;
 
         // 5. 消息泵：500ms 定时器驱动事件归并。
         bootlog::stage("message-pump");
@@ -1285,10 +1285,20 @@ mod imp {
                     // D-33 被动唤醒：系统层观测到罗技鼠标活动（移动/点击
                     // 本就产生射频流量，属用户行为零额外成本）→ 通知 IO 线程
                     // 装填一次唤醒探测资格。2s 合并防 WM_INPUT 风暴。
+                    //
+                    // 启动期 panic 修复（v0.3.8 真机 panic 同类隐患）：
+                    // 原写法 `Instant::now() - Duration::from_secs(10)`
+                    // 意图是「视为 10 秒前已发送过」——但 Windows 的 Instant
+                    // 基于 QPC、基数自系统启动起算，开机自启时 uptime 可能
+                    // 不足 10s，`Instant - Duration` 直接 underflow panic
+                    // （std time.rs「overflow when subtracting duration from
+                    // instant」）。改用 Option：None = 从未发送过，首个
+                    // Raw Input 立即放行——与原语义等价（10s > 2s 合并窗，
+                    // 启动后首包本就不受 2s 限制），且不引入任何额外轮询。
                     if rawinput::is_logitech_mouse_input(msg.lParam)
-                        && last_wake_sent.elapsed() >= Duration::from_secs(2)
+                        && last_wake_sent.is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
                     {
-                        last_wake_sent = Instant::now();
+                        last_wake_sent = Some(Instant::now());
                         let _ = cmd_tx.send(IoCmd::WakeSignal);
                     }
                 }
