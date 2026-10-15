@@ -93,6 +93,17 @@ impl BlinkState {
             false
         }
     }
+
+    /// 当前是否处于低电活跃（v0.3.14：GUI 侧观测/日志用；设备灰显/
+    /// 休眠期间调用方据此保持既有低电态，不冲掉停闪锁存——B3）。
+    pub fn low_active(&self) -> bool {
+        self.low_active
+    }
+
+    /// 停闪锁存是否生效（v0.3.14：闪烁启停日志的停闪原因判读用——B9）。
+    pub fn acked(&self) -> bool {
+        self.ack
+    }
 }
 
 #[cfg(test)]

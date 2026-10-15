@@ -912,8 +912,19 @@ mod imp {
                 }
             };
             for (title, body) in alerts {
+                // v0.3.14（红蓝共识 B9 必修）：toast 派发/抑制/失败全部
+                // 落 bootlog（此前失败静默吞掉，真机无从确认通知是否到达）。
                 if notify_enabled {
-                    let _ = toast::notify(&title, &body, silent);
+                    match toast::notify(&title, &body, silent) {
+                        Ok(()) => bootlog::note(&format!("toast dispatched: {title}")),
+                        Err(e) => {
+                            bootlog::note(&format!("toast dispatch failed title={title}: {e}"))
+                        }
+                    }
+                } else {
+                    bootlog::note(&format!(
+                        "toast suppressed (notifications disabled): {title}"
+                    ));
                 }
                 let _ = gui.send(GuiMsg::Alert);
             }
@@ -1047,6 +1058,8 @@ mod imp {
         menu_sig: String,
         /// 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，见 blink.rs）。
         blink: crate::blink::BlinkState,
+        /// 上一 tick 的闪烁状态（v0.3.14，B9：闪烁启停 bootlog 的沿检测）。
+        prev_blinking: bool,
         /// 图标文本/背景缩放镜像（v0.3.4 #4，D-48）。
         icon_text_scale: u8,
         icon_bg_scale: u8,
@@ -1071,6 +1084,7 @@ mod imp {
                 tier_colors: cfg.icon_font_tier_colors.clone(),
                 menu_sig: String::new(),
                 blink: crate::blink::BlinkState::new(),
+                prev_blinking: false,
                 icon_text_scale: cfg.icon_text_scale,
                 icon_bg_scale: cfg.icon_bg_scale,
             }
@@ -1497,17 +1511,77 @@ mod imp {
         // 低电闪烁状态机（M11；v0.3.4 #3 抽成 blink 模块，逻辑级测试见 blink.rs）：
         // 500ms tick 翻相位 → 1Hz；活跃 = 开 && 展示设备处于低电触发态 &&
         // 未被点击停闪；解除后重新武装。提亮帧差异由渲染侧 flash_rgb 保证。
-        let low_active = shown_device(state).is_some_and(|d| {
-            !d.gray
-                && core
-                    .lock()
-                    .map(|mut c| c.is_low_battery(&d.id))
-                    .unwrap_or(false)
-        });
+        // v0.3.14（蓝队 B3 必修）：设备灰显/休眠时**不改写**低电态——休眠
+        // 并非低电解除，若按 gray → set_low_active(false) 会无条件清掉用户
+        // 的单击停闪锁存（ack），唤醒后违背「停闪保持到本低电期结束」重新
+        // 开闪。灰显期间保持既有 low_active，唤醒恢复后由 tracker 重新裁决。
+        let low_active = match shown_device(state) {
+            Some(d) if !d.gray => core
+                .lock()
+                .map(|mut c| c.is_low_battery(&d.id))
+                .unwrap_or(false),
+            _ => state.blink.low_active(),
+        };
+        // v0.3.14（红蓝共识 B1 必修）：阈值热改即时重估产生的告警走与
+        // 轮询路径相同的 toast 派发（此前被丢弃，本次低电期 toast 永久
+        // 丢失）。去重由 tracker 状态保证（每个低电期至多一条）。
+        let pending = core
+            .lock()
+            .map(|mut c| c.take_pending_alerts())
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            let (notify_enabled, silent) = cfg_arc
+                .read()
+                .map(|c| (c.notifications_enabled, c.notification_silent))
+                .unwrap_or((true, false));
+            for (id, alert) in pending {
+                let name = state
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.devices.iter().find(|d| d.id == id))
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| "设备".into());
+                let (title, body) = alert_text(alert, &name);
+                if notify_enabled {
+                    match toast::notify(&title, &body, silent) {
+                        Ok(()) => bootlog::note(&format!(
+                            "toast dispatched (threshold hot-change): {title}"
+                        )),
+                        Err(e) => {
+                            bootlog::note(&format!("toast dispatch failed title={title}: {e}"))
+                        }
+                    }
+                } else {
+                    bootlog::note(&format!(
+                        "toast suppressed (notifications disabled): {title}"
+                    ));
+                }
+            }
+        }
         if state.blink.set_low_active(low_active) {
             snap_changed = true;
         }
         let outcome = state.blink.tick(state.blink_enabled);
+        // v0.3.14（红蓝共识 B9 必修）：闪烁启停落 bootlog（此前零日志，
+        // 真机反馈无从定位「闪没闪 / 为什么停」）。
+        if outcome.blinking != state.prev_blinking {
+            if outcome.blinking {
+                bootlog::note(&format!(
+                    "blink start (threshold={}, switch on)",
+                    state.low_threshold
+                ));
+            } else {
+                let reason = if !state.blink_enabled {
+                    "switch off"
+                } else if state.blink.acked() {
+                    "user click (ack)"
+                } else {
+                    "low released"
+                };
+                bootlog::note(&format!("blink stop: {reason}"));
+            }
+            state.prev_blinking = outcome.blinking;
+        }
 
         if snap_changed || outcome.blinking {
             refresh_ui(tray, state, cache, ids);
@@ -1554,6 +1628,11 @@ mod imp {
                     guard.blink_enabled = state.blink_enabled;
                 }
                 persist_bool(cfg_path, "blink_enabled", state.blink_enabled);
+                // v0.3.14（B9）：菜单开关切换落日志。
+                bootlog::note(&format!(
+                    "menu toggle: blink_enabled -> {}",
+                    state.blink_enabled
+                ));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.autostart {
                 let now_on = if state.autostart_on {
@@ -1566,6 +1645,7 @@ mod imp {
                     guard.autostart = state.autostart_on;
                 }
                 persist_bool(cfg_path, "autostart", state.autostart_on);
+                bootlog::note(&format!("menu toggle: autostart -> {}", state.autostart_on));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.silent {
                 state.silent = !state.silent;
@@ -1573,6 +1653,10 @@ mod imp {
                     guard.notification_silent = state.silent;
                 }
                 persist_bool(cfg_path, "notification_silent", state.silent);
+                bootlog::note(&format!(
+                    "menu toggle: notification_silent -> {}",
+                    state.silent
+                ));
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.exit {
                 let _ = cmd_tx.send(IoCmd::Shutdown);
