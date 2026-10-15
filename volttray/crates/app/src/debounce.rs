@@ -72,6 +72,27 @@ impl LowBatteryTracker {
         None
     }
 
+    /// 配置变更后的即时重估（v0.3.14 修复：设置改动立即生效）。
+    ///
+    /// 以上一次已知读数为准立即重判低电态，不等下一次轮询读数
+    /// （默认轮询 1800s：改阈值后旧逻辑最长要等 2 个轮询周期、即约 1 小时
+    /// 才能在闪烁/通知上体现，用户因此判定「改动不生效」）。迟滞只用于
+    /// 抑制传感读数抖动，不用于用户显式改配置：阈值调到电量之上 → 立即
+    /// 进入低电（返回告警）；调到电量之下 → 立即解除。纯主机侧状态重估，
+    /// 零射频，不违反休眠设备零主动查询红线。
+    pub fn evaluate_now(&mut self, percent: u8, charging: bool) -> Option<Alert> {
+        self.streak = 0;
+        if charging || percent > self.threshold {
+            self.active = false;
+            return None;
+        }
+        if self.active {
+            return None;
+        }
+        self.active = true;
+        Some(Alert::LowBattery(percent))
+    }
+
     /// 当前是否处于低电触发状态（托盘闪烁判定用）。
     pub fn is_active(&self) -> bool {
         self.active
@@ -153,5 +174,50 @@ mod tests {
         // 相同值不重置连击
         t.set_threshold(50);
         assert_eq!(t.update(60, false), None);
+    }
+
+    /// v0.3.14：阈值调到电量之上 → evaluate_now 立即进入低电并告警一次；
+    /// 重复重估不重复告警。
+    #[test]
+    fn evaluate_now_activates_immediately_when_threshold_raised() {
+        let mut t = LowBatteryTracker::new(20);
+        t.update(30, false);
+        assert!(!t.is_active()); // 30 > 20：未触发
+        t.set_threshold(35); // 用户把阈值调到电量之上
+        assert_eq!(
+            t.evaluate_now(30, false),
+            Some(Alert::LowBattery(30)),
+            "阈值调高后必须立即按最后已知电量进入低电"
+        );
+        assert!(t.is_active());
+        // 同一低电期内的再次重估不重复告警。
+        assert_eq!(t.evaluate_now(30, false), None);
+    }
+
+    /// v0.3.14：阈值调到电量之下 → evaluate_now 立即解除（不等下一次
+    /// 轮询读数走迟滞路径——默认轮询档下那是 30 分钟量级的延迟）。
+    #[test]
+    fn evaluate_now_releases_immediately_when_threshold_lowered() {
+        let mut t = LowBatteryTracker::new(30);
+        t.update(25, false);
+        t.update(25, false);
+        assert!(t.is_active());
+        t.set_threshold(20); // 用户把阈值调到电量（25）之下
+        assert_eq!(t.evaluate_now(25, false), None, "解除不产生告警");
+        assert!(!t.is_active(), "阈值调低后必须立即解除低电态");
+        // 解除后恢复常规去抖：需连续 2 次越限才重新触发。
+        assert_eq!(t.update(19, false), None);
+        assert_eq!(t.update(19, false), Some(Alert::LowBattery(19)));
+    }
+
+    /// v0.3.14：充电中重估一律解除（D-30：充电设备不提醒）。
+    #[test]
+    fn evaluate_now_releases_when_charging() {
+        let mut t = LowBatteryTracker::new(40);
+        t.update(30, false);
+        t.update(30, false);
+        assert!(t.is_active());
+        assert_eq!(t.evaluate_now(30, true), None);
+        assert!(!t.is_active());
     }
 }

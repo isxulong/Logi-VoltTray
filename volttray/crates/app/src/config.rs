@@ -447,9 +447,9 @@ pub struct Config {
     pub poll_interval_secs: u64,
     /// 整体风格提示键（v0.2.0 遗留，v0.3.0 不参与渲染）。
     pub icon_style: IconStyle,
-    /// 通知总开关。
+    /// 通知总开关（仅管辖 toast 弹窗；不影响图标闪烁，闪烁由 blink_enabled 管辖）。
     pub notifications_enabled: bool,
-    /// 静默通知（无声音）。
+    /// 通知静音（仅关闭 toast 提示音；不抑制弹窗，与图标闪烁无关）。
     pub notification_silent: bool,
     /// 托盘图标形状：圆角 / 直角 / 透明，默认圆角（M9）。
     pub icon_shape: IconShape,

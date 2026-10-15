@@ -185,8 +185,32 @@ impl AppCore {
     }
 
     /// 指定设备当前是否处于低电触发状态（M11 托盘闪烁判定用）。
-    pub fn is_low_battery(&self, id: &str) -> bool {
-        self.lowbats.get(id).is_some_and(|t| t.is_active())
+    ///
+    /// v0.3.14（真机反馈「调阈值不生效」修复）：每次调用先对账配置阈值——
+    /// 阈值被设置窗口 / TOML 热改后，立即用最后一次已知读数重估低电态
+    /// （`LowBatteryTracker::evaluate_now`），不再等下一次轮询读数
+    /// （默认 1800s 一轮，旧逻辑下阈值改动最长约 1 小时才体现）。
+    /// 纯主机侧状态重估，零射频，不违反休眠设备零主动查询红线。
+    /// 注意取 `&mut self`：阈值对账会更新 tracker。
+    pub fn is_low_battery(&mut self, id: &str) -> bool {
+        let cfg_threshold = self.config().low_threshold;
+        let last_reading = self
+            .entries
+            .iter()
+            .find(|e| e.device.id == id)
+            .and_then(|e| e.device.battery);
+        let Some(tracker) = self.lowbats.get_mut(id) else {
+            return false;
+        };
+        if tracker.threshold() != cfg_threshold {
+            tracker.set_threshold(cfg_threshold);
+            if let Some(b) = last_reading {
+                // 重估返回的告警不在此派发（此处是 UI 读取路径，500ms
+                // 一调；toast 告警只由轮询路径 record_success 派发）。
+                let _ = tracker.evaluate_now(b.percent, b.charging);
+            }
+        }
+        tracker.is_active()
     }
 
     /// 记录一次查询超时（D-33）：连续 `SLEEP_AFTER_TIMEOUTS` 次超时 →
@@ -477,6 +501,34 @@ mod tests {
             Some(Alert::LowBattery(30))
         );
         assert!(core.is_low_battery("a"));
+    }
+
+    /// v0.3.14（真机反馈「调阈值不生效」）：阈值热改后，`is_low_battery`
+    /// 立即按最后一次已知读数重估——抬高立即进入低电、降低立即解除，
+    /// 全程不再等待任何新的轮询读数。
+    #[test]
+    fn threshold_change_takes_effect_immediately_via_is_low_battery() {
+        let cfg = Arc::new(RwLock::new(Config::default()));
+        let mut core = AppCore::new(cfg.clone());
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(30, false), now);
+        assert!(!core.is_low_battery("a")); // 30 > 默认阈值 20
+                                            // 阈值调到电量之上 → 立即低电（不等下一个轮询周期）。
+        core.swap_config(Config {
+            low_threshold: 35,
+            ..Config::default()
+        });
+        assert!(
+            core.is_low_battery("a"),
+            "阈值调高必须立即按最后已知读数进入低电"
+        );
+        // 阈值调到电量之下 → 立即解除。
+        core.swap_config(Config {
+            low_threshold: 25,
+            ..Config::default()
+        });
+        assert!(!core.is_low_battery("a"), "阈值调低必须立即解除低电");
     }
 
     #[test]

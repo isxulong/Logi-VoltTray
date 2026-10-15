@@ -10,7 +10,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(windows)]
+// 闪烁状态机是纯逻辑（无 Win32 依赖），跨平台编译以便在非 Windows
+// 环境跑单元测试；Windows 渲染侧集成测试在模块内单独 cfg(windows) 门控。
+#[cfg_attr(not(windows), allow(dead_code))]
 mod blink;
 #[cfg(windows)]
 mod bootlog;
@@ -40,8 +42,9 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use tray_icon::menu::MenuEvent;
-    use tray_icon::{TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -915,34 +918,9 @@ mod imp {
                 let _ = gui.send(GuiMsg::Alert);
             }
 
-            // 配置热重载（P1-2：所有权在 app 层）。
-            if let Some(Ok((cfg, warnings))) = watcher.poll() {
-                if let Ok(c) = core.lock() {
-                    c.swap_config(cfg);
-                }
-                if let Ok(mut o) = observer.lock() {
-                    // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
-                    // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
-                    // v0.3.6（D-62）：迁移告警幂等但每次加载都重复出现，
-                    // 同一组告警只上报一次，不随每次热重载重复刷屏。
-                    let ws: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
-                    let kind = if ws.is_empty() {
-                        Some(DiagKind::Info {
-                            message: "config reloaded".into(),
-                        })
-                    } else if ws != last_reload_warnings {
-                        Some(DiagKind::ConfigReloaded {
-                            warnings: ws.clone(),
-                        })
-                    } else {
-                        None
-                    };
-                    last_reload_warnings = ws;
-                    if let Some(kind) = kind {
-                        o.push(DiagEvent::new(Layer::App, kind));
-                    }
-                }
-            }
+            // 配置热重载（P1-2：所有权在 app 层）。每轮 io round 检查一次；
+            // 分片睡眠内还会按 ~5s 节奏补查（见下），保证 TOML 手改秒级生效。
+            handle_config_reload(&mut watcher, &core, &observer, &mut last_reload_warnings);
 
             // 分片睡眠，响应立即刷新 / 唤醒信号 / 退出。
             // D-65：睡眠预算由重连状态机裁决——正常态用轮询周期；无设备态
@@ -953,6 +931,11 @@ mod imp {
             };
             let interval = reconnect.next_wake(Instant::now(), !channels.is_empty(), poll);
             let deadline = Instant::now() + interval;
+            // v0.3.14：watcher 原本一轮 io round 才 poll 一次——默认轮询
+            // 周期 1800s 意味着手改 TOML 最长 ~30 分钟才生效（用户体感
+            // 「改配置不生效」的另一半根因）。mtime stat 是主机侧零射频
+            // 操作，不触碰设备、不构成设备轮询，~5s 查一次零耗电代价。
+            let mut last_cfg_check = Instant::now();
             while Instant::now() < deadline {
                 match cmd.recv_timeout(Duration::from_millis(200)) {
                     // D-65：「立即刷新」必须先重枚举再查询——重启/重插后
@@ -987,8 +970,55 @@ mod imp {
                         continue 'outer;
                     }
                     Ok(IoCmd::Shutdown) => return,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if last_cfg_check.elapsed() >= Duration::from_secs(5) {
+                            last_cfg_check = Instant::now();
+                            handle_config_reload(
+                                &mut watcher,
+                                &core,
+                                &observer,
+                                &mut last_reload_warnings,
+                            );
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        }
+    }
+
+    /// 配置热重载处理（P1-2：所有权在 app 层）。从 io 循环体抽出，
+    /// 供「每轮 io round」与「分片睡眠内 ~5s 节奏」两处调用，逻辑唯一。
+    fn handle_config_reload(
+        watcher: &mut ConfigWatcher,
+        core: &Arc<Mutex<AppCore>>,
+        observer: &Arc<Mutex<Observer>>,
+        last_reload_warnings: &mut Vec<String>,
+    ) {
+        if let Some(Ok((cfg, warnings))) = watcher.poll() {
+            if let Ok(c) = core.lock() {
+                c.swap_config(cfg);
+            }
+            if let Ok(mut o) = observer.lock() {
+                // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
+                // 有警告升级为 config_reloaded 事件，无警告维持 info 级。
+                // v0.3.6（D-62）：迁移告警幂等但每次加载都重复出现，
+                // 同一组告警只上报一次，不随每次热重载重复刷屏。
+                let ws: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+                let kind = if ws.is_empty() {
+                    Some(DiagKind::Info {
+                        message: "config reloaded".into(),
+                    })
+                } else if ws != *last_reload_warnings {
+                    Some(DiagKind::ConfigReloaded {
+                        warnings: ws.clone(),
+                    })
+                } else {
+                    None
+                };
+                *last_reload_warnings = ws;
+                if let Some(kind) = kind {
+                    o.push(DiagEvent::new(Layer::App, kind));
                 }
             }
         }
@@ -1233,8 +1263,17 @@ mod imp {
             }
         };
 
-        unsafe {
-            let _ = SetTimer(None, 1, 500, None);
+        // v0.3.14（真机反馈 #3「两种频率叠加闪烁」根因修复）：hwnd=NULL 的
+        // SetTimer 由系统分配 timer id（传入的 nIDEvent 被忽略，返回值才是
+        // 真实 id），WM_TIMER 进入线程队列时 wParam 携带该 id。消息泵只响应
+        // 本定时器——线程上其它窗口的定时器消息（设置窗口 tooltip 控件的
+        // reshow 定时器约 100ms 级）若也驱动闪烁相位翻转，就会在正常 1Hz
+        // 闪烁上叠加出「极快闪烁」。
+        // windows crate 0.62：SetTimer 直接返回 usize 系统分配 id，0 = 失败
+        // （GetLastError 语义）；失败时退化为不闪烁（bootlog 留痕，不 panic）。
+        let blink_timer = unsafe { SetTimer(None, 0, 500, None) };
+        if blink_timer == 0 {
+            bootlog::note("blink SetTimer failed (returned 0); blink degraded off");
         }
 
         // D-33 被动唤醒：注册鼠标 Raw Input（message-only 窗口，INPUTSINK）。
@@ -1264,7 +1303,14 @@ mod imp {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if msg.message == WM_TIMER {
+                // 只响应本程序的 500ms 闪烁定时器（按 timer id + 线程定时器
+                // 的 NULL hwnd 双重过滤；v0.3.14 #3：外来 WM_TIMER——如设置
+                // 窗口 tooltip 的 reshow 定时器——不得驱动闪烁相位）。
+                if msg.message == WM_TIMER
+                    && blink_timer != 0
+                    && msg.wParam.0 == blink_timer
+                    && msg.hwnd == HWND::default()
+                {
                     pump(
                         &tray,
                         &gui_rx,
@@ -1305,7 +1351,9 @@ mod imp {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            let _ = KillTimer(None, 1);
+            if blink_timer != 0 {
+                let _ = KillTimer(None, blink_timer);
+            }
         }
         bootlog::stage("message-pump-exit");
         0
@@ -1453,7 +1501,7 @@ mod imp {
             !d.gray
                 && core
                     .lock()
-                    .map(|c| c.is_low_battery(&d.id))
+                    .map(|mut c| c.is_low_battery(&d.id))
                     .unwrap_or(false)
         });
         if state.blink.set_low_active(low_active) {
@@ -1465,9 +1513,21 @@ mod imp {
             refresh_ui(tray, state, cache, ids);
         }
 
-        // 托盘图标事件：任意点击本次停闪（M11）；菜单左键弹出不在此列。
+        // 托盘图标事件：仅「左键按下」停闪（M11「单击停闪」原意）。
+        // v0.3.14（真机反馈 #2 根因修复）：此前任意 Click 事件（含右键）
+        // 都停闪——右键恰恰是打开菜单的按键，用户「低电中右键开菜单 →
+        // 重新勾选低电闪烁」时，开菜单这一下已把本次低电期的闪烁永久
+        // 压住（ack 锁存到低电解除才复位），表现为「开了也不闪」。
         while let Ok(e) = TrayIconEvent::receiver().try_recv() {
-            if matches!(e, TrayIconEvent::Click { .. }) && state.blink.acknowledge_click() {
+            let stop_blink_click = matches!(
+                e,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    ..
+                }
+            );
+            if stop_blink_click && state.blink.acknowledge_click() {
                 refresh_ui(tray, state, cache, ids);
             }
         }

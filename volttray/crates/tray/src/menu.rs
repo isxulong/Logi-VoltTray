@@ -1,7 +1,7 @@
 //! 托盘右键菜单（v0.3.0 产品方案 M13：固定项 7 个 ≤ 8；设备区行不计入上限）。
 //!
 //! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
-//! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 静默通知✓ / 开机自启✓ /
+//! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
 //! ── / 设置… / 诊断面板… / ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
@@ -67,7 +67,12 @@ pub fn build_menu(
 
     let refresh = MenuItem::new(format!("立即刷新（当前间隔 {poll_secs} 秒）"), true, None);
     let blink_item = CheckMenuItem::new("低电闪烁提醒", true, blink, None);
-    let silent_item = CheckMenuItem::new("静默通知", true, silent, None);
+    // v0.3.14：改名澄清语义——该开关实际只控制 toast 提示音
+    // （toast.rs 的 <audio silent="true"/>），既不抑制弹通知本身，
+    // 也与图标闪烁（blink_enabled 管辖）无关。原名「静默通知」让用户
+    // 误以为它是「所有提醒的总开关」，是现象 1 的认知层根因。
+    // 配置键 notification_silent 保持不变（向后兼容，无迁移）。
+    let silent_item = CheckMenuItem::new("通知静音（仅关提示音）", true, silent, None);
     let autostart_item = CheckMenuItem::new("开机自启", true, autostart, None);
     let settings = MenuItem::new("设置…", true, None);
     let diag = MenuItem::new("诊断面板…", true, None);

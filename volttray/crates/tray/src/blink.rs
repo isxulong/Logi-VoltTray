@@ -28,6 +28,10 @@ pub struct BlinkState {
     low_active: bool,
     /// 用户已单击停闪（本次低电期间保持；低电解除后重新武装）。
     ack: bool,
+    /// 上一 tick 见到的开关状态（v0.3.14：检测「关→开」沿——用户显式
+    /// 重新打开闪烁即明确的「恢复提醒」意图，必须清除停闪锁存；否则
+    /// 「关闭闪烁 → 低电触发 → 重新打开」会因残留 ack 而永远不闪）。
+    enabled_seen: bool,
 }
 
 impl BlinkState {
@@ -61,7 +65,12 @@ impl BlinkState {
 
     /// 500ms tick：翻转相位并报告本 tick 结果。
     /// `redraw` 仅在闪烁进行中为 true——常态时零重绘（不耗资源）。
+    /// 开关「关→开」沿清除停闪锁存：重新打开闪烁 = 显式恢复提醒。
     pub fn tick(&mut self, enabled: bool) -> TickOutcome {
+        if enabled && !self.enabled_seen {
+            self.ack = false;
+        }
+        self.enabled_seen = enabled;
         self.phase = !self.phase;
         let blinking = self.is_blinking(enabled);
         TickOutcome {
@@ -73,6 +82,9 @@ impl BlinkState {
 
     /// 单击托盘停闪。返回：本次点击是否实际停掉了闪烁
     /// （非闪烁状态下的点击不重绘图标）。
+    /// 调用方只允许传入「左键单击」（v0.3.14：右键是打开菜单——
+    /// 用户开菜单恰恰是为了操作开关，若被当成停闪，则「低电中开菜单
+    /// 重新打开闪烁」会永久压住本次低电期的闪烁）。
     pub fn acknowledge_click(&mut self) -> bool {
         if self.low_active && !self.ack {
             self.ack = true;
@@ -151,6 +163,32 @@ mod tests {
         assert!(!s.acknowledge_click());
     }
 
+    /// v0.3.14（真机反馈 #2「关了再开不闪」）：停闪锁存后，开关
+    /// 「关→开」沿必须清除 ack 并立即恢复闪烁；开关保持开则 ack 保持
+    /// （单击停闪语义不被每 tick 意外冲掉）。
+    #[test]
+    fn reenable_clears_ack_and_resumes_blink() {
+        let mut s = BlinkState::new();
+        s.set_low_active(true);
+        assert!(s.tick(true).blinking);
+        // 单击停闪 → 锁存。
+        assert!(s.acknowledge_click());
+        assert!(!s.tick(true).blinking, "停闪后保持不闪");
+        assert!(!s.tick(true).blinking, "开关保持开时 ack 不得被冲掉");
+        // 用户关闭闪烁再重新打开（真机复现路径）→ 立即恢复闪烁。
+        let _ = s.tick(false);
+        let t = s.tick(true);
+        assert!(
+            t.blinking && t.redraw,
+            "重新打开闪烁必须清除停闪锁存、立即恢复"
+        );
+        // 低电未解除时的「关→开」同样立即恢复。
+        assert!(s.acknowledge_click());
+        assert!(!s.tick(true).blinking);
+        let _ = s.tick(false);
+        assert!(s.tick(true).blinking);
+    }
+
     /// 集成（真机 #3 验收的判定链路）：模拟电量低于阈值两次（去抖）→
     /// AppCore 判低电 → 状态机进入 blink；充电中（D-30 设计：充电设备
     /// 外部供电，不提醒不闪烁）与电量恢复（回滞 5%）→ 解除 → 状态机停止。
@@ -200,6 +238,8 @@ mod tests {
     /// 状态机产出 bright 帧标记，渲染侧（IconCache 透明形状）对 bright 帧
     /// 施加文本颜色跳变 + 透明度脉冲，两帧必有可见差异；非透明形状维持
     /// 背景闪烁（背景帧差异、文本 alpha 恒 255）。
+    /// 依赖 Windows 渲染侧（IconCache / GDI），仅 Windows 编译。
+    #[cfg(windows)]
     #[test]
     fn transparent_low_battery_takes_text_frame_path() {
         use crate::icon::{IconCache, IconColor};
