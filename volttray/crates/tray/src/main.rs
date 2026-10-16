@@ -54,6 +54,10 @@ mod imp {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Controls::Dialogs::{
+        CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -965,7 +969,7 @@ mod imp {
                     ));
                 }
                 let snap = core.snapshot(now);
-                let _ = gui.send(GuiMsg::Snapshot(Box::new(snap)));
+                gui.send(GuiMsg::Snapshot(Box::new(snap)));
             }
             let (notify_enabled, silent) = {
                 match core.lock() {
@@ -991,7 +995,7 @@ mod imp {
                         "toast suppressed (notifications disabled): {title}"
                     ));
                 }
-                let _ = gui.send(GuiMsg::Alert);
+                gui.send(GuiMsg::Alert);
             }
 
             // 配置热重载（P1-2：所有权在 app 层）。每轮 io round 检查一次；
@@ -1974,16 +1978,16 @@ mod imp {
         file_buf[..copy_len].copy_from_slice(&default_wide[..copy_len]);
         let filter = wide("JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0");
         let def_ext = wide("json");
-        let mut ofn = OPENFILENAMEW {
-            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-            lpstrFile: PWSTR(file_buf.as_mut_ptr()),
-            nMaxFile: file_buf.len() as u32,
-            lpstrFilter: PCWSTR(filter.as_ptr()),
-            nFilterIndex: 1,
-            lpstrDefExt: PCWSTR(def_ext.as_ptr()),
-            Flags: OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST,
-            ..Default::default()
-        };
+        // windows 0.62 的 OPENFILENAMEW（x86_64 变体）不实现 Default——
+        // 含裸指针字段，需 zeroed 后逐字段赋值。
+        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        ofn.lpstrFile = PWSTR(file_buf.as_mut_ptr());
+        ofn.nMaxFile = file_buf.len() as u32;
+        ofn.lpstrFilter = PCWSTR(filter.as_ptr());
+        ofn.nFilterIndex = 1;
+        ofn.lpstrDefExt = PCWSTR(def_ext.as_ptr());
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
         let ok = unsafe { GetSaveFileNameW(&mut ofn) };
         if !ok.as_bool() {
             let err = unsafe { CommDlgExtendedError() };
