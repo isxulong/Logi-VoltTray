@@ -28,11 +28,14 @@ impl<K: Eq + Hash + Clone> FrameLru<K> {
         }
     }
 
+    /// 当前缓存帧数（仅测试断言用）。
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
     /// 渲染 miss 累计（测试与诊断用：命中不计）。
+    #[cfg(test)]
     pub fn miss_count(&self) -> u64 {
         self.misses
     }
