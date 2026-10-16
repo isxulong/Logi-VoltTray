@@ -63,15 +63,38 @@ impl BlinkState {
         true
     }
 
-    /// 500ms tick：翻转相位并报告本 tick 结果。
-    /// `redraw` 仅在闪烁进行中为 true——常态时零重绘（不耗资源）。
-    /// 开关「关→开」沿清除停闪锁存：重新打开闪烁 = 显式恢复提醒。
-    pub fn tick(&mut self, enabled: bool) -> TickOutcome {
+    /// 「关→开」沿清除停闪锁存（与 tick 内联逻辑同语义）。事件驱动泵
+    /// 在非 tick 时机（菜单切换、配置热改镜像）调用：闪烁定时器只在
+    /// 闪烁激活期间 arm，开关变化不能等下一个 tick 才生效（v0.3.15，
+    /// P2-1②）。
+    pub fn note_enabled(&mut self, enabled: bool) {
         if enabled && !self.enabled_seen {
             self.ack = false;
         }
         self.enabled_seen = enabled;
+    }
+
+    /// 500ms tick：翻转相位并报告本 tick 结果。
+    /// `redraw` 仅在闪烁进行中为 true——常态时零重绘（不耗资源）。
+    /// 开关「关→开」沿清除停闪锁存：重新打开闪烁 = 显式恢复提醒。
+    pub fn tick(&mut self, enabled: bool) -> TickOutcome {
+        self.note_enabled(enabled);
         self.phase = !self.phase;
+        let blinking = self.is_blinking(enabled);
+        TickOutcome {
+            redraw: blinking,
+            bright: blinking && self.phase,
+            blinking,
+        }
+    }
+
+    /// 不翻相位的状态查询（v0.3.15，P2-1②）：事件驱动泵在非 tick
+    /// 时机（托盘事件、菜单、配置热改）需要知道「现在该不该重绘、
+    /// 用哪一相」，但绝不能因此翻转相位——相位只能由 500ms 定时器
+    /// 驱动（v0.3.14 #3 同族防线：tooltip 定时器不得驱动相位）。
+    /// 同时镜像 note_enabled 的「关→开」沿清锁存语义。
+    pub fn status(&mut self, enabled: bool) -> TickOutcome {
+        self.note_enabled(enabled);
         let blinking = self.is_blinking(enabled);
         TickOutcome {
             redraw: blinking,
@@ -114,6 +137,53 @@ mod tests {
     use volttray_app::{AppCore, Config};
     use volttray_device::battery::{BatteryReading, BatterySource};
     use volttray_device::LinkKind;
+
+    /// v0.3.15（P2-1②）：note_enabled 镜像「关→开」沿清除停闪锁存、
+    /// 但不翻相位——事件驱动泵在定时器未 arm 时调用，相位只能由
+    /// tick（500ms 定时器）推进。
+    #[test]
+    fn note_enabled_clears_ack_without_phase_flip() {
+        let mut s = BlinkState::new();
+        s.set_low_active(true);
+        // 一个 tick：phase = true，闪烁中。
+        let t = s.tick(true);
+        assert!(t.blinking && t.bright, "first tick: phase=true → bright");
+        // 单击停闪 → 锁存。
+        assert!(s.acknowledge_click());
+        assert!(!s.is_blinking(true));
+        // 用户关→开（事件时机，非 tick）：ack 清除，立即恢复闪烁；
+        // 相位未被推进（bright 仍为 true——若误翻相位会变 false）。
+        s.note_enabled(false);
+        s.note_enabled(true);
+        assert!(s.is_blinking(true), "re-enable must clear ack");
+        assert!(s.bright_frame(true), "note_enabled must not flip phase");
+        // 开关保持开时 ack 不被镜像冲掉（与 tick 语义一致）。
+        assert!(s.acknowledge_click());
+        s.note_enabled(true);
+        assert!(!s.is_blinking(true), "steady-on must keep ack");
+    }
+
+    /// v0.3.15（P2-1②）：status 供事件驱动泵查询当前相——返回与
+    /// tick 同形的 TickOutcome，但绝不推进相位；反复调用结果稳定。
+    #[test]
+    fn status_reports_current_phase_without_advancing() {
+        let mut s = BlinkState::new();
+        s.set_low_active(true);
+        let t = s.tick(true);
+        assert!(t.bright, "first tick: phase=true");
+        // 连续 status：相位不变（bright 恒 true）、重绘需求恒真。
+        for _ in 0..8 {
+            let st = s.status(true);
+            assert!(st.blinking && st.redraw && st.bright);
+        }
+        // 下一个 tick 正常翻相（status 没有偷走相位）。
+        let t2 = s.tick(true);
+        assert!(!t2.bright, "second tick must flip to phase=false");
+        // 非闪烁状态：status 报告不重绘。
+        let mut idle = BlinkState::new();
+        let st = idle.status(true);
+        assert!(!st.blinking && !st.redraw);
+    }
 
     /// 低电 → tick 进入 blink 且调度重绘；相位逐 tick 交替。
     #[test]
