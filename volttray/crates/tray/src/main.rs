@@ -42,6 +42,7 @@ static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> = std::sync::M
 
 #[cfg(windows)]
 mod imp {
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex, RwLock};
@@ -49,8 +50,9 @@ mod imp {
 
     use tray_icon::menu::MenuEvent;
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -62,13 +64,14 @@ mod imp {
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
     use volttray_app::diag_export::{
-        read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot, LOG_TAIL_MAX_LINES,
+        diag_export_filename, read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot,
+        LOG_TAIL_MAX_LINES,
     };
     use volttray_app::{
-        Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer,
-        PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
-        Snapshot, TimeoutOutcome, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
-        WAKE_PROBE_INVALIDATE_THRESHOLD,
+        wake_action, Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition,
+        Observer, PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure,
+        SlotScanStreak, Snapshot, TimeoutOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD,
+        SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake, NoResponseCause};
@@ -113,6 +116,28 @@ mod imp {
         /// 触发一次强制重枚举（设备已被用户物理唤醒，主机侧补读）。
         WakeSignal,
         Shutdown,
+    }
+
+    /// v0.3.15（P2-1②配套）：IO → GUI 的「队列有货」线程消息。
+    /// 闪烁定时器改事件驱动后消息泵不再有 500ms 心跳，IO 线程产出
+    /// 快照/告警时必须显式唤醒 GetMessageW，否则空闲期 UI 更新被
+    /// 无限推迟。WM_APP 段自定义，不与系统/控件消息冲突。
+    const WM_APP_GUI: u32 = WM_APP + 0x56;
+
+    /// GUI 通道出口：发消息 + 唤醒消息泵（PostThreadMessageW 失败仅
+    /// 意味着泵尚未启动/正在退出，消息仍留在 channel 里，不丢数据）。
+    struct GuiSink {
+        tx: mpsc::Sender<GuiMsg>,
+        tid: u32,
+    }
+
+    impl GuiSink {
+        fn send(&self, msg: GuiMsg) {
+            let _ = self.tx.send(msg);
+            unsafe {
+                let _ = PostThreadMessageW(self.tid, WM_APP_GUI, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 
     /// 同一接收器通道的句柄共享：多个槽位（设备）共用一对 HID collection。
@@ -317,7 +342,7 @@ mod imp {
     fn io_loop(
         core: Arc<Mutex<AppCore>>,
         observer: Arc<Mutex<Observer>>,
-        gui: mpsc::Sender<GuiMsg>,
+        gui: GuiSink,
         cmd: mpsc::Receiver<IoCmd>,
         cfg_path: PathBuf,
         enum_snap: Arc<Mutex<Option<EnumSnapshot>>>,
@@ -336,10 +361,30 @@ mod imp {
         // RESCAN_LOG_CAP 行——死锁场景枚举签名不变，签名去重不落日志，
         // 没有这行汇总则「0 槽位 + 死缓存句柄」期间完全无观测）。
         let mut rescan_round: u32 = 0;
+        // v0.3.15（P1-1）：唤醒信号只触发「仅探测」轮——标记下一轮
+        // （probe_only_next）与整轮轮询到期点（full_poll_due）。探测轮
+        // 不刷新到期点；持续鼠标活动下到期点一过即降级回整轮，探测轮
+        // 不会饿死正常轮询节奏。
+        let mut probe_only_next = false;
+        let mut full_poll_due = Instant::now();
         'outer: loop {
             if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
                 return;
             }
+
+            // v0.3.15（P1-1）：本轮是否为「仅探测」轮——仅当整轮轮询尚未
+            // 到期时成立；到期后强制整轮，保证在线设备轮询周期语义不变。
+            let probe_only = std::mem::take(&mut probe_only_next) && Instant::now() < full_poll_due;
+            // 仅探测轮：枚举前已在册的槽位集合——本轮只探测「枚举新注册」
+            // 与「仍处休眠」的槽位，已在册在线设备跳过（见轮询循环）。
+            let pre_enum_ids: HashSet<String> = if probe_only {
+                channels
+                    .iter()
+                    .flat_map(|c| c.slots.iter().map(|s| s.id.clone()))
+                    .collect()
+            } else {
+                HashSet::new()
+            };
 
             // 重枚举裁决（D-65）：正常态沿用 30s 门控；无设备且连候选通道
             // 都没有时按 30s/60s/120s 退避（仅主机侧枚举、零射频，不违反
@@ -737,6 +782,19 @@ mod imp {
                     let mut i = 0;
                     while i < ch_state.slots.len() {
                         let s = &mut ch_state.slots[i];
+                        // v0.3.15（P1-1）：仅探测轮跳过「已在册且已唤醒」的
+                        // 在线设备——它们按正常轮询周期查询，不被鼠标活动
+                        // 拖着高频查（原缺陷：WakeSignal 每 2s 整轮重查，
+                        // 持续动鼠标时在线设备被以 ~0.5Hz 查询电量，是
+                        // 1800s 档位的 900 倍）。休眠设备（含本轮新装填
+                        // 唤醒资格的）与枚举新注册槽位仍照常探测。
+                        if probe_only
+                            && pre_enum_ids.contains(&s.id)
+                            && !core.wake_probe_candidate(&s.id)
+                        {
+                            i += 1;
+                            continue;
+                        }
                         // 休眠且无唤醒资格：本轮绝不向该设备发任何 HID++ 查询。
                         if core.poll_decision(&s.id, now) == PollDecision::Skip {
                             i += 1;
@@ -947,14 +1005,30 @@ mod imp {
                 Err(_) => Duration::from_secs(60),
             };
             let interval = reconnect.next_wake(Instant::now(), !channels.is_empty(), poll);
-            let deadline = Instant::now() + interval;
+            // v0.3.15（P1-1）：整轮轮询到期点只在整轮后刷新——探测轮
+            // 不改变正常轮询节奏；持续鼠标活动下到期点一过，下一轮
+            // 自动降级回整轮（见循环顶部 probe_only 裁决）。
+            if !probe_only {
+                full_poll_due = Instant::now() + interval;
+            }
+            let deadline = (Instant::now() + interval).min(full_poll_due);
             // v0.3.14：watcher 原本一轮 io round 才 poll 一次——默认轮询
             // 周期 1800s 意味着手改 TOML 最长 ~30 分钟才生效（用户体感
             // 「改配置不生效」的另一半根因）。mtime stat 是主机侧零射频
             // 操作，不触碰设备、不构成设备轮询，~5s 查一次零耗电代价。
             let mut last_cfg_check = Instant::now();
             while Instant::now() < deadline {
-                match cmd.recv_timeout(Duration::from_millis(200)) {
+                // v0.3.15（P2-1①）：等待分片从固定 200ms 放宽到
+                // min(距 deadline 余量, 5s)——空闲期 recv 唤醒次数降
+                // 25 倍；命令依旧随时可打断（阻塞上限即分片长度），
+                // ~5s 配置热查节奏与 deadline 语义均不变。
+                let slice = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(5));
+                if slice.is_zero() {
+                    break;
+                }
+                match cmd.recv_timeout(slice) {
                     // D-65：「立即刷新」必须先重枚举再查询——重启/重插后
                     // 缓存句柄可能已失效，只查旧句柄等于没刷。
                     Ok(IoCmd::RefreshNow) => {
@@ -979,12 +1053,28 @@ mod imp {
                                  (device physically awake; host-side scan)",
                             );
                         }
-                        if let Ok(mut c) = core.lock() {
-                            for id in c.sleeping_ids() {
-                                c.note_wake_signal(&id);
+                        // v0.3.15（P1-1）：唤醒信号只装填休眠设备的探测
+                        // 资格——有设备被装填、或恰好到了枚举门控点，才跑
+                        // 一轮「仅探测」；无事可做的唤醒信号不再触发整轮
+                        // 重查（裁决纯逻辑 wake_action 在 app 层单测覆盖）。
+                        let armed_any = if let Ok(mut c) = core.lock() {
+                            let ids = c.sleeping_ids();
+                            for id in &ids {
+                                c.note_wake_signal(id);
                             }
+                            !ids.is_empty()
+                        } else {
+                            false
+                        };
+                        let enum_due =
+                            reconnect.should_enumerate(Instant::now(), !channels.is_empty());
+                        match wake_action(armed_any, enum_due) {
+                            WakeAction::ProbeRound => {
+                                probe_only_next = true;
+                                continue 'outer;
+                            }
+                            WakeAction::StayAsleep => {}
                         }
-                        continue 'outer;
                     }
                     Ok(IoCmd::Shutdown) => return,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1193,12 +1283,20 @@ mod imp {
             let observer = observer.clone();
             let path = cfg_path.clone();
             let enum_snap = enum_snap.clone();
-            std::thread::spawn(move || io_loop(core, observer, gui_tx, cmd_rx, path, enum_snap));
+            // v0.3.15（P2-1②配套）：闪烁定时器改事件驱动后，消息泵不再
+            // 有 500ms 心跳——IO 线程的快照/告警需经 GuiSink 附带一条
+            // 线程消息（WM_APP_GUI）唤醒 GetMessageW，否则空闲期 UI
+            // 更新被无限推迟。tid 取的是本（GUI）线程 id。
+            let gui_sink = GuiSink {
+                tx: gui_tx,
+                tid: unsafe { GetCurrentThreadId() },
+            };
+            std::thread::spawn(move || io_loop(core, observer, gui_sink, cmd_rx, path, enum_snap));
         }
         bootlog::stage("io-thread-spawned");
 
-        // 4. 图标缓存（评审 4.1：启动预渲染；v0.3.0：形状/背景/字色/字体 + 低电
-        //    提亮档，M9/M11）+ 托盘。
+        // 4. 图标缓存（v0.3.15 P1-2：懒渲染 + 小容量 LRU，不再启动全量
+        //    预渲染；v0.3.0：形状/背景/字色/字体 + 低电提亮档，M9/M11）+ 托盘。
         let dpi = unsafe { GetDpiForSystem() };
         let dark = system_dark_theme();
         let mut cache = cache_from_config(&cfg, dpi_bucket_size(dpi), dark);
@@ -1207,7 +1305,7 @@ mod imp {
 
         let mut state = GuiState::from_config(&cfg);
 
-        bootlog::stage("icon-cache");
+        bootlog::stage("icon-cache (lazy+LRU, no pre-render)");
         let initial = icon_text(None, false);
         // v0.3.8（D-64 根因修复）：启动首帧取色与 pump 的 percent=None 分支
         // 对齐——分档启用走 Gray 档。v0.3.4 以来的启动代码固定查
@@ -1249,7 +1347,7 @@ mod imp {
                         bootlog::fatal_box(
                             "LogiVoltTray 启动失败",
                             &format!(
-                                "托盘图标预渲染失败（出厂默认渲染配置也无法生成默认帧，\
+                                "托盘图标首帧渲染失败（出厂默认渲染配置也无法生成默认帧，\
                                  疑似系统级 GDI 故障）：{e2}。程序即将退出。"
                             ),
                         );
@@ -1291,10 +1389,10 @@ mod imp {
         // 闪烁上叠加出「极快闪烁」。
         // windows crate 0.62：SetTimer 直接返回 usize 系统分配 id，0 = 失败
         // （GetLastError 语义）；失败时退化为不闪烁（bootlog 留痕，不 panic）。
-        let blink_timer = unsafe { SetTimer(None, 0, 500, None) };
-        if blink_timer == 0 {
-            bootlog::note("blink SetTimer failed (returned 0); blink degraded off");
-        }
+        // v0.3.15（P2-1②）：定时器不再 24/7 常开——0 = 未 arm；仅在闪烁
+        // 激活期间由 sync_blink_timer 惰性 SetTimer，停闪即 KillTimer。
+        // id 过滤口径不变（真实 id + NULL hwnd 双重匹配）。
+        let mut blink_timer = 0usize;
 
         // D-33 被动唤醒：注册鼠标 Raw Input（message-only 窗口，INPUTSINK）。
         // 失败则退化为仅正常轮询节奏——绝不主动保活（不向休眠设备发查询）。
@@ -1318,7 +1416,8 @@ mod imp {
         }
         let mut last_wake_sent: Option<Instant> = None;
 
-        // 5. 消息泵：500ms 定时器驱动事件归并。
+        // 5. 消息泵（v0.3.15 P2-1②：事件驱动——不再 500ms 常开心跳；
+        //    闪烁相位仍只由本程序 500ms 定时器的真实 tick 翻转）。
         bootlog::stage("message-pump");
         let mut msg = MSG::default();
         unsafe {
@@ -1326,28 +1425,11 @@ mod imp {
                 // 只响应本程序的 500ms 闪烁定时器（按 timer id + 线程定时器
                 // 的 NULL hwnd 双重过滤；v0.3.14 #3：外来 WM_TIMER——如设置
                 // 窗口 tooltip 的 reshow 定时器——不得驱动闪烁相位）。
-                if msg.message == WM_TIMER
+                let is_blink_tick = msg.message == WM_TIMER
                     && blink_timer != 0
                     && msg.wParam.0 == blink_timer
-                    && msg.hwnd == HWND::default()
-                {
-                    pump(
-                        &tray,
-                        &gui_rx,
-                        &cmd_tx,
-                        &mut state,
-                        &mut cache,
-                        &mut cur_size,
-                        &mut cur_dark,
-                        &core,
-                        &observer,
-                        &enum_snap,
-                        &config_arc,
-                        &cfg_path,
-                        &exe,
-                        &mut ids,
-                    );
-                } else if msg.message == WM_INPUT {
+                    && msg.hwnd == HWND::default();
+                if msg.message == WM_INPUT {
                     // D-33 被动唤醒：系统层观测到罗技鼠标活动（移动/点击
                     // 本就产生射频流量，属用户行为零额外成本）→ 通知 IO 线程
                     // 装填一次唤醒探测资格。2s 合并防 WM_INPUT 风暴。
@@ -1370,6 +1452,30 @@ mod imp {
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+                // v0.3.15（P2-1②）：pump 由事件驱动——真实闪烁 tick、
+                // GuiSink 唤醒（WM_APP_GUI）、托盘/菜单事件各跑一轮；
+                // WM_INPUT 风暴期不跑（IO 侧 2s 合并已限流，其产出的
+                // 快照会经 GuiSink 线程消息另行唤醒 pump）。
+                if is_blink_tick || msg.message != WM_INPUT {
+                    pump(
+                        &tray,
+                        &gui_rx,
+                        &cmd_tx,
+                        &mut state,
+                        &mut cache,
+                        &mut cur_size,
+                        &mut cur_dark,
+                        &core,
+                        &observer,
+                        &enum_snap,
+                        &config_arc,
+                        &cfg_path,
+                        &exe,
+                        &mut ids,
+                        is_blink_tick,
+                        &mut blink_timer,
+                    );
+                }
             }
             if blink_timer != 0 {
                 let _ = KillTimer(None, blink_timer);
@@ -1377,6 +1483,22 @@ mod imp {
         }
         bootlog::stage("message-pump-exit");
         0
+    }
+
+    /// v0.3.15（P2-1②）：闪烁定时器随激活态惰性 arm / 停闪即 kill。
+    /// arm 失败（返回 0）退化为不闪烁并留痕——与 v0.3.14 的降级口径一致。
+    fn sync_blink_timer(blink_timer: &mut usize, want: bool) {
+        unsafe {
+            if want && *blink_timer == 0 {
+                *blink_timer = SetTimer(None, 0, 500, None);
+                if *blink_timer == 0 {
+                    bootlog::note("blink SetTimer failed (returned 0); blink degraded off");
+                }
+            } else if !want && *blink_timer != 0 {
+                let _ = KillTimer(None, *blink_timer);
+                *blink_timer = 0;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1395,6 +1517,8 @@ mod imp {
         cfg_path: &Path,
         exe: &Path,
         ids: &mut crate::menu::MenuIds,
+        phase_tick: bool,
+        blink_timer: &mut usize,
     ) {
         // 应用层消息。
         let mut snap_changed = false;
@@ -1567,7 +1691,15 @@ mod imp {
         if state.blink.set_low_active(low_active) {
             snap_changed = true;
         }
-        let outcome = state.blink.tick(state.blink_enabled);
+        // v0.3.15（P2-1②）：相位翻转只在真实闪烁定时器 tick 上发生；
+        // 事件驱动的其余 pump（快照/菜单/托盘事件唤醒）只同步启停
+        // 状态、不翻相位——否则闪烁频率会被消息流量牵着走（v0.3.14
+        // #3「两种频率叠加」的同类病，换成事件源同样成立）。
+        let outcome = if phase_tick {
+            state.blink.tick(state.blink_enabled)
+        } else {
+            state.blink.status(state.blink_enabled)
+        };
         // v0.3.14（红蓝共识 B9 必修）：闪烁启停落 bootlog（此前零日志，
         // 真机反馈无从定位「闪没闪 / 为什么停」）。
         if outcome.blinking != state.prev_blinking {
@@ -1589,7 +1721,10 @@ mod imp {
             state.prev_blinking = outcome.blinking;
         }
 
-        if snap_changed || outcome.blinking {
+        // v0.3.15（P2-1②）：提亮相位的周期性重绘只跟真实闪烁 tick 走；
+        // 非 tick 的 pump 只在内容变化（快照/配置/DPI）时重绘——事件
+        // 驱动后不再存在「每 500ms 无条件刷新」的常驻开销。
+        if snap_changed || (phase_tick && outcome.blinking) {
             refresh_ui(tray, state, cache, ids);
         }
 
@@ -1672,6 +1807,10 @@ mod imp {
                 refresh_ui(tray, state, cache, ids);
             }
         }
+
+        // v0.3.15（P2-1②）：每次 pump 末尾按闪烁激活态对齐定时器——
+        // 激活期惰性 arm，停闪（含 ack / 低电解除 / 开关关闭）即 kill。
+        sync_blink_timer(blink_timer, state.blink.is_blinking(state.blink_enabled));
     }
 
     /// 钉选优先，其次默认展示设备；返回快照中的下标。
@@ -1698,7 +1837,7 @@ mod imp {
     fn refresh_ui(
         tray: &tray_icon::TrayIcon,
         state: &mut GuiState,
-        cache: &IconCache,
+        cache: &mut IconCache,
         ids: &mut crate::menu::MenuIds,
     ) {
         let (devices, default_idx) = match &state.snapshot {
@@ -1823,10 +1962,72 @@ mod imp {
         Ok(path)
     }
 
+    /// v0.3.15：「另存为」对话框选导出路径（GetSaveFileNameW）。
+    /// 返回 None = 用户取消或对话框出错——两种都不写任何文件、不弹错误
+    /// （对话框出错留 bootlog 便于诊断）。OFN_NOCHANGEDIR 保证对话框
+    /// 不污染进程工作目录（IO 线程的相对路径语义不受影响）。
+    fn pick_save_path(default_name: &str) -> Option<PathBuf> {
+        let mut file_buf: Vec<u16> = vec![0u16; 260];
+        let default_wide = wide(default_name);
+        let copy_len = default_wide.len().min(file_buf.len());
+        file_buf[..copy_len].copy_from_slice(&default_wide[..copy_len]);
+        let filter = wide("JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0");
+        let def_ext = wide("json");
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            lpstrFile: PWSTR(file_buf.as_mut_ptr()),
+            nMaxFile: file_buf.len() as u32,
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            nFilterIndex: 1,
+            lpstrDefExt: PCWSTR(def_ext.as_ptr()),
+            Flags: OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST,
+            ..Default::default()
+        };
+        let ok = unsafe { GetSaveFileNameW(&mut ofn) };
+        if !ok.as_bool() {
+            let err = unsafe { CommDlgExtendedError() };
+            if err.0 != 0 {
+                bootlog::note(&format!(
+                    "save-as dialog error: commdlg extended error {}",
+                    err.0
+                ));
+            }
+            return None;
+        }
+        let len = file_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(file_buf.len());
+        Some(PathBuf::from(String::from_utf16_lossy(&file_buf[..len])))
+    }
+
+    /// 导出落盘到用户选定路径（v0.3.15）：复用 write_diag_export 的
+    /// 目录自建 + 可读报错。**不做任何自动清理**——导出文件由用户自选
+    /// 位置、自行管理，本函数绝不删除/清理同目录的其它导出文件（含
+    /// %APPDATA% 下的历史导出）。
+    fn finalize_diag_export(path: &Path, json: &str) -> Result<PathBuf, String> {
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("导出路径不含有效文件名：{}", path.display()))?;
+        write_diag_export(dir, filename, json)
+    }
+
+    /// 取消路径的可测内核（v0.3.15）：None = 用户取消 → 不写任何文件、
+    /// 返回 None；Some(path) → 落盘并返回结果。
+    fn export_diag_to(path: Option<&Path>, json: &str) -> Option<Result<PathBuf, String>> {
+        path.map(|p| finalize_diag_export(p, json))
+    }
+
     /// 诊断导出（P1-6：脱敏；v0.3.12 D-69：导出重构为对象——devices +
-    /// log_tail + last_enum + exported_at/app_version）。**导出永远成功**：
-    /// 任何子项失败（日志缺失/锁中毒/枚举未发生）降级为空 + reason，
-    /// 绝不整体报错（v0.3.2 的 os error 3 教训）。
+    /// log_tail + last_enum + exported_at/app_version；v0.3.15：保存位置
+    /// 由用户经「另存为」对话框自选，取消则不写文件、不弹错误）。
+    /// **导出永远成功**：任何子项失败（日志缺失/锁中毒/枚举未发生）
+    /// 降级为空 + reason，绝不整体报错（v0.3.2 的 os error 3 教训）。
     fn export_diag(observer: &Arc<Mutex<Observer>>, enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>) {
         // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
         let (devices, devices_reason) = match observer.lock() {
@@ -1861,20 +2062,23 @@ mod imp {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
         .to_json_string();
-        let filename = format!("LogiVoltTray-diag-export-{exported_at}.json");
-        let msg = match write_diag_export(
-            Config::default_path()
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-            &filename,
-            &json,
-        ) {
-            Ok(path) => format!(
+        // v0.3.15：保存位置由用户经「另存为」对话框自选（默认文件名沿用
+        // LogiVoltTray-diag-export-<ts>.json）；取消则不写任何文件、不弹
+        // 错误，仅留 bootlog。导出文件由用户自行管理——本路径不做任何
+        // 自动清理（含 %APPDATA% 下的历史导出文件）。
+        let default_name = diag_export_filename(exported_at);
+        let Some(chosen) = pick_save_path(&default_name) else {
+            bootlog::note("diag export cancelled by user (save-as dialog)");
+            return;
+        };
+        let msg = match export_diag_to(Some(&chosen), &json) {
+            Some(Ok(path)) => format!(
                 "诊断已导出（设备事件流 + 日志尾部 {} 行 + 最近枚举快照）：\n{}",
                 LOG_TAIL_MAX_LINES,
                 path.display()
             ),
-            Err(e) => format!("诊断导出失败：{e}"),
+            Some(Err(e)) => format!("诊断导出失败：{e}"),
+            None => unreachable!("Some(path) always yields Some(result)"),
         };
         let text = wide(&msg);
         let title = wide("LogiVoltTray 诊断");
@@ -1946,6 +2150,46 @@ mod imp {
             assert!(path
                 .to_string_lossy()
                 .contains("LogiVoltTray-diag-export-42.json"));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// v0.3.15：用户在「另存为」对话框取消 → 不写任何文件、不报错
+        /// （None 路径的可测内核）；Some 路径正常落盘。
+        #[test]
+        fn cancel_path_writes_nothing() {
+            let root = temp_root("cancel");
+            let target = root.join("sub").join("out.json");
+            assert!(
+                export_diag_to(None, "{}").is_none(),
+                "cancel must not attempt any write"
+            );
+            assert!(!root.exists(), "cancel must not create the target dir/file");
+            let written = export_diag_to(Some(&target), "{}")
+                .expect("Some(path) yields a result")
+                .expect("write to chosen path succeeds");
+            assert!(written.is_file());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// v0.3.15（19:17 用户拍板）：导出成功路径**不删除任何已有导出
+        /// 文件**——同目录的历史导出与无关文件逐字节保持原样（软件不做
+        /// 任何形式的自动清理，文件由用户自行管理）。
+        #[test]
+        fn save_success_leaves_sibling_exports_untouched() {
+            let root = temp_root("siblings");
+            std::fs::create_dir_all(&root).unwrap();
+            let old1 = root.join("LogiVoltTray-diag-export-1.json");
+            let old2 = root.join("LogiVoltTray-diag-export-2.json");
+            let unrelated = root.join("unrelated.txt");
+            std::fs::write(&old1, b"{\"old\":1}").unwrap();
+            std::fs::write(&old2, b"{\"old\":2}").unwrap();
+            std::fs::write(&unrelated, b"keep me").unwrap();
+            let target = root.join("LogiVoltTray-diag-export-3.json");
+            let written = finalize_diag_export(&target, "{}").expect("export succeeds");
+            assert!(written.is_file());
+            assert_eq!(std::fs::read(&old1).unwrap(), b"{\"old\":1}");
+            assert_eq!(std::fs::read(&old2).unwrap(), b"{\"old\":2}");
+            assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep me");
             let _ = std::fs::remove_dir_all(&root);
         }
     }
