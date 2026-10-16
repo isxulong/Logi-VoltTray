@@ -22,6 +22,17 @@ use serde::Serialize;
 /// 「重启后识别失败」这类会话级问题，又不至于把导出文件撑爆）。
 pub const LOG_TAIL_MAX_LINES: usize = 200;
 
+/// 诊断导出文件名前缀（v0.3.15：导出改为用户「另存为」自选位置后，
+/// 默认文件名口径集中到 app 层，GUI 与测试共用一处定义）。
+pub const DIAG_EXPORT_PREFIX: &str = "LogiVoltTray-diag-export-";
+
+/// 导出默认文件名：`LogiVoltTray-diag-export-<unix秒>.json`。
+/// （仅生成文件名；软件不删除、不清理任何导出文件——19:17 用户裁定：
+/// 导出文件由用户自行管理。）
+pub fn diag_export_filename(exported_at: u64) -> String {
+    format!("{DIAG_EXPORT_PREFIX}{exported_at}.json")
+}
+
 /// 日志尾部（`lines` 为空时 `reason` 说明原因）。
 #[derive(Debug, Clone, Serialize)]
 pub struct LogTail {
@@ -154,6 +165,15 @@ mod tests {
 
     fn missing_log(tag: &str) -> PathBuf {
         temp_dir(tag).join("logi-volttray.log")
+    }
+
+    /// v0.3.15：默认文件名沿用 LogiVoltTray-diag-export-<ts>.json 口径。
+    #[test]
+    fn export_filename_keeps_prefix_and_extension() {
+        let name = diag_export_filename(1_728_000_000);
+        assert!(name.starts_with(DIAG_EXPORT_PREFIX));
+        assert!(name.ends_with(".json"));
+        assert!(name.contains("1728000000"));
     }
 
     fn bundle_json(log_path: &Path) -> String {
