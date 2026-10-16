@@ -26,11 +26,31 @@ pub const LOG_TAIL_MAX_LINES: usize = 200;
 /// 默认文件名口径集中到 app 层，GUI 与测试共用一处定义）。
 pub const DIAG_EXPORT_PREFIX: &str = "LogiVoltTray-diag-export-";
 
-/// 导出默认文件名：`LogiVoltTray-diag-export-<unix秒>.json`。
+/// 本地时间分量（v0.3.15 第 7 项）：注入式参数，格式化逻辑跨平台可测；
+/// Windows 侧由 GetLocalTime 填充（tray 层胶水），不引入 chrono。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalTimeParts {
+    pub year: u16,
+    pub month: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub millis: u16,
+}
+
+/// 导出默认文件名：`LogiVoltTray-diag-export-<YYYYMMDD>-<HHMMSS>-<mmm>.json`
+/// （本地时间可读格式，v0.3.15 第 7 项；Windows 文件名不能含冒号，故用
+/// `-` 分隔）。同名碰撞兜底：同一毫秒内重复导出时由「另存为」对话框的
+/// OFN_OVERWRITEPROMPT 做覆盖前确认（tray 层已实现）——比追加序号简单
+/// 且文件名保持可读，用户显式确认才覆盖。
 /// （仅生成文件名；软件不删除、不清理任何导出文件——19:17 用户裁定：
 /// 导出文件由用户自行管理。）
-pub fn diag_export_filename(exported_at: u64) -> String {
-    format!("{DIAG_EXPORT_PREFIX}{exported_at}.json")
+pub fn diag_export_filename_local(t: LocalTimeParts) -> String {
+    format!(
+        "{DIAG_EXPORT_PREFIX}{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}.json",
+        t.year, t.month, t.day, t.hour, t.minute, t.second, t.millis
+    )
 }
 
 /// 日志尾部（`lines` 为空时 `reason` 说明原因）。
@@ -167,13 +187,37 @@ mod tests {
         temp_dir(tag).join("logi-volttray.log")
     }
 
-    /// v0.3.15：默认文件名沿用 LogiVoltTray-diag-export-<ts>.json 口径。
+    /// v0.3.15 第 7 项：默认文件名改本地时间可读格式——
+    /// `LogiVoltTray-diag-export-<YYYYMMDD>-<HHMMSS>-<mmm>.json`，
+    /// 各分量零填充、Windows 文件名字符合法（无冒号）。
     #[test]
-    fn export_filename_keeps_prefix_and_extension() {
-        let name = diag_export_filename(1_728_000_000);
-        assert!(name.starts_with(DIAG_EXPORT_PREFIX));
-        assert!(name.ends_with(".json"));
-        assert!(name.contains("1728000000"));
+    fn export_filename_uses_readable_local_time() {
+        let name = diag_export_filename_local(LocalTimeParts {
+            year: 2026,
+            month: 10,
+            day: 16,
+            hour: 21,
+            minute: 29,
+            second: 6,
+            millis: 483,
+        });
+        assert_eq!(name, "LogiVoltTray-diag-export-20261016-212906-483.json");
+        assert!(!name.contains(':'), "Windows 文件名不得含冒号");
+    }
+
+    /// 零填充边界：个位数月/日/时/分/秒与毫秒不足三位时补齐。
+    #[test]
+    fn export_filename_zero_pads_all_parts() {
+        let name = diag_export_filename_local(LocalTimeParts {
+            year: 2026,
+            month: 1,
+            day: 2,
+            hour: 3,
+            minute: 4,
+            second: 5,
+            millis: 7,
+        });
+        assert_eq!(name, "LogiVoltTray-diag-export-20260102-030405-007.json");
     }
 
     fn bundle_json(log_path: &Path) -> String {
