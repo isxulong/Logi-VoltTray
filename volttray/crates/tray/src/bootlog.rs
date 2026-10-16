@@ -156,17 +156,15 @@ fn write_line_to(sink: &mut LogSink, line: &str) {
     if writeln!(sink.w, "{text}").is_err() || sink.w.flush().is_err() {
         return;
     }
-    if sink.gate.note_line(text.len() as u64 + 1) {
-        if truncate_reopen(&mut sink.w).is_ok() {
-            sink.gate.note_rotated();
-            let marker = format!(
-                "[{}] note: 日志超过 1MB，已截断重开（运行期轮转）",
-                now_str()
-            );
-            let _ = writeln!(sink.w, "{marker}");
-            let _ = sink.w.flush();
-            sink.gate.note_line(marker.len() as u64 + 1);
-        }
+    if sink.gate.note_line(text.len() as u64 + 1) && truncate_reopen(&mut sink.w).is_ok() {
+        sink.gate.note_rotated();
+        let marker = format!(
+            "[{}] note: 日志超过 1MB，已截断重开（运行期轮转）",
+            now_str()
+        );
+        let _ = writeln!(sink.w, "{marker}");
+        let _ = sink.w.flush();
+        sink.gate.note_line(marker.len() as u64 + 1);
     }
 }
 
