@@ -26,6 +26,8 @@ pub struct RotateGate {
 }
 
 impl RotateGate {
+    /// 自定义门控参数构造（生产走 default_gate；本构造器仅测试用）。
+    #[cfg(test)]
     pub fn new(limit: u64, check_every: u32) -> Self {
         Self {
             limit,
