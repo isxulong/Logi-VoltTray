@@ -119,10 +119,8 @@ mod tests {
     /// truncate_reopen：缓冲余量不丢、旧内容全清、偏移归零可续写。
     #[test]
     fn truncate_reopen_discards_prior_content() {
-        let dir = std::env::temp_dir().join(format!(
-            "volttray-logrotate-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("volttray-logrotate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("log.txt");
@@ -143,10 +141,8 @@ mod tests {
     /// 行 17B 行 → 至少轮转 2 次，最终文件 ≤ 4 行内容。
     #[test]
     fn gate_driven_runtime_rotation_shrinks_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "volttray-logrotate-chain-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("volttray-logrotate-chain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("log.txt");
@@ -166,7 +162,10 @@ mod tests {
         }
         drop(w);
         let final_len = std::fs::metadata(&path).unwrap().len();
-        assert!(rotated >= 2, "40×17B=680B 于 100B 上限应轮转 ≥2 次，实 {rotated}");
+        assert!(
+            rotated >= 2,
+            "40×17B=680B 于 100B 上限应轮转 ≥2 次，实 {rotated}"
+        );
         assert!(final_len <= 4 * 17, "轮转后残留 ≤4 行，实 {final_len}B");
         let _ = std::fs::remove_dir_all(&dir);
     }
