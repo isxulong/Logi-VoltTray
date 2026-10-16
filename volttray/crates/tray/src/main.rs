@@ -16,8 +16,14 @@
 mod blink;
 #[cfg(windows)]
 mod bootlog;
+// 帧 LRU / 日志运行期轮转门控是纯逻辑（无 Win32 依赖），跨平台编译以便
+// 在非 Windows 环境跑单元测试（v0.3.15，P1-2 / P2-2）。
+#[cfg_attr(not(windows), allow(dead_code))]
+mod frame_lru;
 #[cfg(windows)]
 mod icon;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod logrotate;
 #[cfg(windows)]
 mod menu;
 #[cfg(windows)]
