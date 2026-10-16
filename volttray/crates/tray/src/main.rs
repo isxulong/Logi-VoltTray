@@ -52,6 +52,7 @@ mod imp {
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::System::SystemInformation::GetLocalTime;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -64,8 +65,8 @@ mod imp {
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
     use volttray_app::diag_export::{
-        diag_export_filename, read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot,
-        LOG_TAIL_MAX_LINES,
+        diag_export_filename_local, read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot,
+        LocalTimeParts, LOG_TAIL_MAX_LINES,
     };
     use volttray_app::{
         wake_action, Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition,
@@ -2062,11 +2063,23 @@ mod imp {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
         .to_json_string();
-        // v0.3.15：保存位置由用户经「另存为」对话框自选（默认文件名沿用
-        // LogiVoltTray-diag-export-<ts>.json）；取消则不写任何文件、不弹
-        // 错误，仅留 bootlog。导出文件由用户自行管理——本路径不做任何
-        // 自动清理（含 %APPDATA% 下的历史导出文件）。
-        let default_name = diag_export_filename(exported_at);
+        // v0.3.15：保存位置由用户经「另存为」对话框自选；取消则不写任何
+        // 文件、不弹错误，仅留 bootlog。导出文件由用户自行管理——本路径
+        // 不做任何自动清理（含 %APPDATA% 下的历史导出文件）。
+        // 第 7 项：默认文件名改本地时间可读格式（GetLocalTime 取时，
+        // 格式化纯逻辑在 app 层跨平台可测）；JSON 内 exported_at 字段
+        // 保留 unix 秒不动（程序消费）。同名碰撞由对话框
+        // OFN_OVERWRITEPROMPT 覆盖前确认兜底（见 diag_export.rs 论证）。
+        let local = unsafe { GetLocalTime() };
+        let default_name = diag_export_filename_local(LocalTimeParts {
+            year: local.wYear,
+            month: local.wMonth,
+            day: local.wDay,
+            hour: local.wHour,
+            minute: local.wMinute,
+            second: local.wSecond,
+            millis: local.wMilliseconds,
+        });
         let Some(chosen) = pick_save_path(&default_name) else {
             bootlog::note("diag export cancelled by user (save-as dialog)");
             return;
