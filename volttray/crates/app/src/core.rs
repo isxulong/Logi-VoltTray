@@ -276,6 +276,16 @@ impl AppCore {
         }
     }
 
+    /// v0.3.15（P1-1）：唤醒探测轮内的槽位准入判定——仅「已注册且当前
+    /// 休眠」的设备允许被探测。在线/灰显设备在探测轮一律跳过（唤醒信号
+    /// ≠ 该查在线设备），与 `poll_decision` 组合保证：探测轮里非候选
+    /// 设备一次 HID++ 查询都不发。
+    pub fn wake_probe_candidate(&self, id: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping)
+    }
+
     /// 当前处于休眠的设备 id 列表（IO 线程收到唤醒信号后批量装填用）。
     pub fn sleeping_ids(&self) -> Vec<String> {
         self.entries
@@ -456,6 +466,25 @@ mod tests {
         core.record_success("a", reading(5, false), t0);
         let later = t0 + GRAY_AFTER + Duration::from_secs(1);
         assert_eq!(core.default_display_index(later), None); // 唯一设备已灰
+    }
+
+    /// v0.3.15（P1-1）：唤醒探测轮只准入休眠设备——在线、未注册 id
+    /// 一律排除；超时连击进入休眠后才成为候选（与 poll_decision 的
+    /// arm+冷却门控串联：候选资格 ≠ 一定探测，仅允许进入判定链）。
+    #[test]
+    fn wake_probe_candidate_admits_only_sleeping() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        // 在线设备与未注册 id：非候选。
+        assert!(!core.wake_probe_candidate("a"));
+        assert!(!core.wake_probe_candidate("ghost"));
+        // b 连续超时达阈值 → 进入休眠 → 成为唯一候选。
+        let _ = core.record_timeout("b");
+        assert!(!core.wake_probe_candidate("b"), "未达休眠阈值前仍在线");
+        let _ = core.record_timeout("b");
+        assert!(core.wake_probe_candidate("b"));
+        assert!(!core.wake_probe_candidate("a"), "在线设备不得成为候选");
     }
 
     #[test]
