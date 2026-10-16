@@ -995,13 +995,26 @@ mod tests {
         assert!(core.is_low_battery("old"));
         assert_eq!(core.take_pending_alerts().len(), 1);
         // 再来一条入队后不取走，rebind 应改写其 id。
+        // （红蓝 P2-2：先经解除沿把 tracker 复位，再调回阈值重造一条
+        // 真实在队告警——此前解除沿后队列恒空，all() 对空集恒真、
+        // 断言形同虚设。）
         core.swap_config(Config {
             low_threshold: 20,
             ..Config::default()
         });
         assert!(!core.is_low_battery("old"));
+        core.swap_config(Config {
+            low_threshold: 90,
+            ..Config::default()
+        });
+        assert!(core.is_low_battery("old"), "重估应重新入队一条告警");
         let _ = core.upsert_device(dev_with_unit("new", 0xFF, "AAAA0001"));
         let alerts = core.take_pending_alerts();
+        assert_eq!(
+            alerts.len(),
+            1,
+            "rebind 前必须恰有一条在队告警（防空集恒真）"
+        );
         assert!(alerts.iter().all(|(id, _)| id == "new"));
     }
 

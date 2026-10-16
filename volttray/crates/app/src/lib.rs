@@ -30,7 +30,7 @@ pub use core::{
 };
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
-pub use physkey::{pick_promotion, repin, AliasSlot};
+pub use physkey::{identity_confirmed, pick_promotion, repin, AliasSlot};
 pub use reconnect::{
     wake_action, ChannelLiveness, EnumTransition, Reconnect, SlotOutcome, SlotScanFailure,
     SlotScanStreak, WakeAction, ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL,

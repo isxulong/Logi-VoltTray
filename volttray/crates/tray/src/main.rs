@@ -73,10 +73,10 @@ mod imp {
         LocalTimeParts, LOG_TAIL_MAX_LINES,
     };
     use volttray_app::{
-        pick_promotion, repin, wake_action, Alert, AliasSlot, AppCore, ChannelLiveness, Config,
-        ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect, SharedObserver,
-        SlotOutcome, SlotScanFailure, SlotScanStreak, Snapshot, TimeoutOutcome, UpsertOutcome,
-        WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
+        identity_confirmed, pick_promotion, repin, wake_action, Alert, AliasSlot, AppCore,
+        ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect,
+        SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak, Snapshot, TimeoutOutcome,
+        UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
         WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
@@ -408,6 +408,18 @@ mod imp {
     /// 挑选逻辑在 app 层（`pick_promotion`，纯函数单测覆盖）；本函数只做
     /// 投影与落账。晋级成功返回 true；无候选（或身份不明）返回 false，
     /// 调用方按各自原有语义继续（移除 / 置离线）。
+    ///
+    /// 红蓝对抗 P1-1（必修，D-71）：槽位 unit_id 是注册期一次性冻结值——
+    /// 接收器槽位在别名存续期间被 RF 侧重配对（Logi 配对软件，纯 RF 操作、
+    /// USB 枚举签名不变、不触发重扫）后，冻结值不再代表端点当前身份，
+    /// 凭冻结值晋级会把台账误绑到另一台物理鼠标的端点并永久压制它。
+    /// 因此晋级前对候选别名端点**一次性重读 unitId 验明**（`identity_
+    /// confirmed`，纯函数单测覆盖）：一致才晋级；读不到或不匹配则放弃
+    /// 晋级并丢弃该槽位——其别名身份已被证伪 / 无法证实，保留它会让
+    /// 端点上真实设备被永久压制（槽位存在即跳过重扫），丢弃后下一轮
+    /// 枚举按常规注册流程重新发现。电池红线：重读仅由「主端点消失 /
+    /// 晋级事件」触发、每事件至多一次，与注册期 read_unit_id 同级，
+    /// 不进入任何周期轮询路径。
     fn try_promote(
         core: &mut AppCore,
         observer: &Arc<Mutex<Observer>>,
@@ -438,14 +450,51 @@ mod imp {
             return false;
         };
         let (ci, si) = locs[p];
+        // P1-1：晋级前验明候选端点当前身份（事件触发，每事件至多一次）。
+        let (cand_id, cand_index, cand_features) = {
+            let t = &channels[ci].slots[si];
+            (t.id.clone(), t.index, t.features.clone())
+        };
+        let reread = {
+            let mut t = Transport::new(
+                channels[ci].shared.clone(),
+                SharedObserver(observer.clone()),
+            );
+            read_unit_id(&mut t, cand_index, &cand_features)
+        };
+        if !identity_confirmed(unit, reread.as_deref()) {
+            // 验明失败：放弃晋级 + 丢弃槽位（恢复该端点的常规重注册，
+            // 避免真实设备被陈旧别名永久压制），调用方按现状移除条目。
+            channels[ci].slots.retain(|x| x.id != cand_id);
+            bootlog::note(&format!(
+                "promotion aborted: alias {cand_id} identity re-read {reread:?} != frozen {unit}; slot dropped for re-registration"
+            ));
+            if let Ok(mut o) = observer.lock() {
+                o.push(DiagEvent::new(
+                    Layer::App,
+                    DiagKind::Info {
+                        message: format!(
+                            "promotion aborted: alias {cand_id} failed identity re-verification \
+                             (frozen unitId no longer matches endpoint); slot dropped, \
+                             endpoint will re-register on next enum"
+                        ),
+                    },
+                ));
+            }
+            return false;
+        }
         let (new_id, new_index, pid) = {
             let t = &mut channels[ci].slots[si];
             t.alias = false;
             (t.id.clone(), t.index, channels[ci].info.pid)
         };
+        // P2-4（记录放行，D-71）：rebind 返回 false（条目不存在）时别名
+        // 已清、true 已返——当前四条调用路径均保证条目存在（晋级必先于
+        // remove/record_failure，且槽位必注册过），现实不可触发，按裁决
+        // 记录不改代码。
         core.rebind_device_id(&removed.id, &new_id, new_index, classify_pid(pid));
         bootlog::note(&format!(
-            "primary endpoint removed: {} rebind -> promoted alias {} (identity preserved)",
+            "primary endpoint removed: {} rebind -> promoted alias {} (identity re-verified, preserved)",
             removed.id, new_id
         ));
         if let Ok(mut o) = observer.lock() {
@@ -1066,10 +1115,10 @@ mod imp {
                                         "battery query failed id={} reason=device_gone (deregistered immediately)",
                                         s.id
                                     ));
-                                    core.record_failure(&s.id, true);
                                     let gone_slot = ch_state.slots.remove(i);
-                                    // T6：DeviceLost 延后——先尝试向存活
-                                    // 别名晋级（循环外统一裁决）。
+                                    // T6：DeviceLost 与失败落态延后——先尝试
+                                    // 向存活别名晋级（循环外统一裁决；
+                                    // 红蓝 P2-1：先晋级、后落失败态）。
                                     pending_removed_slots.push(gone_slot);
                                 }
                                 // 其它持续失败：设备级错误（错误帧/映射/特性
@@ -1093,7 +1142,11 @@ mod imp {
                                         HANDLE_INVALIDATE_THRESHOLD
                                     ));
                                     let gone = s.hard_failures >= HANDLE_INVALIDATE_THRESHOLD;
-                                    core.record_failure(&s.id, gone);
+                                    // 红蓝 P2-1：注销槽位的失败落态延后到
+                                    // 晋级裁决之后（先晋级、后落失败态）；
+                                    // 未达阈值时 record_failure(gone=false)
+                                    // 本就是无操作（core 仅在 gone 且未
+                                    // Disconnected 时落态），不再调用。
                                     if gone {
                                         bootlog::note(&format!(
                                             "slot deregistered: id={} hard failures reached {}; rescan on next enum",
@@ -1131,7 +1184,11 @@ mod imp {
                 }
                 // T6：轮询中注销槽位的晋级裁决——主端点被注销（DeviceGone /
                 // 硬失败）时先尝试向存活通道的同 unitId 别名晋级；无候选
-                // 才发 DeviceLost（条目已由 record_failure 置离线）。
+                // 才落失败态 + 发 DeviceLost（红蓝 P2-1：四条移除路径统一为
+                // 「先晋级、后落失败态」——此前本路径先 record_failure 置
+                // Disconnected 再晋级，同一拔线事件被 poll 先探测时会残留
+                // 离线显示直到下一轮成功轮询，与枚举先探测的「全程在线」
+                // 构成两种用户可见终态）。
                 for s in &pending_removed_slots {
                     if s.alias {
                         continue;
@@ -1139,6 +1196,7 @@ mod imp {
                     if try_promote(&mut core, &observer, &mut channels, s, &|_| true) {
                         continue;
                     }
+                    core.record_failure(&s.id, true);
                     if let Ok(mut o) = observer.lock() {
                         o.push(DiagEvent::new(
                             Layer::App,

@@ -35,6 +35,18 @@ pub fn pick_promotion(removed_unit_id: &str, slots: &[AliasSlot]) -> Option<usiz
         .position(|s| s.alias && s.channel_alive && s.unit_id.as_deref() == Some(removed_unit_id))
 }
 
+/// 晋级验明（红蓝对抗 P1-1 必修）：候选别名端点的即时重读 unitId 与
+/// 被移除主端点的冻结 unitId 一致才允许晋级。
+///
+/// 背景：槽位的 unit_id 是注册期一次性写入的冻结值；接收器槽位在别名
+/// 存续期间可能被 RF 侧重配对（Logi 配对软件，纯 RF 操作、USB 枚举签名
+/// 不变、不触发重扫），此后冻结值不再代表端点当前身份。直接凭冻结值
+/// 晋级会把台账重绑到另一台物理鼠标的端点（误并），并永久压制该鼠标。
+/// 因此晋级前必须一次性重读验明：重读失败（None）或值不同都拒绝晋级。
+pub fn identity_confirmed(frozen: &str, reread: Option<&str>) -> bool {
+    reread == Some(frozen)
+}
+
 /// pin 重绑匹配：快照更新后，若用户 pin 的 id 已不在新快照里，用旧快照中
 /// 该设备的 proven 物理身份在新快照里找同一物理设备，返回应改 pin 的新 id。
 ///
@@ -116,6 +128,16 @@ mod tests {
         // 无同 unitId 别名。
         let slots = vec![slot(true, "recv#1", true, Some("BBBB0002"))];
         assert_eq!(pick_promotion("AAAA0001", &slots), None);
+    }
+
+    #[test]
+    fn identity_confirmed_requires_matching_reread() {
+        // 重读一致 → 放行晋级。
+        assert!(identity_confirmed("AAAA0001", Some("AAAA0001")));
+        // 重读失败（设备睡了 / 超时 / 协议错）→ 拒绝（保守：不误并）。
+        assert!(!identity_confirmed("AAAA0001", None));
+        // 端点已被重配对给另一台鼠标 → 拒绝（P1-1 攻击路径）。
+        assert!(!identity_confirmed("AAAA0001", Some("BBBB0002")));
     }
 
     #[test]
