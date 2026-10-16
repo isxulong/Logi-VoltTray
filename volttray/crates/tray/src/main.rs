@@ -73,13 +73,15 @@ mod imp {
         LocalTimeParts, LOG_TAIL_MAX_LINES,
     };
     use volttray_app::{
-        wake_action, Alert, AppCore, ChannelLiveness, Config, ConfigWatcher, EnumTransition,
-        Observer, PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure,
-        SlotScanStreak, Snapshot, TimeoutOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD,
-        SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
+        pick_promotion, repin, wake_action, Alert, AliasSlot, AppCore, ChannelLiveness, Config,
+        ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect, SharedObserver,
+        SlotOutcome, SlotScanFailure, SlotScanStreak, Snapshot, TimeoutOutcome, UpsertOutcome,
+        WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
+        WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{probe_battery, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake, NoResponseCause};
+    use volttray_device::identity::read_unit_id;
     use volttray_device::name::read_device_name;
     use volttray_device::state::DeviceState;
     use volttray_device::{classify_pid, Device};
@@ -183,6 +185,12 @@ mod imp {
         /// 非超时类硬失败连击（v0.3.1 语义：查询超时走休眠路径、不注销；
         /// 仅 I/O / 映射类持续失败沿用 3 连败注销，注销后靠重枚举重新注册）。
         hard_failures: u32,
+        /// T6：注册期一次性读到的物理设备 unitId（None = 身份不明，
+        /// 走「不合并」降级路径）。只读一次，不进任何周期轮询路径。
+        unit_id: Option<String>,
+        /// T6：同一物理设备的重复端点（别名槽位）——不参与轮询、不进
+        /// 菜单、不触发 toast；主端点所在通道消失时可被晋级为新主端点。
+        alias: bool,
     }
 
     struct ChannelState {
@@ -259,13 +267,18 @@ mod imp {
     /// 对单个通道扫描一个槽位：握手 → 电量探测；拿到电量才注册。
     /// 返回注册成功的槽位；Err 携带失败类别（v0.3.11 F1：供通道级
     /// 「扫槽连败」裁决区分「设备深睡不应答」与「句柄可疑」，F2）。
+    ///
+    /// T6：注册期在既有握手/探测事务之后一次性读取 unitId（设备刚应答过，
+    /// 必然醒着；仅这一次，不进周期轮询——电池红线）。upsert 命中同一
+    /// 物理身份时发生 rebind：返回值第二元携带 (old_id, new_id)，调用方
+    /// 负责把 old_id 对应的槽位标记为别名（借用约束，见枚举循环）。
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
         shared: &SharedChannel,
         info: &ChannelInfo,
         slot: u8,
-    ) -> Result<SlotState, SlotScanFailure> {
+    ) -> Result<(SlotState, Option<(String, String)>), SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
         let hs = handshake(&mut t, slot);
@@ -311,17 +324,59 @@ mod imp {
         let raw_name = read_device_name(&mut t, slot, &features, is_hidpp1)
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| slot_name(info, slot));
-        let dev = Device::new(
+        // T6：一次性读取物理身份（HID++1 设备 feature 表为空，read_unit_id
+        // 内部直接返回 None、零通信）。取不到走「不合并」降级（验收 3）。
+        let unit_id = read_unit_id(&mut t, slot, &features);
+        if unit_id.is_none() && !is_hidpp1 {
+            // 降级路径可观测标记（诊断导出可见）：身份不明 → 不合并。
+            bootlog::note(&format!(
+                "slot scan: {id} unitId unavailable; physical identity unproven (no merge)"
+            ));
+            if let Ok(mut o) = observer.lock() {
+                o.push(DiagEvent::new(
+                    Layer::App,
+                    DiagKind::Info {
+                        message: format!(
+                            "physical identity unproven (unitId unavailable): {id}; \
+                             fallback = no-merge"
+                        ),
+                    },
+                ));
+            }
+        }
+        let mut dev = Device::new(
             id.clone(),
             &raw_name,
             classify_pid(info.pid),
             slot,
             is_hidpp1,
         );
+        if let Some(u) = &unit_id {
+            dev.set_unit_id(u);
+        }
         let name = dev.name.clone();
         let now = Instant::now();
+        let mut rebound: Option<(String, String)> = None;
         if let Ok(mut c) = core.lock() {
-            c.upsert_device(dev);
+            match c.upsert_device(dev) {
+                UpsertOutcome::Rebound { old_id, new_id } => {
+                    bootlog::note(&format!(
+                        "slot scan: physical identity match; rebind {old_id} -> {new_id} (old endpoint becomes alias)"
+                    ));
+                    if let Ok(mut o) = observer.lock() {
+                        o.push(DiagEvent::new(
+                            Layer::App,
+                            DiagKind::DeviceRebound {
+                                old_id: old_id.clone(),
+                                new_id: new_id.clone(),
+                            },
+                        ));
+                    }
+                    rebound = Some((old_id, new_id));
+                }
+                UpsertOutcome::Inserted | UpsertOutcome::Updated => {}
+            }
+            // rebind 后在册条目 id 已是本槽位 id，按本 id 记录读数即可。
             c.record_success(&id, reading, now);
         }
         if let Ok(mut o) = observer.lock() {
@@ -333,13 +388,76 @@ mod imp {
                 },
             ));
         }
-        Ok(SlotState {
-            id,
-            index: slot,
-            features,
-            is_hidpp1,
-            hard_failures: 0,
-        })
+        Ok((
+            SlotState {
+                id,
+                index: slot,
+                features,
+                is_hidpp1,
+                hard_failures: 0,
+                unit_id,
+                alias: false,
+            },
+            rebound,
+        ))
+    }
+
+    /// T6：主端点槽位被移除时的晋级善后——从仍存活（`alive` 判定）的通道
+    /// 里挑一个同 unitId 的别名槽位，取消其别名标记并把台账条目重绑到
+    /// 该端点（身份连续：电量 / 低电追踪 / 超时连击 / pin 选定不丢）。
+    /// 挑选逻辑在 app 层（`pick_promotion`，纯函数单测覆盖）；本函数只做
+    /// 投影与落账。晋级成功返回 true；无候选（或身份不明）返回 false，
+    /// 调用方按各自原有语义继续（移除 / 置离线）。
+    fn try_promote(
+        core: &mut AppCore,
+        observer: &Arc<Mutex<Observer>>,
+        channels: &mut [ChannelState],
+        removed: &SlotState,
+        alive: &dyn Fn(&str) -> bool,
+    ) -> bool {
+        let Some(unit) = removed.unit_id.as_deref() else {
+            return false;
+        };
+        let mut views: Vec<AliasSlot> = Vec::new();
+        let mut locs: Vec<(usize, usize)> = Vec::new();
+        for (ci, c) in channels.iter().enumerate() {
+            if !alive(&c.key) {
+                continue;
+            }
+            for (si, x) in c.slots.iter().enumerate() {
+                views.push(AliasSlot {
+                    channel_alive: true,
+                    id: x.id.clone(),
+                    alias: x.alias,
+                    unit_id: x.unit_id.clone(),
+                });
+                locs.push((ci, si));
+            }
+        }
+        let Some(p) = pick_promotion(unit, &views) else {
+            return false;
+        };
+        let (ci, si) = locs[p];
+        let (new_id, new_index, pid) = {
+            let t = &mut channels[ci].slots[si];
+            t.alias = false;
+            (t.id.clone(), t.index, channels[ci].info.pid)
+        };
+        core.rebind_device_id(&removed.id, &new_id, new_index, classify_pid(pid));
+        bootlog::note(&format!(
+            "primary endpoint removed: {} rebind -> promoted alias {} (identity preserved)",
+            removed.id, new_id
+        ));
+        if let Ok(mut o) = observer.lock() {
+            o.push(DiagEvent::new(
+                Layer::App,
+                DiagKind::DeviceRebound {
+                    old_id: removed.id.clone(),
+                    new_id,
+                },
+            ));
+        }
+        true
     }
 
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
@@ -462,6 +580,9 @@ mod imp {
                         // v0.3.11（F2）：「扫槽连败重开失败、待整通道作废」的
                         // 通道 key（借用期内不能就地移除，循环外统一处理）。
                         let mut scrapped_channels: Vec<String> = Vec::new();
+                        // T6：rebind 的旧端点 id（借用约束——逐通道扫描期间
+                        // 不能跨通道改槽位，循环外统一标记为别名）。
+                        let mut pending_aliases: Vec<String> = Vec::new();
                         for info in found {
                             let key = info.key();
                             seen.push(key.clone());
@@ -529,7 +650,12 @@ mod imp {
                                         &state.info,
                                         slot,
                                     ) {
-                                        Ok(s) => state.slots.push(s),
+                                        Ok((s, rebound)) => {
+                                            state.slots.push(s);
+                                            if let Some((old_id, _)) = rebound {
+                                                pending_aliases.push(old_id);
+                                            }
+                                        }
                                         Err(f) => scan_failures.push(f),
                                     }
                                 }
@@ -626,8 +752,13 @@ mod imp {
                             let shared = SharedChannel(Arc::new(Mutex::new(ch)));
                             let mut slots = Vec::new();
                             for slot in SCAN_SLOTS {
-                                if let Ok(s) = try_slot(&core, &observer, &shared, &info, slot) {
+                                if let Ok((s, rebound)) =
+                                    try_slot(&core, &observer, &shared, &info, slot)
+                                {
                                     slots.push(s);
+                                    if let Some((old_id, _)) = rebound {
+                                        pending_aliases.push(old_id);
+                                    }
                                 }
                             }
                             channels.push(ChannelState {
@@ -639,12 +770,47 @@ mod imp {
                                 slots,
                             });
                         }
+                        // T6：rebind 旧端点统一标记为别名（跳过轮询 /
+                        // 不进菜单 / 不 toast；仍留在 slots 中避免重扫抖动）。
+                        if !pending_aliases.is_empty() {
+                            for c in &mut channels {
+                                for s in &mut c.slots {
+                                    if pending_aliases.contains(&s.id) {
+                                        s.alias = true;
+                                    }
+                                }
+                            }
+                        }
                         // 掉线通道整体移除（接收器拔出）。
                         let mut i = 0;
                         while i < channels.len() {
                             if !seen.contains(&channels[i].key) {
                                 let gone = channels.remove(i);
                                 for s in &gone.slots {
+                                    // T6：别名槽位从未在台账中独立存在，
+                                    // 随通道消失即可，不动台账。
+                                    if s.alias {
+                                        bootlog::note(&format!(
+                                            "alias slot gone with channel: id={}",
+                                            s.id
+                                        ));
+                                        continue;
+                                    }
+                                    // T6 拔线晋级：主端点所在通道消失时，从
+                                    // 仍存活通道里挑同 unitId 的别名晋级为
+                                    // 新主端点（无线回落身份连续；电量 /
+                                    // 低电追踪 / pin 选定不丢）。
+                                    let promoted = match core.lock() {
+                                        Ok(mut c) => {
+                                            try_promote(&mut c, &observer, &mut channels, s, &|k| {
+                                                seen.iter().any(|x| x == k)
+                                            })
+                                        }
+                                        Err(_) => false,
+                                    };
+                                    if promoted {
+                                        continue;
+                                    }
                                     if let Ok(mut c) = core.lock() {
                                         c.remove_device(&s.id);
                                     }
@@ -663,21 +829,38 @@ mod imp {
                         // （句柄重开无望），剩余槽位置为离线，强制全量重枚举
                         // （主机侧操作，零射频）。
                         if !scrapped_channels.is_empty() {
-                            let mut removed_ids: Vec<String> = Vec::new();
-                            channels.retain(|c| {
+                            let mut removed_slots: Vec<SlotState> = Vec::new();
+                            channels.retain_mut(|c| {
                                 if scrapped_channels.contains(&c.key) {
-                                    removed_ids.extend(c.slots.iter().map(|s| s.id.clone()));
+                                    removed_slots.append(&mut c.slots);
                                     false
                                 } else {
                                     true
                                 }
                             });
-                            for id in removed_ids {
+                            for s in &removed_slots {
+                                // T6：别名不在台账；主端点先尝试向存活
+                                // 通道的别名晋级，无候选才置离线。
+                                if s.alias {
+                                    continue;
+                                }
+                                let promoted = match core.lock() {
+                                    Ok(mut c) => {
+                                        try_promote(&mut c, &observer, &mut channels, s, &|_| true)
+                                    }
+                                    Err(_) => false,
+                                };
+                                if promoted {
+                                    continue;
+                                }
                                 if let Ok(mut c) = core.lock() {
-                                    c.record_failure(&id, true);
+                                    c.record_failure(&s.id, true);
                                 }
                                 if let Ok(mut o) = observer.lock() {
-                                    o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id }));
+                                    o.push(DiagEvent::new(
+                                        Layer::App,
+                                        DiagKind::DeviceLost { id: s.id.clone() },
+                                    ));
                                 }
                             }
                             // v0.3.11（P3）：不再在此处 invalidate——移到本轮
@@ -778,6 +961,10 @@ mod imp {
                 // D-67：本轮判定为「句柄已死」的通道 key，循环外统一移除并
                 // 触发重枚举（移除期间不能就地改 channels，先收集）。
                 let mut dead_channels: Vec<String> = Vec::new();
+                // T6：轮询中注销的槽位（DeviceGone / 硬失败 3 连败）——
+                // DeviceLost 事件延后到「向存活别名晋级」裁决之后发放
+                // （借用约束：逐通道轮询期间不能跨通道改槽位）。
+                let mut pending_removed_slots: Vec<SlotState> = Vec::new();
                 for ch_state in &mut channels {
                     // D-67（P1）：本轮查询结果按槽位分类收集，轮末交
                     // ChannelLiveness 统一裁决——整轮零应答才记一次连击，
@@ -787,6 +974,12 @@ mod imp {
                     let mut i = 0;
                     while i < ch_state.slots.len() {
                         let s = &mut ch_state.slots[i];
+                        // T6：别名槽位不参与轮询——同一物理设备的重复端点，
+                        // 零查询、不喂活性裁决（主端点已覆盖该设备）。
+                        if s.alias {
+                            i += 1;
+                            continue;
+                        }
                         // v0.3.15（P1-1）：仅探测轮跳过「已在册且已唤醒」的
                         // 在线设备——它们按正常轮询周期查询，不被鼠标活动
                         // 拖着高频查（原缺陷：WakeSignal 每 2s 整轮重查，
@@ -875,12 +1068,9 @@ mod imp {
                                     ));
                                     core.record_failure(&s.id, true);
                                     let gone_slot = ch_state.slots.remove(i);
-                                    if let Ok(mut o) = observer.lock() {
-                                        o.push(DiagEvent::new(
-                                            Layer::App,
-                                            DiagKind::DeviceLost { id: gone_slot.id },
-                                        ));
-                                    }
+                                    // T6：DeviceLost 延后——先尝试向存活
+                                    // 别名晋级（循环外统一裁决）。
+                                    pending_removed_slots.push(gone_slot);
                                 }
                                 // 其它持续失败：设备级错误（错误帧/映射/特性
                                 // 缺失等）3 连败只注销本槽位（D-67 P3-1：恢复
@@ -910,12 +1100,9 @@ mod imp {
                                             s.id, HANDLE_INVALIDATE_THRESHOLD
                                         ));
                                         let gone_slot = ch_state.slots.remove(i);
-                                        if let Ok(mut o) = observer.lock() {
-                                            o.push(DiagEvent::new(
-                                                Layer::App,
-                                                DiagKind::DeviceLost { id: gone_slot.id },
-                                            ));
-                                        }
+                                        // T6：DeviceLost 延后——先尝试向存活
+                                        // 别名晋级（循环外统一裁决）。
+                                        pending_removed_slots.push(gone_slot);
                                     } else {
                                         i += 1;
                                     }
@@ -942,22 +1129,49 @@ mod imp {
                         dead_channels.push(ch_state.key.clone());
                     }
                 }
+                // T6：轮询中注销槽位的晋级裁决——主端点被注销（DeviceGone /
+                // 硬失败）时先尝试向存活通道的同 unitId 别名晋级；无候选
+                // 才发 DeviceLost（条目已由 record_failure 置离线）。
+                for s in &pending_removed_slots {
+                    if s.alias {
+                        continue;
+                    }
+                    if try_promote(&mut core, &observer, &mut channels, s, &|_| true) {
+                        continue;
+                    }
+                    if let Ok(mut o) = observer.lock() {
+                        o.push(DiagEvent::new(
+                            Layer::App,
+                            DiagKind::DeviceLost { id: s.id.clone() },
+                        ));
+                    }
+                }
                 // D-65：句柄失效自愈——整条通道（句柄 + 全部槽位缓存）作废，
                 // 剩余槽位置为离线，然后强制下一轮重枚举（主机侧操作，零射频）。
                 if !dead_channels.is_empty() {
-                    let mut removed_ids: Vec<String> = Vec::new();
-                    channels.retain(|c| {
+                    let mut removed_slots: Vec<SlotState> = Vec::new();
+                    channels.retain_mut(|c| {
                         if dead_channels.contains(&c.key) {
-                            removed_ids.extend(c.slots.iter().map(|s| s.id.clone()));
+                            removed_slots.append(&mut c.slots);
                             false
                         } else {
                             true
                         }
                     });
-                    for id in removed_ids {
-                        core.record_failure(&id, true);
+                    for s in &removed_slots {
+                        // T6：别名不在台账；主端点先尝试向存活别名晋级。
+                        if s.alias {
+                            continue;
+                        }
+                        if try_promote(&mut core, &observer, &mut channels, s, &|_| true) {
+                            continue;
+                        }
+                        core.record_failure(&s.id, true);
                         if let Ok(mut o) = observer.lock() {
-                            o.push(DiagEvent::new(Layer::App, DiagKind::DeviceLost { id }));
+                            o.push(DiagEvent::new(
+                                Layer::App,
+                                DiagKind::DeviceLost { id: s.id.clone() },
+                            ));
                         }
                     }
                     reconnect.invalidate_handles();
@@ -1530,6 +1744,14 @@ mod imp {
         while let Ok(m) = gui_rx.try_recv() {
             match m {
                 GuiMsg::Snapshot(s) => {
+                    // T6：rebind 改变条目 id 后，用户 pin 选定经物理身份
+                    // （unitId）重匹配到新 id——拔线/插线切换端点后 pin
+                    // 不丢；身份不明或设备真消失时保留原 pin 走既有回退。
+                    if let Some(old) = state.snapshot.as_ref() {
+                        if let Some(new_id) = repin(&state.pinned, old, &s) {
+                            state.pinned = Some(new_id);
+                        }
+                    }
                     state.snapshot = Some(*s);
                     snap_changed = true;
                 }

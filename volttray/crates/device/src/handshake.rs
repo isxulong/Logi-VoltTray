@@ -43,11 +43,15 @@ pub enum NoResponseCause {
 }
 
 /// 握手探测的 feature 全集（顺序即策略链顺序；0x0005 设备名 v0.3.0 新增）。
-pub const PROBED_FEATURES: [u16; 4] = [
+pub const PROBED_FEATURES: [u16; 5] = [
     feature_ids::UNIFIED_BATTERY,
     feature_ids::BATTERY_STATUS,
     feature_ids::BATTERY_VOLTAGE,
     feature_ids::DEVICE_NAME,
+    // T6：DEVICE_FW_VERSION(0x0003) 仅注册期一次性探测（与既有 feature index
+    // 探测同事务、不重试），用于提取 unitId 做物理设备身份去重；
+    // 不进入任何周期轮询路径，电池红线内。
+    feature_ids::DEVICE_FW_VERSION,
 ];
 
 /// 把 IRoot ping 阶段的设备错误帧分类为握手结论（红队差异 F5 的实证规则）。

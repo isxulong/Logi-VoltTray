@@ -117,6 +117,7 @@ pub fn mask_event(event: &mut DiagEvent) {
         | DiagKind::Timeout { .. }
         | DiagKind::DeviceFound { .. }
         | DiagKind::DeviceLost { .. }
+        | DiagKind::DeviceRebound { .. }
         | DiagKind::StateChange { .. }
         | DiagKind::BatteryUpdate { .. }
         | DiagKind::BatteryUnknown { .. }

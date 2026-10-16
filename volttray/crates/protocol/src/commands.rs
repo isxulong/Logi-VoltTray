@@ -13,6 +13,10 @@ use std::collections::BTreeMap;
 pub mod feature_ids {
     pub const IROOT: u16 = 0x0000;
     pub const IFEATURESET: u16 = 0x0001;
+    /// DEVICE_FW_VERSION(0x0003)：fn0 GetEntityFwVersion(entity=0) 应答
+    /// params[1:5] = unitId（物理设备身份，Solaar hidpp20.get_ids 实证）。
+    /// unitId 属准序列号——features.json 已标记 params 1-4 为脱敏偏移（P1-6）。
+    pub const DEVICE_FW_VERSION: u16 = 0x0003;
     /// DEVICE_NAME(0x0005)：fn0=名字总长、fn1=按偏移分片读取（蓝队设备名条目实证）。
     pub const DEVICE_NAME: u16 = 0x0005;
     pub const BATTERY_STATUS: u16 = 0x1000;
@@ -69,6 +73,9 @@ pub enum QueryCommand {
     ReadHidpp1Register0x0D,
     /// HID++ 1.0 设备：读电量寄存器 0x07（粗略档位，0x0D 不可用时的回退）。
     ReadHidpp1Register0x07,
+    /// DEVICE_FW_VERSION(0x0003) fn0：entity 0 固件信息，应答 params[1:5]=unitId
+    ///（T6 物理设备身份；仅注册期一次性读取，不进任何周期轮询路径）。
+    GetUnitId,
     /// DEVICE_NAME(0x0005) fn0：名字总长（字节）。
     GetDeviceNameLength,
     /// DEVICE_NAME(0x0005) fn1：按偏移分片读取名字（参数 p0=已读偏移）。
@@ -186,6 +193,13 @@ impl QueryCommand {
             QueryCommand::ReadHidpp1Register0x07 => {
                 hidpp1_read(device_index, feature_ids::HIDPP1_REG_BATTERY_STATUS)
             }
+            QueryCommand::GetUnitId => {
+                require_query(feature_ids::DEVICE_FW_VERSION)?;
+                let idx = resolve(features, feature_ids::DEVICE_FW_VERSION)?;
+                // fn0 GetEntityFwVersion，参数全 0 = entity 0（主固件实体，
+                // 其 unitId 即设备物理身份，Solaar get_ids 同款零参数调用）。
+                Frame::new_long(device_index, idx, 0x00, sw_id, [0; 16])
+            }
             QueryCommand::GetDeviceNameLength => {
                 require_query(feature_ids::DEVICE_NAME)?;
                 let idx = resolve(features, feature_ids::DEVICE_NAME)?;
@@ -294,6 +308,27 @@ mod tests {
     #[test]
     fn hid_power_descriptor_delegates_to_transport() {
         let err = QueryCommand::ReadHidPowerDescriptor
+            .encode_for(0x01, 0x01, &table())
+            .expect_err("must fail");
+        assert!(matches!(err, HidppError::NotEncodable(_)));
+    }
+
+    #[test]
+    fn get_unit_id_encodes_via_fw_version_fn0() {
+        // DEVICE_FW_VERSION(0x0003) fn0：长帧、index 从表解析、参数全 0（entity 0）。
+        let mut t = table();
+        t.insert(feature_ids::DEVICE_FW_VERSION, 2);
+        let bytes = QueryCommand::GetUnitId
+            .encode_for(0xFF, 0x05, &t)
+            .expect("encode");
+        assert_eq!(bytes[0], 0x11);
+        assert_eq!(bytes[1], 0xFF);
+        assert_eq!(bytes[2], 0x02);
+        assert_eq!(bytes[3], 0x05); // fn0 | sw 5
+        assert_eq!(&bytes[4..], &[0u8; 16]);
+        assert_eq!(bytes.len(), 20);
+        // 未解析 0x0003 → NotEncodable（不发起任何帧）。
+        let err = QueryCommand::GetUnitId
             .encode_for(0x01, 0x01, &table())
             .expect_err("must fail");
         assert!(matches!(err, HidppError::NotEncodable(_)));

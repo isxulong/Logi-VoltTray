@@ -12,6 +12,7 @@ pub mod core;
 pub mod debounce;
 pub mod diag_export;
 pub mod observer;
+pub mod physkey;
 pub mod reconnect;
 
 pub use config::{
@@ -24,11 +25,12 @@ pub use config::{
     LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS, POLL_TIERS_SECS, TIER_PAD_PALETTE,
 };
 pub use core::{
-    guarded, AppCore, DeviceSnapshot, PollDecision, Snapshot, TimeoutOutcome, GRAY_AFTER,
-    POLL_CHARGING, SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN,
+    guarded, AppCore, DeviceSnapshot, PollDecision, Snapshot, TimeoutOutcome, UpsertOutcome,
+    GRAY_AFTER, POLL_CHARGING, SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN,
 };
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
+pub use physkey::{pick_promotion, repin, AliasSlot};
 pub use reconnect::{
     wake_action, ChannelLiveness, EnumTransition, Reconnect, SlotOutcome, SlotScanFailure,
     SlotScanStreak, WakeAction, ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL,

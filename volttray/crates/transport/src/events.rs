@@ -43,6 +43,12 @@ pub enum DiagKind {
     DeviceLost {
         id: String,
     },
+    /// 物理身份匹配导致的端点重绑（T6）：在册条目从 old_id 迁到 new_id，
+    /// 旧端点降级为别名槽位（不轮询 / 不进菜单 / 不 toast）。
+    DeviceRebound {
+        old_id: String,
+        new_id: String,
+    },
     StateChange {
         id: String,
         from: String,

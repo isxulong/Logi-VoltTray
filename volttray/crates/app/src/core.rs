@@ -30,6 +30,24 @@ pub enum PollDecision {
     Skip,
 }
 
+/// `upsert_device` 的结果（T6）：调用方（IO 线程）据此发诊断事件、
+/// 把旧端点槽位标记为别名（跳过轮询 / 不进菜单 / 不 toast）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// 全新条目。
+    Inserted,
+    /// 同 id 原位更新。
+    Updated,
+    /// 物理身份匹配在册条目：在册条目已重绑到新端点（状态已迁移），
+    /// 旧端点应降级为别名槽位。
+    Rebound {
+        /// 旧端点 id（别名化对象）。
+        old_id: String,
+        /// 新端点 id（在册条目现在的 id）。
+        new_id: String,
+    },
+}
+
 /// `record_timeout` 的结果（IO 线程据此发 StateChange 诊断事件）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutOutcome {
@@ -93,6 +111,10 @@ pub struct DeviceSnapshot {
     pub state: String,
     pub gray: bool,
     pub source: Option<String>,
+    /// 已证实的物理身份 unitId（T6；取不到时为 None——Name 降级身份
+    /// 不外发，GUI 侧仅用它做 rebind 后的 pin 重绑匹配）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_key: Option<String>,
 }
 
 /// 给 UI 的整体快照。
@@ -137,17 +159,88 @@ impl AppCore {
         }
     }
 
-    pub fn upsert_device(&mut self, device: Device) {
-        match self.entries.iter_mut().find(|e| e.device.id == device.id) {
-            Some(e) => {
-                let battery = e.device.battery;
-                let state = e.device.state;
-                e.device = device;
-                e.device.battery = battery;
-                e.device.state = state;
+    /// 注册 / 更新设备（T6：新增物理身份 rebind-on-match）。
+    ///
+    /// 判定顺序：
+    /// 1. id 精确匹配 → 原位更新（保留电量 / 状态；新读数丢失 proven 身份时
+    ///    保留旧身份，避免身份在端点间反复横跳）。
+    /// 2. 物理身份匹配（双方均 proven unitId 且相等）→ **重绑**：把在册条目
+    ///    的端点 id 改为新枚举端点，迁移其全部主机侧状态（低电追踪器键、
+    ///    超时连击、唤醒臂、灰显计时、待派发告警的 id 引用），不新增条目。
+    ///    调用方负责把旧端点标记为别名槽位（跳过轮询 / 不进菜单 / 不 toast）。
+    /// 3. 都不匹配（含身份不明的 Name 降级——保守规则：宁可分开绝不误并）
+    ///    → 新增条目。
+    pub fn upsert_device(&mut self, device: Device) -> UpsertOutcome {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.device.id == device.id) {
+            let battery = e.device.battery;
+            let state = e.device.state;
+            // 新注册没读到 unitId（降级 Name）时保留在册的 proven 身份；
+            // 新注册读到了则以新值为准（同一端点身份不应变化，变化即异常，
+            // 但以最新一次证实值为准更简单可观测）。
+            let keep_key = if device.physical_key.is_proven() {
+                None
+            } else {
+                Some(e.device.physical_key.clone())
+            };
+            e.device = device;
+            e.device.battery = battery;
+            e.device.state = state;
+            if let Some(k) = keep_key {
+                e.device.physical_key = k;
             }
-            None => self.entries.push(DeviceEntry::new(device)),
+            return UpsertOutcome::Updated;
         }
+        if device.physical_key.is_proven() {
+            if let Some(pos) = self
+                .entries
+                .iter()
+                .position(|e| e.device.physical_key.proven_matches(&device.physical_key))
+            {
+                let old_id = self.entries[pos].device.id.clone();
+                let new_id = device.id.clone();
+                let new_index = device.device_index;
+                let new_link = device.link;
+                // 复用同一迁移路径（电量 / 状态 / 计时 / 追踪器 / 告警引用）。
+                self.rebind_device_id(&old_id, &new_id, new_index, new_link);
+                // 带入新端点的名字与 proven 身份。
+                let e = &mut self.entries[pos];
+                e.device.name = device.name;
+                e.device.physical_key = device.physical_key;
+                return UpsertOutcome::Rebound { old_id, new_id };
+            }
+        }
+        self.entries.push(DeviceEntry::new(device));
+        UpsertOutcome::Inserted
+    }
+
+    /// 把在册条目的端点 id 重绑到新端点并迁移全部主机侧状态（T6）。
+    ///
+    /// 迁移清单：端点 id / device_index / link、低电追踪器键（`lowbats`）、
+    /// 待派发告警的 id 引用（`pending_alerts`）；条目内的超时连击、唤醒臂、
+    /// 灰显计时、电量与状态随条目原位保留。旧 id 引用若遗漏任何一处，
+    /// 该状态就会随旧 id 变成孤儿（低电追踪失效 / 告警指向不存在的设备）。
+    pub fn rebind_device_id(
+        &mut self,
+        old_id: &str,
+        new_id: &str,
+        new_index: u8,
+        new_link: volttray_device::LinkKind,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.device.id == old_id) else {
+            return false;
+        };
+        e.device.id = new_id.to_string();
+        e.device.device_index = new_index;
+        e.device.link = new_link;
+        if let Some(tracker) = self.lowbats.remove(old_id) {
+            self.lowbats.insert(new_id.to_string(), tracker);
+        }
+        for (id, _) in self.pending_alerts.iter_mut() {
+            if id == old_id {
+                *id = new_id.to_string();
+            }
+        }
+        true
     }
 
     pub fn remove_device(&mut self, id: &str) {
@@ -404,6 +497,10 @@ impl AppCore {
                     state: e.device.state.name().to_string(),
                     gray: e.display_gray(now),
                     source: e.device.battery.map(|b| b.source.name().to_string()),
+                    physical_key: match &e.device.physical_key {
+                        volttray_device::PhysicalKey::UnitId(u) => Some(u.clone()),
+                        volttray_device::PhysicalKey::Name(_) => None,
+                    },
                 })
                 .collect(),
             default_device,
@@ -838,5 +935,156 @@ mod tests {
         // 成功后连击清零。
         core.record_success("a", reading(51, false), now);
         assert_eq!(core.record_timeout("a"), TimeoutOutcome::Counting(1));
+    }
+
+    // ---- T6：物理身份 rebind / 保守合并 / 降级 ----
+
+    fn dev_with_unit(id: &str, index: u8, unit: &str) -> Device {
+        let mut d = dev(id, index);
+        d.set_unit_id(unit);
+        d
+    }
+
+    /// 验收 1 核心：同一 unitId 的新端点注册 → rebind 而非新增，
+    /// 低电追踪器、电量、超时连击全部随条目迁移。
+    #[test]
+    fn upsert_rebinds_on_matching_unit_id_and_migrates_state() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        // 接收器槽位 1 注册 + 低电读数（建 tracker）+ 一次超时连击。
+        core.upsert_device(dev_with_unit("C52B|usb#1", 1, "39414243"));
+        core.record_success("C52B|usb#1", reading(10, false), now);
+        assert_eq!(
+            core.record_timeout("C52B|usb#1"),
+            TimeoutOutcome::Counting(1)
+        );
+        assert!(core.is_low_battery("C52B|usb#1"), "低电追踪应已激活");
+        // 有线模式新端点（同 unitId）注册 → Rebound。
+        let out = core.upsert_device(dev_with_unit("C52B|usb&MI_02#255", 0xFF, "39414243"));
+        assert_eq!(
+            out,
+            UpsertOutcome::Rebound {
+                old_id: "C52B|usb#1".to_string(),
+                new_id: "C52B|usb&MI_02#255".to_string(),
+            }
+        );
+        // 仍只有 1 个条目，端点已重绑。
+        assert_eq!(core.entries().len(), 1);
+        let e = &core.entries()[0];
+        assert_eq!(e.device.id, "C52B|usb&MI_02#255");
+        assert_eq!(e.device.device_index, 0xFF);
+        assert_eq!(e.device.battery.map(|b| b.percent), Some(10), "电量保留");
+        assert_eq!(e.timeout_streak, 1, "超时连击保留");
+        // 低电追踪器键已迁移：新 id 命中、旧 id 不再命中。
+        assert!(core.is_low_battery("C52B|usb&MI_02#255"));
+        assert!(!core.lowbats.contains_key("C52B|usb#1"));
+    }
+
+    /// rebind 后 pending_alerts 的 id 引用一并改写（不指向孤儿 id）。
+    #[test]
+    fn rebind_rewrites_pending_alert_ids() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev_with_unit("old", 1, "AAAA0001"));
+        core.record_success("old", reading(50, false), now);
+        // 造一条 pending alert：热改阈值触发重估入队。
+        core.swap_config(Config {
+            low_threshold: 90,
+            ..Config::default()
+        });
+        assert!(core.is_low_battery("old"));
+        assert_eq!(core.take_pending_alerts().len(), 1);
+        // 再来一条入队后不取走，rebind 应改写其 id。
+        core.swap_config(Config {
+            low_threshold: 20,
+            ..Config::default()
+        });
+        assert!(!core.is_low_battery("old"));
+        let _ = core.upsert_device(dev_with_unit("new", 0xFF, "AAAA0001"));
+        let alerts = core.take_pending_alerts();
+        assert!(alerts.iter().all(|(id, _)| id == "new"));
+    }
+
+    /// 验收 2：不同 unitId 永不合并——两台独立物理鼠标始终 2 条目。
+    #[test]
+    fn distinct_unit_ids_stay_separate() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core.upsert_device(dev_with_unit("C52B|usb#1", 1, "AAAA0001")); // PRO X 2
+        let out = core.upsert_device(dev_with_unit("C52B|usb#2", 2, "BBBB0002")); // G304
+        assert_eq!(out, UpsertOutcome::Inserted);
+        assert_eq!(core.entries().len(), 2);
+    }
+
+    /// 验收 3：身份不明（Name 降级）不合并——与现状行为一致。
+    #[test]
+    fn unproven_identity_never_merges() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        // 同名两台（Name 降级）：不合并。
+        core.upsert_device(dev("a", 1));
+        assert_eq!(core.upsert_device(dev("b", 2)), UpsertOutcome::Inserted);
+        assert_eq!(core.entries().len(), 2);
+        // 一侧 proven、一侧不明：不合并。
+        assert_eq!(
+            core.upsert_device(dev_with_unit("c", 3, "AAAA0001")),
+            UpsertOutcome::Inserted
+        );
+        assert_eq!(core.entries().len(), 3);
+        // 新注册 proven 但在册不明：同样不合并。
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core2.upsert_device(dev("x", 1));
+        assert_eq!(
+            core2.upsert_device(dev_with_unit("y", 0xFF, "AAAA0001")),
+            UpsertOutcome::Inserted
+        );
+        assert_eq!(core2.entries().len(), 2);
+    }
+
+    /// 同 id 更新：新注册未读到 unitId 时保留在册 proven 身份。
+    #[test]
+    fn update_preserves_proven_key_when_reread_fails() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core.upsert_device(dev_with_unit("a", 1, "AAAA0001"));
+        // 同端点重注册，但这次没读到 unitId（Name 降级）。
+        assert_eq!(core.upsert_device(dev("a", 1)), UpsertOutcome::Updated);
+        assert_eq!(
+            core.entries()[0].device.physical_key,
+            volttray_device::PhysicalKey::UnitId("AAAA0001".into())
+        );
+        // 同端点重注册读到了 unitId：以新值为准。
+        assert_eq!(
+            core.upsert_device(dev_with_unit("a", 1, "AAAA0009")),
+            UpsertOutcome::Updated
+        );
+        assert_eq!(
+            core.entries()[0].device.physical_key,
+            volttray_device::PhysicalKey::UnitId("AAAA0009".into())
+        );
+    }
+
+    /// 快照透出 proven 物理身份（GUI pin 重绑匹配用）；降级身份不外发。
+    #[test]
+    fn snapshot_exposes_only_proven_physical_key() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev_with_unit("a", 1, "AAAA0001"));
+        core.upsert_device(dev("b", 2));
+        let snap = core.snapshot(now);
+        assert_eq!(snap.devices[0].physical_key.as_deref(), Some("AAAA0001"));
+        assert_eq!(snap.devices[1].physical_key, None);
+    }
+
+    /// rebind_device_id：端点拔线后向存活别名晋级时复用的迁移路径。
+    #[test]
+    fn rebind_device_id_migrates_tracker_and_returns_false_for_unknown() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev_with_unit("a", 0xFF, "AAAA0001"));
+        core.record_success("a", reading(5, false), now);
+        assert!(core.rebind_device_id("a", "b", 1, LinkKind::Bolt));
+        assert_eq!(core.entries()[0].device.id, "b");
+        assert_eq!(core.entries()[0].device.device_index, 1);
+        assert!(core.lowbats.contains_key("b"));
+        assert!(!core.lowbats.contains_key("a"));
+        assert!(!core.rebind_device_id("ghost", "c", 1, LinkKind::Bolt));
     }
 }
