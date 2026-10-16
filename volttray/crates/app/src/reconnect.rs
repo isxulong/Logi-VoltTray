@@ -389,9 +389,47 @@ impl Reconnect {
     }
 }
 
+/// v0.3.15（P1-1）：唤醒信号到来时 IO 线程的动作裁决。
+///
+/// 唤醒信号的唯一职责是给休眠设备装填唤醒探测资格（arm），**不是**
+/// 「该整轮重查在线设备了」——v0.3.14 及以前 WakeSignal 无条件
+/// `continue 'outer`，用户持续动鼠标时在线设备被以 ~0.5Hz 查电量
+/// （1800s 轮询档位的 ~900 倍）。本裁决把「装填」与「起轮」解耦。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeAction {
+    /// 无休眠设备可装填、枚举也未到期：什么都不做（在线设备零额外查询）。
+    StayAsleep,
+    /// 起一轮「唤醒探测轮」：只探测被装填资格的休眠设备（+ 枚举新注册
+    /// 设备的首读），不重查本轮前已注册的在线设备。`enum_due` 为真时
+    /// 该轮顺带执行主机侧重枚举（reconnect.rs:30 的 30s 门控不变）。
+    ProbeRound,
+}
+
+/// 唤醒信号动作裁决（纯函数，IO 线程在装填资格后调用）：
+/// - `armed_sleeping`：本信号是否给至少一台休眠设备装填了探测资格；
+/// - `enum_due`：此刻 `should_enumerate` 是否到期（含 force / 30s 门控）。
+pub fn wake_action(armed_sleeping: bool, enum_due: bool) -> WakeAction {
+    if armed_sleeping || enum_due {
+        WakeAction::ProbeRound
+    } else {
+        WakeAction::StayAsleep
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.3.15（P1-1）：arm 与整轮轮询解耦——没有休眠设备可装填且枚举
+    /// 未到期时，唤醒信号不得起轮（在线设备零额外查询）；有装填或枚举
+    /// 到期时才起探测轮。
+    #[test]
+    fn wake_signal_decoupled_from_full_round() {
+        assert_eq!(wake_action(false, false), WakeAction::StayAsleep);
+        assert_eq!(wake_action(true, false), WakeAction::ProbeRound);
+        assert_eq!(wake_action(false, true), WakeAction::ProbeRound);
+        assert_eq!(wake_action(true, true), WakeAction::ProbeRound);
+    }
 
     /// 枚举失败 → 进入无设备态 → 退避 30s/60s/120s 封顶 → 枚举恢复 →
     /// 退出无设备态并恢复正常轮询节奏（任务 B 用例 1）。
