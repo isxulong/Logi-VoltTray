@@ -5,6 +5,10 @@
 //! - **崩溃日志**：优先 `%APPDATA%\LogiVoltTray\logi-volttray.log`，EXE 同
 //!   目录、`%TEMP%` 逐级兜底；全部失败则日志禁用（弹窗文案仍给出首选路径）。
 //!   超过 1MB 的旧日志在打开前轮转，避免常年累月无限增长。
+//!   v0.3.15（P2-2）：写入改 `BufWriter` 缓冲（每行落盘后显式 flush，
+//!   崩溃诊断路径不因缓冲丢日志；panic hook 里再显式 flush 一次），
+//!   并增加运行期轮转——每 64 行检查一次体积（logrotate.rs 有粒度
+//!   论证），超 1MB 即截断重开，长会话不再无限增长。
 //! - **里程碑**：single-instance / dpi / aumid-shortcut / config-load /
 //!   io-thread / icon-cache / tray-build / rawinput / startup-toast /
 //!   message-pump / settings-open 各阶段各写一条；失败阶段写明原因。
@@ -15,10 +19,11 @@
 //! 日志任何失败都静默吞掉：诊断手段自身绝不允许阻断启动。
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::logrotate::{truncate_reopen, RotateGate};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -32,7 +37,13 @@ const LOG_FILE: &str = "logi-volttray.log";
 /// 旧日志超过该大小即轮转（截断重开）。
 const ROTATE_BYTES: u64 = 1_000_000;
 
-static LOG: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+/// 日志槽：BufWriter 缓冲写 + 运行期轮转门控（v0.3.15，P2-2）。
+struct LogSink {
+    w: BufWriter<File>,
+    gate: RotateGate,
+}
+
+static LOG: OnceLock<Mutex<Option<LogSink>>> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static MAIN_TID: OnceLock<u32> = OnceLock::new();
 
@@ -54,7 +65,8 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// 在指定目录打开（必要时创建）日志文件；超限旧日志先轮转。
-fn open_in(dir: &Path) -> Option<File> {
+/// 返回文件句柄与打开时的初始长度（运行期门控把旧内容计入体积）。
+fn open_in(dir: &Path) -> Option<(File, u64)> {
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join(LOG_FILE);
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -62,7 +74,13 @@ fn open_in(dir: &Path) -> Option<File> {
             let _ = std::fs::remove_file(&path);
         }
     }
-    OpenOptions::new().create(true).append(true).open(path).ok()
+    let f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    Some((f, len))
 }
 
 /// 初始化启动日志（幂等）：逐级尝试 APPDATA 配置目录 → EXE 同目录 → TEMP。
@@ -91,9 +109,12 @@ pub fn init() {
         .map(|d| d.join(LOG_FILE))
         .unwrap_or_else(|| PathBuf::from(LOG_FILE));
     for d in &dirs {
-        if let Some(f) = open_in(d) {
+        if let Some((f, len)) = open_in(d) {
             let _ = LOG_PATH.set(d.join(LOG_FILE));
-            let _ = LOG.set(Mutex::new(Some(f)));
+            let _ = LOG.set(Mutex::new(Some(LogSink {
+                w: BufWriter::new(f),
+                gate: RotateGate::default_gate(len),
+            })));
             note(&format!(
                 "=== LogiVoltTray 启动 pid={} ver={} ===",
                 std::process::id(),
@@ -120,8 +141,41 @@ pub fn note(msg: &str) {
 fn write_line(line: &str) {
     if let Some(m) = LOG.get() {
         if let Ok(mut guard) = m.lock() {
-            if let Some(f) = guard.as_mut() {
-                let _ = writeln!(f, "[{}] {}", now_str(), line);
+            if let Some(sink) = guard.as_mut() {
+                write_line_to(sink, line);
+            }
+        }
+    }
+}
+
+/// 写一行并立即 flush（v0.3.15，P2-2）：日志是崩溃诊断手段，
+/// 缓冲只允许省 syscall、不允许丢行——每行落盘后显式 flush。
+/// 随后经门控做运行期轮转：每 64 行检查一次体积，超 1MB 截断重开。
+fn write_line_to(sink: &mut LogSink, line: &str) {
+    let text = format!("[{}] {}", now_str(), line);
+    if writeln!(sink.w, "{text}").is_err() || sink.w.flush().is_err() {
+        return;
+    }
+    if sink.gate.note_line(text.len() as u64 + 1) {
+        if truncate_reopen(&mut sink.w).is_ok() {
+            sink.gate.note_rotated();
+            let marker = format!(
+                "[{}] note: 日志超过 1MB，已截断重开（运行期轮转）",
+                now_str()
+            );
+            let _ = writeln!(sink.w, "{marker}");
+            let _ = sink.w.flush();
+            sink.gate.note_line(marker.len() as u64 + 1);
+        }
+    }
+}
+
+/// 显式 flush（panic hook 等「之后可能立刻崩溃」的路径必须调用）。
+pub fn flush_log() {
+    if let Some(m) = LOG.get() {
+        if let Ok(mut guard) = m.lock() {
+            if let Some(sink) = guard.as_mut() {
+                let _ = sink.w.flush();
             }
         }
     }
@@ -170,6 +224,7 @@ pub fn install_panic_hook() {
     let _ = MAIN_TID.set(main_tid);
     std::panic::set_hook(Box::new(move |info| {
         write_line(&format!("PANIC: {info}"));
+        flush_log();
         let cur = unsafe { GetCurrentThreadId() };
         let on_main = MAIN_TID.get().is_some_and(|m| *m == cur);
         if on_main {
@@ -228,5 +283,62 @@ mod tests {
     #[test]
     fn path_str_falls_back_to_filename() {
         assert_eq!(path_str(), LOG_FILE);
+    }
+
+    fn temp_log_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("volttray-bootlog-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 每行写后立即 flush：不 drop、不额外 flush，磁盘上即可读到该行
+    /// （崩溃诊断路径不允许日志滞留在缓冲区）。
+    #[test]
+    fn each_line_is_flushed_to_disk_immediately() {
+        let dir = temp_log_dir("flush");
+        let path = dir.join(LOG_FILE);
+        let f = File::create(&path).unwrap();
+        let mut sink = LogSink {
+            w: BufWriter::new(f),
+            gate: RotateGate::new(u64::MAX, 64),
+        };
+        write_line_to(&mut sink, "note: hello");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("note: hello"),
+            "line must be on disk without drop/extra flush, got: {on_disk:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 运行期轮转：小上限门控下持续写行，超限即截断重开并写入轮转
+    /// 标记；文件体积收敛而不是无限增长。
+    #[test]
+    fn runtime_rotation_truncates_and_marks() {
+        let dir = temp_log_dir("rotate");
+        let path = dir.join(LOG_FILE);
+        let f = File::create(&path).unwrap();
+        // 上限 200B / 每 2 行检查：每行 ~40B，必然多次触发。
+        let mut sink = LogSink {
+            w: BufWriter::new(f),
+            gate: RotateGate::new(200, 2),
+        };
+        for i in 0..30 {
+            write_line_to(&mut sink, &format!("note: line {i:02}"));
+        }
+        drop(sink);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("已截断重开（运行期轮转）"),
+            "rotation marker must be logged, got: {on_disk:?}"
+        );
+        let final_len = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            final_len < 200 + 2 * 200,
+            "file must stay bounded after rotation, got {final_len}B"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
