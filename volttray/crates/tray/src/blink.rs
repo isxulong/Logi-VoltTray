@@ -328,7 +328,7 @@ mod tests {
             pulse_alpha, IconBackground, IconFontColor, IconShape, BLINK_TEXT_ALPHA_PULSE,
         };
 
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             32,
             true,
             IconShape::Transparent,
@@ -339,11 +339,6 @@ mod tests {
             100,
             100,
         );
-        let frame = |bright: bool| {
-            cache
-                .map_for_test(IconColor::Default, "15", bright)
-                .expect("frame cached")
-        };
 
         // 低电触发 → tick 出 bright=true 的一帧。
         let mut s = BlinkState::new();
@@ -360,7 +355,15 @@ mod tests {
         assert!(normal_tag && bright_tag, "blink must alternate both frames");
 
         // 文本帧路径：bright 帧文本 alpha 被脉冲，normal 帧不脉冲。
-        let (n, b) = (frame(false), frame(true));
+        // 帧引用借用 &mut cache，不能两个并存——拷贝成 Vec 后比对。
+        let n = cache
+            .map_for_test(IconColor::Default, "15", false)
+            .expect("frame cached")
+            .to_vec();
+        let b = cache
+            .map_for_test(IconColor::Default, "15", true)
+            .expect("frame cached")
+            .to_vec();
         assert_ne!(n, b, "transparent blink frames must differ");
         let solid = n
             .chunks_exact(4)
