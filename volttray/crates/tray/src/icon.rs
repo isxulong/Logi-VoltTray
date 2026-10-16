@@ -1,8 +1,10 @@
 //! 托盘图标渲染与缓存（v0.3.0 设置体系 M9/M11/M12）。
 //!
-//! - 启动时按当前 DPI 档（100%/150%/200% → 16/24/32px）用 GDI 预渲染
-//!   全部文本位图（"0".."99"、"满"、"?"、"--"）× 4 色 × 常态/提亮两档，
-//!   运行时只做像素缓存换图标，热路径零 GDI 调用。
+//! - v0.3.15（P1-2）：懒渲染 + 小容量 LRU——启动不再全量预渲染
+//!   （旧实现 4 色档 × 103 文本 × 2 提亮档 = 824 帧 RGBA 常驻，
+//!   16px≈0.8MB / 32px≈3.3MB / 48px≈7.4MB 堆）；帧在首次被请求时
+//!   渲染并缓存，容量上限见 `FRAME_CACHE_CAP` 论证；DPI / 渲染输入
+//!   变更时整体清缓存。闪烁两相位帧命中缓存，每 500ms 不重渲染。
 //! - 两位数字封顶：100% 显示 "满"；未知 "?"；灰显 "--"。
 //! - 颜色档（M12）：≤ 用户阈值 红、≤ 50 黄（固定）、其余默认；灰显灰。
 //! - 形状（M9）：rounded 圆底（默认）/ square 直角 / transparent 透明无背景。
@@ -14,7 +16,7 @@
 //!   文本透明度脉冲（背景不存在，闪烁必须作用于文本）。
 //! - HICON 构造（v0.3.4 #1 根因修复，详见 rgba_to_hicon 注释）。
 
-use std::collections::HashMap;
+use crate::frame_lru::FrameLru;
 use volttray_app::config::{
     contrast_ratio, flash_rgb, pulse_alpha, Config, IconBackground, IconFontColor, IconShape,
     RgbColor, BLINK_TEXT_ALPHA_PULSE, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX,
@@ -45,8 +47,6 @@ pub enum IconColor {
 }
 
 impl IconColor {
-    const ALL: [IconColor; 4] = [Self::Default, Self::Yellow, Self::Red, Self::Gray];
-
     /// 按电量选色（M12：红档阈值 = 用户设定 low_threshold；黄档固定 50）。
     pub fn for_percent(percent: u8, gray: bool, threshold: u8) -> Self {
         if gray {
@@ -67,16 +67,6 @@ impl IconColor {
 /// 落到 bootlog（哪个参数 / 哪个 GDI 阶段），随后用出厂默认渲染配置重试。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
-    /// 缓存未含该帧：fill 的颜色集合不含该档位——分档模式下只有
-    /// Tier(i)/Gray 档（`tier_cache_fills_tier_colors` 锁定的设计），
-    /// 不含 Default/Red/Yellow 档。
-    NotCached {
-        color: IconColor,
-        text: String,
-        bright: bool,
-        /// 分档模式是否启用（决定 fill 的键集合）。
-        tiers_enabled: bool,
-    },
     /// RGBA 缓冲长度与 size×size×4 不符（渲染管线内部不变量被破坏）。
     BadBufferSize { expected: usize, actual: usize },
     /// CreateCompatibleDC 失败（GDI 系统级）。
@@ -90,16 +80,6 @@ pub enum FrameError {
 impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrameError::NotCached {
-                color,
-                text,
-                bright,
-                tiers_enabled,
-            } => write!(
-                f,
-                "缓存无该帧（档位={color:?} 文本={text:?} 提亮={bright}；分档模式={tiers_enabled}，\
-                 分档启用时 fill 只缓存 Tier/Gray 档不含 Default 档）"
-            ),
             FrameError::BadBufferSize { expected, actual } => write!(
                 f,
                 "RGBA 缓冲长度不符（期望 {expected} 字节，实际 {actual}）"
@@ -118,6 +98,8 @@ impl std::fmt::Display for FrameError {
 /// 的旧配置迁成分档开启后，fill 的键集合不再含 `IconColor::Default`——
 /// 而 v0.3.4 以来的启动代码固定查 Default 档，启动即
 /// 「default frame missing」退出（真机日志 stage: icon-cache）。
+/// （v0.3.15：懒渲染后任何被请求的帧都现场渲染，「fill 键集合缺失」
+/// 这一类故障在结构上不再可能；本函数保留以维持两路径同决策。）
 pub fn startup_frame_color(tiers_enabled: bool) -> IconColor {
     if tiers_enabled {
         IconColor::Gray
@@ -262,7 +244,17 @@ pub fn system_dark_theme() -> bool {
 /// 闪烁提亮帧的插值系数（M11：约 40%；v0.3.4 #3 改为 flash_rgb 插值）。
 const BLINK_BRIGHTEN: f64 = 0.4;
 
-/// 预渲染位图缓存：key = (颜色档, 文本, 提亮档)。
+/// 帧缓存容量上限（v0.3.15，P1-2 懒渲染 + LRU）。
+///
+/// 论证：同时可见帧数 = 各展示设备当前帧（托盘只展示 1 台设备的图标，
+/// 加上设置窗口预览，常态 ≤2 帧）+ 低电闪烁的提亮相位帧（每台闪烁
+/// 设备 +1）+ 电量变化过程中短期并存的新旧文本帧。32 帧对以上场景
+/// 留有数量级余量；超出时 LRU 淘汰最久未命中的帧，重新显示时单次
+/// 重渲染（~ms 级，且不在每 500ms 的闪烁热路径上——两相位帧常驻
+/// 命中，`alternating_blink_phases_stay_cached` 锁定该语义）。
+const FRAME_CACHE_CAP: usize = 32;
+
+/// 位图帧缓存（v0.3.15：懒渲染 + LRU）：key = (颜色档, 文本, 提亮档)。
 pub struct IconCache {
     pub size: u32,
     dark_theme: bool,
@@ -270,13 +262,13 @@ pub struct IconCache {
     background: IconBackground,
     font: IconFontColor,
     font_family: String,
-    /// 分档颜色表（v0.3.3 #4）；None = 未启用分档（走 IconColor::ALL）。
+    /// 分档颜色表（v0.3.3 #4）；None = 未启用分档（按默认/警告/低电档配色）。
     tier_colors: Option<Vec<RgbColor>>,
     /// 文本大小（% 相对基准字号，D-48/D-57，40..=160）。
     text_scale: u8,
     /// 背景覆盖度（% 相对位图内切块，D-48/D-57，20..=100；100% = 满出血）。
     bg_scale: u8,
-    map: HashMap<(IconColor, String, bool), Vec<u8>>,
+    frames: FrameLru<(IconColor, String, bool)>,
 }
 
 impl IconCache {
@@ -292,7 +284,7 @@ impl IconCache {
         text_scale: u8,
         bg_scale: u8,
     ) -> Self {
-        let mut cache = IconCache {
+        IconCache {
             size,
             dark_theme,
             shape,
@@ -302,72 +294,54 @@ impl IconCache {
             tier_colors: tiers,
             text_scale: text_scale.clamp(ICON_TEXT_SCALE_MIN, ICON_TEXT_SCALE_MAX),
             bg_scale: bg_scale.clamp(ICON_BG_SCALE_MIN, ICON_BG_SCALE_MAX),
-            map: HashMap::new(),
-        };
-        cache.fill();
-        cache
+            frames: FrameLru::new(FRAME_CACHE_CAP),
+        }
     }
 
-    fn fill(&mut self) {
-        self.map.clear();
-        let mut texts: Vec<String> = (0..=99).map(|i| i.to_string()).collect();
-        texts.push("满".to_string());
-        texts.push("?".to_string());
-        texts.push("--".to_string());
-        let shape = self.shape;
-        let bg_rgb = self.background.rgb();
-        let face = self.font_family.clone();
+    /// 按需渲染单帧（v0.3.15：fill 的渲染内核对单帧抽提，配色/提亮/脉冲
+    /// 逻辑与旧全量预渲染逐帧一致；调用方负责缓存键与 LRU 管理）。
+    fn render_frame(&self, color: IconColor, text: &str, bright: bool) -> Vec<u8> {
         let tiers = self.tier_colors.as_deref();
-        // 颜色档集合：分档模式 = N 个分档色 + 灰；否则 = 默认 4 档。
-        let colors: Vec<IconColor> = match tiers {
-            Some(cols) => (0..cols.len() as u8)
-                .map(IconColor::Tier)
-                .chain(std::iter::once(IconColor::Gray))
-                .collect(),
-            None => IconColor::ALL.to_vec(),
-        };
-        for color in colors {
-            let rgb = font_rgb(
-                color,
-                self.dark_theme,
-                shape,
-                self.background,
-                self.font,
-                tiers,
-            );
-            for bright in [false, true] {
-                // M11 闪烁：有背景时提亮背景，透明底提亮字色；
-                // v0.3.4 #3：flash_rgb 保证提亮帧与常态帧必有可见差异。
-                let (fg, bg) = if bright {
-                    if shape == IconShape::Transparent {
-                        (flash_rgb(rgb, BLINK_BRIGHTEN), None)
-                    } else {
-                        (rgb, Some(flash_rgb(bg_rgb, BLINK_BRIGHTEN)))
-                    }
-                } else {
-                    // P1-1：非透明形状常态档必须带底色（与 settings.rs 预览同式）。
-                    (rgb, (shape != IconShape::Transparent).then_some(bg_rgb))
-                };
-                for text in &texts {
-                    let mut rgba = render_text_bitmap(
-                        self.size,
-                        text,
-                        fg,
-                        bg,
-                        shape,
-                        &face,
-                        self.text_scale,
-                        self.bg_scale,
-                    );
-                    // v0.3.5 #4（D-55）：透明背景的闪烁帧除字色跳变外再叠
-                    // 文本透明度脉冲——颜色对比弱（如深灰字）时帧间仍肉眼可见。
-                    if bright && shape == IconShape::Transparent {
-                        apply_alpha_pulse(&mut rgba, BLINK_TEXT_ALPHA_PULSE);
-                    }
-                    self.map.insert((color, text.clone(), bright), rgba);
-                }
+        let rgb = font_rgb(
+            color,
+            self.dark_theme,
+            self.shape,
+            self.background,
+            self.font,
+            tiers,
+        );
+        let bg_rgb = self.background.rgb();
+        // M11 闪烁：有背景时提亮背景，透明底提亮字色；
+        // v0.3.4 #3：flash_rgb 保证提亮帧与常态帧必有可见差异。
+        let (fg, bg) = if bright {
+            if self.shape == IconShape::Transparent {
+                (flash_rgb(rgb, BLINK_BRIGHTEN), None)
+            } else {
+                (rgb, Some(flash_rgb(bg_rgb, BLINK_BRIGHTEN)))
             }
+        } else {
+            // P1-1：非透明形状常态档必须带底色（与 settings.rs 预览同式）。
+            (
+                rgb,
+                (self.shape != IconShape::Transparent).then_some(bg_rgb),
+            )
+        };
+        let mut rgba = render_text_bitmap(
+            self.size,
+            text,
+            fg,
+            bg,
+            self.shape,
+            &self.font_family,
+            self.text_scale,
+            self.bg_scale,
+        );
+        // v0.3.5 #4（D-55）：透明背景的闪烁帧除字色跳变外再叠
+        // 文本透明度脉冲——颜色对比弱（如深灰字）时帧间仍肉眼可见。
+        if bright && self.shape == IconShape::Transparent {
+            apply_alpha_pulse(&mut rgba, BLINK_TEXT_ALPHA_PULSE);
         }
+        rgba
     }
 
     /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体 / 分档表 /
@@ -406,7 +380,9 @@ impl IconCache {
             self.tier_colors = tiers;
             self.text_scale = text_scale;
             self.bg_scale = bg_scale;
-            self.fill();
+            // v0.3.15（P1-2）：渲染输入已变 → 旧帧（尺寸/配色全部失效）
+            // 整体清空，后续请求按新输入懒渲染。
+            self.frames.clear();
         }
     }
 
@@ -419,37 +395,61 @@ impl IconCache {
     /// 改为 `rgba_to_hicon`：CreateDIBSection 预乘 BGRA + 规范 1bpp 掩码 +
     /// CreateIconIndirect，再走公开接口 `Icon::from_handle`（托盘销毁时
     /// DestroyIcon 由 tray-icon 负责）。
-    pub fn icon_for(&self, color: IconColor, text: &str, bright: bool) -> Option<tray_icon::Icon> {
+    pub fn icon_for(
+        &mut self,
+        color: IconColor,
+        text: &str,
+        bright: bool,
+    ) -> Option<tray_icon::Icon> {
         self.icon_for_checked(color, text, bright).ok()
     }
 
     /// v0.3.8（D-64/B-1）：取帧并给出失败的具体原因（哪个参数 / 哪个
     /// GDI 阶段）——启动路径用本接口，失败原因可直接落 bootlog。
+    ///
+    /// v0.3.15（P1-2）：帧懒渲染——缓存未命中时现场渲染并入 LRU（命中
+    /// 时零 GDI 调用，闪烁两相位帧因此每 500ms 不重渲染）。
     pub fn icon_for_checked(
-        &self,
+        &mut self,
         color: IconColor,
         text: &str,
         bright: bool,
     ) -> Result<tray_icon::Icon, FrameError> {
+        let key = (color, text.to_string(), bright);
+        // contains 不推进 LRU 命中时钟；未命中才渲染，避免命中路径的
+        // 任何 GDI 调用。
+        let rendered = if self.frames.contains(&key) {
+            None
+        } else {
+            Some(self.render_frame(color, text, bright))
+        };
         let rgba = self
-            .map
-            .get(&(color, text.to_string(), bright))
-            .ok_or_else(|| FrameError::NotCached {
-                color,
-                text: text.to_string(),
-                bright,
-                tiers_enabled: self.tier_colors.is_some(),
-            })?;
+            .frames
+            .get_or_insert_with(key, || rendered.expect("miss renders on demand"));
         let handle = rgba_to_hicon(rgba, self.size)?;
         Ok(tray_icon::Icon::from_handle(handle))
     }
 
     /// 测试专用：直接取缓存帧字节（blink.rs 的闪烁帧路径验收等跨模块测试用）。
+    /// 未命中时按懒渲染语义现场渲染。
     #[cfg(test)]
-    pub fn map_for_test(&self, color: IconColor, text: &str, bright: bool) -> Option<&[u8]> {
-        self.map
-            .get(&(color, text.to_string(), bright))
-            .map(Vec::as_slice)
+    pub fn map_for_test(&mut self, color: IconColor, text: &str, bright: bool) -> Option<&[u8]> {
+        let key = (color, text.to_string(), bright);
+        let rendered = if self.frames.contains(&key) {
+            None
+        } else {
+            Some(self.render_frame(color, text, bright))
+        };
+        Some(
+            self.frames
+                .get_or_insert_with(key, || rendered.expect("miss renders on demand")),
+        )
+    }
+
+    /// 测试专用：当前缓存帧数（懒渲染/LRU 行为验收用）。
+    #[cfg(test)]
+    pub fn cached_len_for_test(&self) -> usize {
+        self.frames.len()
     }
 }
 
@@ -1053,7 +1053,7 @@ mod tests {
     fn fill_non_transparent_shape_keeps_background() {
         let size = 32u32;
         let bg = IconBackground::Dark;
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             size,
             true,
             IconShape::Rounded,
@@ -1065,16 +1065,16 @@ mod tests {
             100,
         );
         let rgba = cache
-            .map
-            .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("normal-level bitmap cached");
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("normal-level bitmap renders on demand")
+            .to_vec();
         let idx = ((2 * size + size / 2) * 4) as usize;
         let (er, eg, eb) = bg.rgb();
         assert_eq!(&rgba[idx..idx + 3], &[er, eg, eb]);
         assert_eq!(rgba[idx + 3], 255);
 
         // 对照：透明形状同位置无背景。
-        let transparent = IconCache::new(
+        let mut transparent = IconCache::new(
             size,
             true,
             IconShape::Transparent,
@@ -1086,9 +1086,9 @@ mod tests {
             100,
         );
         let rgba_t = transparent
-            .map
-            .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("transparent bitmap cached");
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("transparent bitmap renders on demand")
+            .to_vec();
         assert_eq!(rgba_t[idx + 3], 0);
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
     #[test]
     fn transparent_blink_frames_pulse_text_alpha() {
         let size = 32u32;
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             size,
             true,
             IconShape::Transparent,
@@ -1191,13 +1191,13 @@ mod tests {
             100,
         );
         let normal = cache
-            .map
-            .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("normal frame cached");
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("normal frame renders on demand")
+            .to_vec();
         let bright = cache
-            .map
-            .get(&(IconColor::Default, "50".to_string(), true))
-            .expect("bright frame cached");
+            .map_for_test(IconColor::Default, "50", true)
+            .expect("bright frame renders on demand")
+            .to_vec();
         assert_ne!(normal, bright, "blink frames must differ on transparent bg");
         // 实心字形像素：alpha 255 → pulse_alpha(255)（=115），颜色通道也变。
         let solid = normal
@@ -1218,7 +1218,7 @@ mod tests {
 
         // 对照：非透明形状维持背景闪烁路径——背景像素 alpha 恒 255，
         // 文本像素 alpha 不脉冲，差异只在颜色通道。
-        let cache2 = IconCache::new(
+        let mut cache2 = IconCache::new(
             size,
             true,
             IconShape::Rounded,
@@ -1230,13 +1230,13 @@ mod tests {
             100,
         );
         let normal2 = cache2
-            .map
-            .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("normal frame cached");
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("normal frame renders on demand")
+            .to_vec();
         let bright2 = cache2
-            .map
-            .get(&(IconColor::Default, "50".to_string(), true))
-            .expect("bright frame cached");
+            .map_for_test(IconColor::Default, "50", true)
+            .expect("bright frame renders on demand")
+            .to_vec();
         assert_ne!(normal2, bright2, "bg flash frames must differ");
         let idx = ((2 * size + size / 2) * 4) as usize; // 背景采样点（同 P1-1 回归）
         assert_eq!(normal2[idx + 3], 255);
@@ -1248,9 +1248,10 @@ mod tests {
         );
     }
 
-    /// #4：分档模式缓存 —— N 个分档色 + 灰共 N+1 个颜色档位可用。
+    /// #4：分档模式 —— N 个分档色 + 灰档帧都能按需渲染（v0.3.15 懒渲染：
+    /// 缓存启动为空，任何被请求的颜色档都现场渲染，不再有「fill 键集合」）。
     #[test]
-    fn tier_cache_fills_tier_colors() {
+    fn tier_frames_render_on_demand() {
         let tiers = vec![
             RgbColor {
                 r: 0xE8,
@@ -1268,7 +1269,7 @@ mod tests {
                 b: 0x6A,
             },
         ];
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             16,
             true,
             IconShape::Rounded,
@@ -1279,32 +1280,26 @@ mod tests {
             100,
             100,
         );
+        assert_eq!(cache.cached_len_for_test(), 0, "懒渲染：启动零预渲染帧");
         for i in 0..3u8 {
             assert!(
                 cache
-                    .map
-                    .contains_key(&(IconColor::Tier(i), "50".to_string(), false)),
-                "tier {i} bitmap missing"
+                    .map_for_test(IconColor::Tier(i), "50", false)
+                    .is_some(),
+                "tier {i} frame must render on demand"
             );
         }
-        assert!(cache
-            .map
-            .contains_key(&(IconColor::Gray, "50".to_string(), false)));
-        // 分档模式不渲染默认 4 档。
-        assert!(!cache
-            .map
-            .contains_key(&(IconColor::Default, "50".to_string(), false)));
-        assert!(!cache
-            .map
-            .contains_key(&(IconColor::Red, "50".to_string(), false)));
+        assert!(cache.map_for_test(IconColor::Gray, "50", false).is_some());
+        assert_eq!(cache.cached_len_for_test(), 4, "只缓存实际请求过的帧");
     }
 
     /// v0.3.8（D-64）根因回归测试：v0.3.5 D-56 迁移把「分档关 + 字色
     /// auto」的旧配置迁成分档开启后，启动首帧查询必须与 pump 的
     /// `percent == None` 分支同决策（Gray 档）。v0.3.4 以来的启动代码
-    /// 固定查 `IconColor::Default`——分档模式下该键不在 fill 的键集合里
-    /// （见 `tier_cache_fills_tier_colors`），启动即「default frame missing」
-    /// 退出（真机日志 stage: icon-cache / exit code=1）。
+    /// 固定查 `IconColor::Default`——分档模式下该键不在 fill 的键集合里，
+    /// 启动即「default frame missing」退出（真机日志 stage: icon-cache /
+    /// exit code=1）。v0.3.15 懒渲染后该类故障结构上不再可能（任何被
+    /// 请求的帧现场渲染），本测试保留「启动取色与 pump 同决策」的锁定。
     #[test]
     fn tier_mode_startup_frame_resolves_after_root_fix() {
         let tiers = vec![
@@ -1325,7 +1320,7 @@ mod tests {
             },
         ];
         // 模拟 v0.3.5 D-56 迁移后的用户配置视图（分档开启）。
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             16,
             true,
             IconShape::Rounded,
@@ -1336,15 +1331,7 @@ mod tests {
             100,
             100,
         );
-        // 根因证据（红态记录）：旧启动查询的 Default 档在分档模式下缺失。
-        assert!(
-            !cache
-                .map
-                .contains_key(&(IconColor::Default, "?".to_string(), false)),
-            "分档模式 fill 不含 Default 档——这正是 v0.3.7 真机日志的 \
-             「default frame missing」"
-        );
-        // 修复后（绿）：启动取色与 pump 对齐（Gray 档），首帧存在。
+        // 修复后（绿）：启动取色与 pump 对齐（Gray 档），首帧渲染成功。
         let color = startup_frame_color(true);
         assert_eq!(color, IconColor::Gray);
         assert!(cache.icon_for_checked(color, "?", false).is_ok());
@@ -1355,50 +1342,13 @@ mod tests {
     /// v0.3.8（B-1）回退验收：分档开启的用户配置首帧查询失败后，用出厂
     /// 默认渲染配置重建缓存（`cache_from_config(Config::default())`），
     /// 默认帧必须生成成功——「该配置值 → 默认帧生成成功（回退后）」。
-    /// 同时验证失败原因携带具体参数（NotCached，含档位/文本/分档模式）。
+    /// （v0.3.15 懒渲染后缺帧类失败不再存在，保留 GDI 级失败回退路径的
+    /// 验收：出厂默认配置的首帧必须生成成功。）
     #[test]
     fn factory_default_cache_generates_first_frame_after_fallback() {
-        let tiers = vec![
-            RgbColor {
-                r: 0xE8,
-                g: 0x11,
-                b: 0x23,
-            },
-            RgbColor {
-                r: 0x00,
-                g: 0xCC,
-                b: 0x6A,
-            },
-        ];
-        // 用户配置（分档开启 + 自定义字体名——字体名与帧生成失败无关：
-        // CreateFontW 对缺失字体静默回退系统默认，见 render_text_bitmap 注释）。
-        let user = IconCache::new(
-            16,
-            true,
-            IconShape::Rounded,
-            IconBackground::Dark,
-            IconFontColor::Auto,
-            "NoSuchFontFamily".to_string(),
-            Some(tiers),
-            100,
-            100,
-        );
-        // 旧启动查询（Default 档）失败，失败原因必须可定位到具体参数。
-        let err = user
-            .icon_for_checked(IconColor::Default, "?", false)
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FrameError::NotCached {
-                color: IconColor::Default,
-                ref text,
-                bright: false,
-                tiers_enabled: true,
-            } if text == "?"
-        ));
         // 出厂默认渲染配置重试（main 启动回退同一路径）。
         let factory_cfg = Config::default();
-        let factory = cache_from_config(&factory_cfg, 16, true);
+        let mut factory = cache_from_config(&factory_cfg, 16, true);
         assert!(factory
             .icon_for_checked(
                 startup_frame_color(factory_cfg.icon_font_tiers_enabled),
@@ -1415,7 +1365,7 @@ mod tests {
     fn pure_red_custom_bg_pixel_is_red() {
         let size = 32u32;
         let bg = IconBackground::Custom(RgbColor { r: 255, g: 0, b: 0 });
-        let cache = IconCache::new(
+        let mut cache = IconCache::new(
             size,
             true,
             IconShape::Rounded,
@@ -1427,9 +1377,9 @@ mod tests {
             100,
         );
         let rgba = cache
-            .map
-            .get(&(IconColor::Default, "50".to_string(), false))
-            .expect("bitmap cached");
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("bitmap renders on demand")
+            .to_vec();
         let idx = ((2 * size + size / 2) * 4) as usize;
         assert_eq!(
             &rgba[idx..idx + 3],
@@ -1437,7 +1387,7 @@ mod tests {
             "bg pixel must be pure red (RGB order)"
         );
         assert_eq!(rgba[idx + 3], 255, "bg pixel must be opaque");
-        let bgra = premultiplied_bgra_from_rgba(rgba);
+        let bgra = premultiplied_bgra_from_rgba(&rgba);
         // 预乘 BGRA：B=0, G=0, R=255, A=255（字节序颠倒会变成 [255,0,0,255]）。
         assert_eq!(&bgra[idx..idx + 4], &[0, 0, 255, 255]);
     }
@@ -1543,5 +1493,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// v0.3.15（P1-2）：渲染输入变化（此处以 DPI 尺寸变化为代表）→
+    /// rebuild 清空缓存；输入未变时 rebuild 不动缓存（零开销判等）。
+    #[test]
+    fn rebuild_clears_cached_frames_on_input_change() {
+        let mut cache = IconCache::new(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let _ = cache.map_for_test(IconColor::Default, "50", false);
+        assert_eq!(cache.cached_len_for_test(), 1);
+        // 相同输入 rebuild：缓存保留（旧 fill 行为是全清重渲，现为零开销）。
+        cache.rebuild(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        assert_eq!(cache.cached_len_for_test(), 1, "输入未变不得清缓存");
+        // DPI 变化（16 → 32px）：旧帧尺寸全失效，必须清空。
+        cache.rebuild(
+            32,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        assert_eq!(cache.cached_len_for_test(), 0, "DPI 变更必须清缓存");
+        // 清空后按新尺寸懒渲染。
+        let frame = cache
+            .map_for_test(IconColor::Default, "50", false)
+            .expect("re-render after DPI change");
+        assert_eq!(frame.len(), (32 * 32 * 4) as usize, "新帧须为新尺寸");
+    }
+
+    /// v0.3.15（P1-2）：闪烁两相位帧跨调用命中缓存——反复交替取
+    /// 常态/提亮帧，缓存帧数恒为 2（每 500ms 相位切换不重渲染）。
+    #[test]
+    fn blink_two_phase_frames_cached_across_calls() {
+        let mut cache = IconCache::new(
+            16,
+            true,
+            IconShape::Rounded,
+            IconBackground::Dark,
+            IconFontColor::Auto,
+            "Segoe UI".to_string(),
+            None,
+            100,
+            100,
+        );
+        let normal_first = cache
+            .map_for_test(IconColor::Red, "15", false)
+            .expect("normal frame")
+            .to_vec();
+        for _ in 0..50 {
+            let n = cache
+                .map_for_test(IconColor::Red, "15", false)
+                .expect("normal frame cached");
+            assert_eq!(n, normal_first.as_slice(), "命中必须返回同一帧");
+            let _ = cache
+                .map_for_test(IconColor::Red, "15", true)
+                .expect("bright frame cached");
+        }
+        assert_eq!(
+            cache.cached_len_for_test(),
+            2,
+            "两相位各一帧，50 轮交替无淘汰无重渲"
+        );
     }
 }
