@@ -21,6 +21,19 @@ pub const SLEEP_AFTER_TIMEOUTS: u32 = 2;
 /// 唤醒探测冷却：一次唤醒信号至多触发一次探测；探测失败后须等待
 /// 新的唤醒信号、且距上次探测 ≥ 该间隔，避免唤醒信号风暴变成高频查询。
 pub const WAKE_PROBE_COOLDOWN: Duration = Duration::from_secs(5);
+/// 灰显阈值锚定倍数（F5 主修复 (a)，v0.3.16 线）：灰显阈值 =
+/// `max(GRAY_AFTER, GRAY_MIN_POLLS × 当前轮询档)`。纯墙钟 90s 派生在
+/// 轮询档 >90s（档位 300~7200s，D-66）时必然误灰——两次连续轮询失败
+/// 才有「无响应」证据，阈值至少覆盖两个完整轮询周期。仅作兜底：鼠标
+/// 活跃期的新鲜读数主要由临近灰显豁免（NEAR_GRAY_LEEWAY）保证。
+pub const GRAY_MIN_POLLS: u32 = 2;
+/// 临近灰显豁免提前量（F5 主修复 (b)，v0.3.16 线）：在线设备
+/// `now - last_success ≥ GRAY_AFTER - 本窗口` 时，探测轮对其放行一次
+/// 查询。v0.3.15 P1-1 的探测轮只查休眠设备，在线设备的 last_success
+/// 会被冻结到下一次整轮（≥ 轮询档），90s 墙钟派生必然误灰、误报离线；
+/// 豁免让鼠标活跃期每 ~90s 有一次查询兜底（探测轮节奏 ~30s，见
+/// reconnect.rs wake_action 的枚举门控）。
+pub const NEAR_GRAY_LEEWAY: Duration = Duration::from_secs(30);
 
 /// 轮询决策（D-33「休眠期零主动查询」的唯一裁决点：
 /// Skip = 本轮绝不向该设备发出任何 HID++ 查询）。
@@ -85,18 +98,20 @@ impl DeviceEntry {
         }
     }
 
-    /// 派生灰显态（90s 无成功；从未成功过的在线设备不灰）。
-    pub fn is_gray(&self, now: Instant) -> bool {
+    /// 派生灰显态（超过阈值无成功；从未成功过的在线设备不灰）。
+    /// 阈值由调用方经 `AppCore::gray_threshold()` 给出（F5 主修复 (a)：
+    /// 锚定轮询档，不再是固定 90s）。
+    pub fn is_gray(&self, now: Instant, threshold: Duration) -> bool {
         match self.last_success {
-            Some(t) => now.duration_since(t) >= GRAY_AFTER,
+            Some(t) => now.duration_since(t) >= threshold,
             None => false,
         }
     }
 
-    /// 展示用灰显（D-33）：90s 派生灰，或休眠中——休眠显示最后一次
+    /// 展示用灰显（D-33）：派生灰，或休眠中——休眠显示最后一次
     /// 已知电量并灰显，不显示成「未读取 / 未知」。
-    pub fn display_gray(&self, now: Instant) -> bool {
-        self.device.state == DeviceState::Sleeping || self.is_gray(now)
+    pub fn display_gray(&self, now: Instant, threshold: Duration) -> bool {
+        self.device.state == DeviceState::Sleeping || self.is_gray(now, threshold)
     }
 }
 
@@ -379,6 +394,32 @@ impl AppCore {
             .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping)
     }
 
+    /// 临近灰显豁免（F5 主修复 (b)，v0.3.16 线）：在线设备距「90s 无成功」
+    /// 不足 NEAR_GRAY_LEEWAY 时返回 true，探测轮据此对其放行一次查询——
+    /// 让长轮询档下被冻结的 last_success 在鼠标活跃期每 ~90s 刷新一次，
+    /// 90s 墙钟派生不再必然误灰。豁免锚在 GRAY_AFTER（90s 常量）而非
+    /// 锚定后的阈值：锚定阈值下整轮会周期性刷新 last_success，elapsed
+    /// 永远到不了阈值窗口，豁免将永不触发（那样真离线首报会被推迟到
+    /// ≥ GRAY_MIN_POLLS × 档位）。
+    /// 与 D-33 唤醒探测互斥（F5 实现期检查项，蓝方互检第 3 条）：本判定
+    /// 仅对 Online 生效，`wake_probe_candidate` 仅对 Sleeping 生效，
+    /// 同一设备同一轮不会被两条路径同时放行。
+    pub fn near_gray_exemption(&self, id: &str, now: Instant) -> bool {
+        self.entries.iter().any(|e| {
+            e.device.id == id
+                && e.device.state == DeviceState::Online
+                && e.last_success.is_some_and(|t| {
+                    now.duration_since(t) >= GRAY_AFTER.saturating_sub(NEAR_GRAY_LEEWAY)
+                })
+        })
+    }
+
+    /// 探测轮槽位准入的合并裁决点（F5 主修复 (b) 与 D-33）：
+    /// 休眠候选（唤醒探测）或临近灰显豁免命中者放行，其余在线设备跳过。
+    pub fn probe_round_allows(&self, id: &str, now: Instant) -> bool {
+        self.wake_probe_candidate(id) || self.near_gray_exemption(id, now)
+    }
+
     /// 当前处于休眠的设备 id 列表（IO 线程收到唤醒信号后批量装填用）。
     pub fn sleeping_ids(&self) -> Vec<String> {
         self.entries
@@ -430,11 +471,12 @@ impl AppCore {
         }
     }
 
-    /// 检查是否有设备新进入灰显（用于"90s 设备丢失"通知）；返回新变灰的设备名。
+    /// 检查是否有设备新进入灰显（用于"电量显示已过期"通知）；返回新变灰的设备名。
     pub fn newly_gray(&mut self, now: Instant) -> Vec<String> {
+        let threshold = self.gray_threshold();
         let mut out = Vec::new();
         for e in &mut self.entries {
-            if e.device.state == DeviceState::Online && e.is_gray(now) && !e.gray_alerted {
+            if e.device.state == DeviceState::Online && e.is_gray(now, threshold) && !e.gray_alerted {
                 e.gray_alerted = true;
                 out.push(e.device.name.clone());
             }
@@ -446,9 +488,17 @@ impl AppCore {
     /// 在「有电量、未充电、未灰显」的设备中取电量最低者；无候选则
     /// 放宽到「有电量、未灰显」取最低；仍无 → None（图标显示 "?"）。
     /// D-33：休眠设备保留展示资格（显示最后一次已知电量、灰显），
-    /// 不被 90s 派生灰显排除——否则唯一设备休眠后图标又回退「?」。
+    /// 不被派生灰显排除——否则唯一设备休眠后图标又回退「?」。
+    /// F5 主修复第 3 件（v0.3.16 线）：Online+灰显与 Sleeping 同权——
+    /// 灰显的语义是「读数过期」而非「设备离线」，保留展示资格、灰显
+    /// 显示最后一次已知电量，不再因派生灰回退「?」。
     pub fn default_display_index(&self, now: Instant) -> Option<usize> {
-        let eligible = |e: &DeviceEntry| e.device.state == DeviceState::Sleeping || !e.is_gray(now);
+        let threshold = self.gray_threshold();
+        let eligible = |e: &DeviceEntry| {
+            e.device.state == DeviceState::Sleeping
+                || e.device.state == DeviceState::Online
+                || !e.is_gray(now, threshold)
+        };
         let pick_min = |pred: &dyn Fn(&DeviceEntry) -> bool| -> Option<usize> {
             self.entries
                 .iter()
@@ -479,10 +529,20 @@ impl AppCore {
         }
     }
 
+    /// 灰显阈值（F5 主修复 (a)，v0.3.16 线）：`max(GRAY_AFTER,
+    /// GRAY_MIN_POLLS × 当前轮询档)`。兜底件——保证「两次连续轮询失败
+    /// 才有灰显证据」；活跃期的新鲜读数由临近灰显豁免
+    /// （`near_gray_exemption`）保证，真离线检测仍走既有路径
+    /// （DeviceGone 即时注销 / 超时×2→Sleeping / 硬失败×3 注销）。
+    pub fn gray_threshold(&self) -> Duration {
+        GRAY_AFTER.max(self.poll_interval() * GRAY_MIN_POLLS)
+    }
+
     /// 生成快照。
     pub fn snapshot(&mut self, now: Instant) -> Snapshot {
         self.snap_seq += 1;
         let default_device = self.default_display_index(now);
+        let threshold = self.gray_threshold();
         Snapshot {
             seq: self.snap_seq,
             devices: self
@@ -495,7 +555,7 @@ impl AppCore {
                     charging: e.device.battery.is_some_and(|b| b.charging),
                     link: e.device.link.name().to_string(),
                     state: e.device.state.name().to_string(),
-                    gray: e.display_gray(now),
+                    gray: e.display_gray(now, threshold),
                     source: e.device.battery.map(|b| b.source.name().to_string()),
                     physical_key: match &e.device.physical_key {
                         volttray_device::PhysicalKey::UnitId(u) => Some(u.clone()),
@@ -555,14 +615,37 @@ mod tests {
         assert_eq!(core.default_display_index(now), Some(1)); // b=15%
     }
 
+    /// F5 主修复第 3 件：Online+灰显与 Sleeping 同权——唯一设备派生灰
+    /// 后仍保留展示资格（灰显显示最后一次已知电量），不再回退「?」。
+    /// 这是裁决推翻的旧语义（原 gray_devices_excluded_from_default）。
     #[test]
-    fn gray_devices_excluded_from_default() {
+    fn gray_online_device_keeps_default_display_right() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(5, false), t0);
-        let later = t0 + GRAY_AFTER + Duration::from_secs(1);
-        assert_eq!(core.default_display_index(later), None); // 唯一设备已灰
+        let later = t0 + core.gray_threshold() + Duration::from_secs(1);
+        // 已派生灰（阈值已过）但仍在默认展示位：图标灰显 5%，不是「?」。
+        assert!(core.entries()[0].is_gray(later, core.gray_threshold()));
+        assert_eq!(core.default_display_index(later), Some(0));
+        // 快照同样灰显但保留展示位。
+        let snap = core.snapshot(later);
+        assert!(snap.devices[0].gray);
+        assert_eq!(snap.devices[0].percent, Some(5));
+        assert_eq!(snap.default_device, Some(0));
+    }
+
+    /// 同权不覆盖真离线终点：Disconnected 且已灰的设备仍被排除——
+    /// 排除依据是「无成功读数 + 非活跃状态」，不是「曾灰显」。
+    #[test]
+    fn disconnected_gray_device_still_excluded_from_default() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(5, false), t0);
+        core.record_failure("a", true); // gone → Disconnected
+        let later = t0 + core.gray_threshold() + Duration::from_secs(1);
+        assert_eq!(core.default_display_index(later), None);
     }
 
     /// v0.3.15（P1-1）：唤醒探测轮只准入休眠设备——在线、未注册 id
@@ -590,11 +673,117 @@ mod tests {
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(80, false), t0);
-        let later = t0 + GRAY_AFTER + Duration::from_secs(1);
+        // F5 主修复 (a)：默认档 1800s 下阈值锚定为 3600s，91s 不再触发。
+        let threshold = core.gray_threshold();
+        assert_eq!(threshold, GRAY_AFTER.max(Duration::from_secs(1800) * GRAY_MIN_POLLS));
+        assert!(core.newly_gray(t0 + GRAY_AFTER + Duration::from_secs(1)).is_empty());
+        let later = t0 + threshold + Duration::from_secs(1);
         assert_eq!(core.newly_gray(later), vec!["Mouse a".to_string()]);
         assert!(core.newly_gray(later).is_empty()); // 不重复
         core.record_success("a", reading(80, false), later);
         assert!(core.newly_gray(later).is_empty());
+    }
+
+    /// F5 主修复 (a) 阈值锚定：充电档 15s → max(90, 30)=90s；300s 档 →
+    /// 600s；默认 1800s 档 → 3600s。阈值永不小于两个完整轮询周期。
+    #[test]
+    fn gray_threshold_anchors_to_poll_interval() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            poll_interval_secs: 300,
+            ..Config::default()
+        })));
+        assert_eq!(core.gray_threshold(), Duration::from_secs(600));
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(30, true), Instant::now()); // 充电档 15s
+        assert_eq!(core.gray_threshold(), GRAY_AFTER);
+        core.swap_config(Config::default()); // 1800s 档（充电中仍按充电档）
+        assert_eq!(core.gray_threshold(), GRAY_AFTER);
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core2.upsert_device(dev("b", 2));
+        assert_eq!(core2.gray_threshold(), Duration::from_secs(3600));
+    }
+
+    /// F5 验证断言 A6 之①：poll_interval=300、在线、推进 91s 无轮询 →
+    /// 不灰、无 newly_gray（toast 源头）、default_device 仍 Some。
+    /// 即 v0.3.15 症状场景在修复后不再误灰误报。
+    #[test]
+    fn a6_long_poll_91s_without_poll_stays_fresh() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            poll_interval_secs: 300,
+            ..Config::default()
+        })));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(94, false), t0);
+        let later = t0 + Duration::from_secs(91);
+        assert!(!core.entries()[0].is_gray(later, core.gray_threshold()));
+        assert!(core.newly_gray(later).is_empty(), "91s 不得触发灰显通知");
+        assert_eq!(core.default_display_index(later), Some(0));
+        let snap = core.snapshot(later);
+        assert!(!snap.devices[0].gray);
+        assert_eq!(snap.default_device, Some(0));
+    }
+
+    /// F5 验证断言 A6 之②（主修复 (b)）：临近灰显豁免命中 → 探测轮放行。
+    /// 90s-30s=60s 起豁免生效；未到窗口、未注册 id、休眠设备（走 D-33
+    /// 唤醒路径）各有边界。豁免与唤醒探测按状态互斥，不会同轮双查。
+    #[test]
+    fn a6_near_gray_exemption_admits_probe_round() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(80, false), t0);
+        core.record_success("b", reading(60, false), t0);
+        // 窗口前（59s）：两台在线设备均不放行。
+        let before = t0 + Duration::from_secs(59);
+        assert!(!core.probe_round_allows("a", before));
+        assert!(!core.probe_round_allows("b", before));
+        assert!(!core.probe_round_allows("ghost", before), "未注册 id 不放行");
+        // 窗口内（61s）：豁免命中，探测轮放行一次查询。
+        let near = t0 + Duration::from_secs(61);
+        assert!(core.probe_round_allows("a", near), "临近灰显豁免应放行");
+        assert!(core.probe_round_allows("b", near));
+        // 豁免命中后本轮查到了（豁免的意义）：last_success 刷新，下一轮
+        // 窗口重新计时——活跃期读数间隔被收敛到 ~90s 量级（A3）。
+        core.record_success("a", reading(80, false), near);
+        assert!(!core.probe_round_allows("a", near + Duration::from_secs(1)));
+        // 互斥：b 连续超时进休眠后走 D-33 唤醒路径，豁免对其不生效
+        // （准入由 wake_probe_candidate 承担），两路径不会同时放行。
+        let _ = core.record_timeout("b");
+        let _ = core.record_timeout("b");
+        assert!(core.wake_probe_candidate("b"));
+        assert!(!core.near_gray_exemption("b", near), "休眠设备不吃在线豁免");
+        assert!(core.probe_round_allows("b", near), "休眠候选仍由唤醒路径放行");
+        assert!(!core.wake_probe_candidate("a"), "在线设备不是唤醒候选");
+    }
+
+    /// F5 风险回归面②（多设备同接收器）：豁免只放行临近灰显的设备，
+    /// 不误伤其他设备的节奏；真离线设备按既有路径 超时×2→Sleeping，
+    /// 休眠后展示资格保留、灰显最后已知电量——真离线检测链不削弱（A5
+    /// 的代码侧可覆盖部分）。
+    #[test]
+    fn multi_device_exemption_scoped_and_offline_path_intact() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), t0);
+        // b 的读数比 a 晚 40s：61s 时 a 进豁免窗口、b 尚未进。
+        core.record_success("b", reading(30, false), t0 + Duration::from_secs(40));
+        let near = t0 + Duration::from_secs(61);
+        assert!(core.probe_round_allows("a", near));
+        assert!(!core.probe_round_allows("b", near), "豁免按设备计时，不连坐");
+        // b 真离线：连续两次超时 → Sleeping（既有路径原样）。
+        assert_eq!(core.record_timeout("b"), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout("b"), TimeoutOutcome::EnteredSleep);
+        // 休眠后：展示资格保留（D-33）、灰显最后已知电量；默认展示按
+        // 「eligible 中取电量最低」仍选中 b（30% < a 的 50%）——休眠
+        // 同权意味着低电休眠设备继续占据默认展示位，不回退「?」。
+        let snap = core.snapshot(near);
+        assert!(snap.devices[1].gray);
+        assert_eq!(snap.devices[1].percent, Some(30));
+        assert_eq!(core.default_display_index(near), Some(1));
     }
 
     #[test]

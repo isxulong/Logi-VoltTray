@@ -146,3 +146,93 @@ fn hidpp1_device_uses_register() {
     assert!(r.charging);
     assert_eq!(r.source, BatterySource::Hidpp1Register0x0D);
 }
+
+
+/// F5 次修 P2：#255 接收器直连槽的结构性 error_response 噪声——
+/// Suppress 策略下压掉 BatteryUnknown 事件（tray 侧改记 debug 级
+/// bootlog），返回分类不变；默认 Emit 策略行为不变（事件照常派发）。
+/// 真实槽位读数路径（上方全部用例）不受影响。
+#[test]
+fn receiver_slot_error_response_suppressed_by_policy() {
+    use volttray_device::battery::{probe_battery_with_policy, UnknownDiagPolicy};
+    use volttray_transport::events::DiagKind;
+
+    let err_frames = || {
+        vec![
+            Ok(vec![0x10, 0xFF, 0xFF, 0x01, 0x06, 0x09, 0x00]),
+            Ok(vec![0x10, 0xFF, 0xFF, 0x02, 0x04, 0x09, 0x00]),
+            Ok(vec![0x10, 0xFF, 0xFF, 0x03, 0x05, 0x09, 0x00]),
+        ]
+    };
+
+    // Suppress：Err 分类不变，BatteryUnknown 事件被压掉。
+    let ch = StubChannel::scripted(err_frames());
+    let mut t = Transport::new(ch, VecSink::default());
+    let r = probe_battery_with_policy(
+        &mut t,
+        "rcvr#255",
+        0xFF,
+        &table(),
+        "li-ion",
+        false,
+        UnknownDiagPolicy::SuppressReceiverSlotErrorResponse,
+    );
+    assert_eq!(r, Err(UnknownReason::ErrorResponse));
+    assert!(
+        !t.sink_mut()
+            .0
+            .iter()
+            .any(|e| matches!(e.kind, DiagKind::BatteryUnknown { .. })),
+        "Suppress 策略下不得派发 BatteryUnknown"
+    );
+
+    // Emit（默认路径 probe_battery 同语义）：事件照常派发。
+    let ch = StubChannel::scripted(err_frames());
+    let mut t = Transport::new(ch, VecSink::default());
+    let r = probe_battery_with_policy(
+        &mut t,
+        "rcvr#255",
+        0xFF,
+        &table(),
+        "li-ion",
+        false,
+        UnknownDiagPolicy::Emit,
+    );
+    assert_eq!(r, Err(UnknownReason::ErrorResponse));
+    assert!(
+        t.sink_mut()
+            .0
+            .iter()
+            .any(|e| matches!(e.kind, DiagKind::BatteryUnknown { .. })),
+        "Emit 策略下 BatteryUnknown 应照常派发"
+    );
+}
+
+/// F5 次修 P2 边界：Suppress 只压 error_response 形态；超时等其他
+/// 失败形态照常派发（不掩盖真实异常）。
+#[test]
+fn suppress_policy_keeps_timeout_unknown_event() {
+    use volttray_device::battery::{probe_battery_with_policy, UnknownDiagPolicy};
+    use volttray_transport::events::DiagKind;
+
+    // 三个策略全部超时（桩通道空队列默认回 Timeout）。
+    let ch = StubChannel::scripted(vec![]);
+    let mut t = Transport::new(ch, VecSink::default());
+    let r = probe_battery_with_policy(
+        &mut t,
+        "rcvr#255",
+        0xFF,
+        &table(),
+        "li-ion",
+        false,
+        UnknownDiagPolicy::SuppressReceiverSlotErrorResponse,
+    );
+    assert_eq!(r, Err(UnknownReason::QueryTimeout));
+    assert!(
+        t.sink_mut()
+            .0
+            .iter()
+            .any(|e| matches!(e.kind, DiagKind::BatteryUnknown { .. })),
+        "超时形态不受 Suppress 影响，照常派发"
+    );
+}

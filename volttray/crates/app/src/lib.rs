@@ -26,7 +26,8 @@ pub use config::{
 };
 pub use core::{
     guarded, AppCore, DeviceSnapshot, PollDecision, Snapshot, TimeoutOutcome, UpsertOutcome,
-    GRAY_AFTER, POLL_CHARGING, SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN,
+    GRAY_AFTER, GRAY_MIN_POLLS, NEAR_GRAY_LEEWAY, POLL_CHARGING, SLEEP_AFTER_TIMEOUTS,
+    WAKE_PROBE_COOLDOWN,
 };
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};

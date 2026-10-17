@@ -198,6 +198,22 @@ fn should_fallback(err: &TransportError) -> bool {
     }
 }
 
+/// `BatteryUnknown` 诊断事件的派发策略（F5 次修 P2，v0.3.16 线）。
+/// 接收器直连槽 #255（0xFF）经握手误分类（D-17 规则不改）后，其
+/// 0x0D 寄存器查询注定回协议错误——这类 `error_response` 是结构性
+/// 噪声（每轮枚举必现），不是设备异常。调用方可对 #255 传
+/// `SuppressReceiverSlotErrorResponse` 把事件压掉，改用 debug 级
+/// 日志记录（tray 侧 bootlog），诊断导出不再被刷屏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownDiagPolicy {
+    /// 照常派发 `BatteryUnknown` 诊断事件（默认，真实设备槽位）。
+    Emit,
+    /// 失败原因为 `ErrorResponse`（对端协议级错误响应）时跳过事件派发；
+    /// 其他原因（超时 / I/O / 映射失败等）照常派发——只压结构性噪声，
+    /// 不掩盖真实异常形态。
+    SuppressReceiverSlotErrorResponse,
+}
+
 /// 按策略链探测一次电量。全部失败返回 `Err(未知原因分类)`（UI 显示"电量未知"）。
 pub fn probe_battery<C: HidChannel, S: EventSink>(
     t: &mut Transport<C, S>,
@@ -206,6 +222,29 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
     features: &FeatureTable,
     curve: &str,
     is_hidpp1: bool,
+) -> Result<BatteryReading, UnknownReason> {
+    probe_battery_with_policy(
+        t,
+        device_id,
+        device_index,
+        features,
+        curve,
+        is_hidpp1,
+        UnknownDiagPolicy::Emit,
+    )
+}
+
+/// `probe_battery` 的诊断策略变体（F5 次修 P2）：行为与默认完全一致，
+/// 仅终态 `BatteryUnknown` 事件的派发受 `policy` 控制。
+#[allow(clippy::too_many_arguments)]
+pub fn probe_battery_with_policy<C: HidChannel, S: EventSink>(
+    t: &mut Transport<C, S>,
+    device_id: &str,
+    device_index: u8,
+    features: &FeatureTable,
+    curve: &str,
+    is_hidpp1: bool,
+    policy: UnknownDiagPolicy,
 ) -> Result<BatteryReading, UnknownReason> {
     let emit = |t: &mut Transport<C, S>, kind: DiagKind| {
         t.sink_mut().emit(DiagEvent::new(Layer::Device, kind));
@@ -339,14 +378,21 @@ pub fn probe_battery<C: HidChannel, S: EventSink>(
         None if !any_encodable => UnknownReason::NoBatteryFeatures,
         None => UnknownReason::QueryTimeout,
     };
-    emit(
-        t,
-        DiagKind::BatteryUnknown {
-            id: device_id.to_string(),
-            reason: reason.code().to_string(),
-            detail: last_detail,
-        },
-    );
+    // F5 次修 P2：#255 结构性 error_response 噪声按策略压掉（tray 侧
+    // 以 debug 级 bootlog 记录），其余形态照常派发——降级只针对
+    // 「注定失败的误分类探测」，真实异常仍可观测。
+    let suppressed = policy == UnknownDiagPolicy::SuppressReceiverSlotErrorResponse
+        && reason == UnknownReason::ErrorResponse;
+    if !suppressed {
+        emit(
+            t,
+            DiagKind::BatteryUnknown {
+                id: device_id.to_string(),
+                reason: reason.code().to_string(),
+                detail: last_detail,
+            },
+        );
+    }
     Err(reason)
 }
 

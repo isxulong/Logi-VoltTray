@@ -79,7 +79,7 @@ mod imp {
         UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
         WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
-    use volttray_device::battery::{probe_battery, UnknownReason};
+    use volttray_device::battery::{probe_battery, probe_battery_with_policy, UnknownDiagPolicy, UnknownReason};
     use volttray_device::handshake::{handshake, Handshake, NoResponseCause};
     use volttray_device::identity::read_unit_id;
     use volttray_device::name::read_device_name;
@@ -304,12 +304,34 @@ mod imp {
             }
         };
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
-        let reading = match probe_battery(&mut t, &id, slot, &features, CURVE, is_hidpp1) {
+        // F5 次修 P2：#255（0xFF 接收器直连槽）的 error_response 是握手
+        // 误分类后的结构性噪声（每轮枚举必现，非设备异常），按策略压掉
+        // BatteryUnknown 诊断事件，仅在此留 debug 级 bootlog；真实设备
+        // 槽位照常派发（Emit）。
+        let unknown_policy = if slot == 0xFF {
+            UnknownDiagPolicy::SuppressReceiverSlotErrorResponse
+        } else {
+            UnknownDiagPolicy::Emit
+        };
+        let reading = match probe_battery_with_policy(
+            &mut t,
+            &id,
+            slot,
+            &features,
+            CURVE,
+            is_hidpp1,
+            unknown_policy,
+        ) {
             Ok(r) => r,
             Err(reason) => {
                 bootlog::note(&format!(
-                    "slot scan: {id} battery query failed reason={} (slot skipped)",
-                    reason.code()
+                    "slot scan: {id} battery query failed reason={} (slot skipped){}",
+                    reason.code(),
+                    if slot == 0xFF && reason == UnknownReason::ErrorResponse {
+                        " [receiver-slot noise: BatteryUnknown event suppressed]"
+                    } else {
+                        ""
+                    }
                 ));
                 // v0.3.11（F1/F2）：探测阶段 I/O 类失败同样是句柄可疑证据。
                 return Err(match reason {
@@ -1035,9 +1057,14 @@ mod imp {
                         // 持续动鼠标时在线设备被以 ~0.5Hz 查询电量，是
                         // 1800s 档位的 900 倍）。休眠设备（含本轮新装填
                         // 唤醒资格的）与枚举新注册槽位仍照常探测。
+                        // F5 主修复 (b)：跳过判定从「仅唤醒候选」放宽为
+                        // 「唤醒候选 ∨ 临近灰显豁免」——在线设备距 90s 无
+                        // 成功不足 30s 时放行一次查询，活跃期读数间隔收敛
+                        // 到 ~90s 量级，不再冻结到下一次整轮（≥ 轮询档）
+                        // 后被 90s 墙钟派生误灰、误报离线。
                         if probe_only
                             && pre_enum_ids.contains(&s.id)
-                            && !core.wake_probe_candidate(&s.id)
+                            && !core.probe_round_allows(&s.id, now)
                         {
                             i += 1;
                             continue;
@@ -1235,9 +1262,13 @@ mod imp {
                     reconnect.invalidate_handles();
                 }
                 for id in core.newly_gray(now) {
+                    // F5 主修复第 3 件：原文案「设备离线 / 超过 90 秒未响应」
+                    // 在本路径下是虚假陈述（长轮询档下设备从未被查询，谈不上
+                    // 「未响应」），且灰显 ≠ 离线。改为「电量显示已过期」
+                    // 口径：灰显最后一次已知电量，读数随下轮查询恢复。
                     alerts.push((
-                        "LogiVoltTray 设备离线".into(),
-                        format!("设备 {id} 超过 90 秒未响应，已置灰"),
+                        "LogiVoltTray 电量显示已过期".into(),
+                        format!("设备 {id} 的电量读数已过期，已灰显最后一次已知电量"),
                     ));
                 }
                 let snap = core.snapshot(now);
