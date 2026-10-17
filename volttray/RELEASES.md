@@ -24,6 +24,10 @@
 
 - 历史发布说明中「正常态 30 秒一次的例行枚举」修正为「每个轮询周期（默认 1800s）一次的例行枚举」（30 秒仅为重枚举门控下限），与代码实际行为一致；纯表述修正，无功能变化。
 
+### 发布过程备注（CI clippy 翻车与修复记录）
+
+- 本版合并后首个 CI 运行的 clippy 步骤失败：5 个文件报 Windows 专属错误（`cfg(windows)` 代码在 Linux 侧不可见，含 windows crate 0.62.2 模块路径变更、`OPENFILENAMEW` 无 `Default` 实现、测试闭包借用逃逸等）。修复经 zig 交叉编译（`x86_64-pc-windows-msvc` target）在 Linux 沙箱本地复现全部错误并修完后重新推送，第二个 CI 运行（fmt / clippy / test / build）全绿。教训已固化为经验知识库的发布门禁 B5（Windows 专属改动推送 CI 前必须本地交叉验证，见 `docs/experience/03-release-quality-gate.md`）。
+
 ### 零鼠标电池约束
 
 本版全部改动遵守零鼠标电池红线：唤醒探测仅放行已知休眠设备，在线设备 Skip 语义（D-33）不变，未引入任何对设备的新增主动查询。
