@@ -70,7 +70,8 @@ cargo build --release --locked -p volttray-tray
 2. push 触发 CI：fmt 自动回推（注意**回推错位**，见下）、`clippy -D warnings`、全量测试、release 构建并上传 artifact；
 3. 打 tag 指向 chore 提交；从 CI artifact 取 EXE 传 Release；
 4. Release 说明：中文、「能干什么 / 修了什么 / 要注意什么」三段、未验证项单列、附 sha256 与构建 head_sha；
-5. 发布前照 [03 发布质量门禁](03-release-quality-gate.md) 逐条核验。
+5. 发布前照 [03 发布质量门禁](03-release-quality-gate.md) 逐条核验；
+6. 发布后按 [02 E26](02-collaboration-playbook.md#e26-版本发布后经验回写机制用户常设规则) 把本版本链路的有价值经验回写进本知识库（用户常设规则，首个适用版本 v0.3.16；仅文档提交，不发版、不改版本号）。
 
 **CI 特性必须知道**：ci.yml 的 fmt 步骤会把 `cargo fmt` 结果自动回推 main——main HEAD 经常比构建提交新一个无 CI 的格式化提交。任何「CI 全绿」取证先对齐 head_sha（E5 / 门禁 B2）。
 
