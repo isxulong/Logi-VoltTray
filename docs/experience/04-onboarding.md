@@ -16,13 +16,14 @@ Logi-VoltTray/
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
 ├── .github/workflows/        # ci.yml（fmt 自动回推 + clippy + 测试 + 构建）
 │                             # build-logi.yml / nightly.yml / bootstrap-lock.yml
+├── docs/
+│   └── experience/           # 本知识库（仓库根级 docs/experience/）
 └── volttray/                 # 现行工程：Rust workspace（5 crates）
     ├── Cargo.toml            # workspace 定义 + release profile（版本只改这里）
     ├── .cargo/config.toml    # MSVC 静态链接 CRT（crt-static），消除 VCRUNTIME140.dll 运行时依赖
     ├── RELEASES.md           # 各版本发布说明（v0.3.6 起；最新版本可能滞后，见 §10）
     ├── docs/
-    │   ├── decisions.md      # 实现决策记录 D-01 ~ D-69（最重要的单一文档）
-    │   └── experience/       # 本知识库
+    │   └── decisions.md      # 实现决策记录 D-01 ~ D-71（最重要的单一文档）
     ├── fixtures/             # 协议黄金样例与测试数据（golden/、battery_map_cases.json、
     │                         # features.json、voltage_curves.json 及生成脚本 gen_golden.py）
     ├── fuzz/                 # cargo-fuzz 模糊测试入口（fuzz_targets/frame_fuzz.rs，打协议帧解析）
@@ -59,7 +60,7 @@ cargo build --release --locked -p volttray-tray
 | `device` / `app` | 任意平台 | 纯逻辑单测（状态机、连败裁决、映射、诊断导出降级） |
 | `tray`（cfg windows） | Windows 才有完整功能；非 Windows 平台编译为**占位 stub**（`main.rs` 的 `cfg(not(windows))` 分支：打印「仅支持 Windows」提示并退出），`cargo test --workspace` 能编过但 tray 运行时零覆盖；CI 为 windows-latest，编译与全量测试都在 Windows 跑 | 托盘 / 菜单 / Raw Input 等运行时行为**必须真机验证**——发布说明「未验证项」段的常客 |
 
-- 全量测试（v0.3.13 时点）：**202 项**，`cargo test --workspace`。
+- 全量测试（v0.3.15 时点）：**230 项**（Windows CI 全量），其中 32 项为 `cfg(windows)` 专属——Linux 侧 `cargo test --workspace` 实测 **198 项**；T6 修复合并后净增 19 项单测（「v0.3.15 tag → 合并提交 `700ccf80`」测试名 diff 静态计数口径）。跨口径换算见 [02 E22](02-collaboration-playbook.md#e22-红蓝对抗编排进阶裁决注入断点防御时序核对取数口径) 取数口径段。
 - 测试文化：每个真机事故的修复都伴随「能区分旧行为」的回归测试（例：D-64 的红态证据测试——分档模式 map 无 Default 键，正是真机日志卡点）。
 - 引用测试数时从实测读取，别从汇报抄（E7）。
 
@@ -82,12 +83,13 @@ cargo build --release --locked -p volttray-tray
 5. **配置容错**：未知键忽略 + 警告、越界钳制 / 吸附，绝不因配置拒绝启动；警告逐条入日志。
 6. **验证分级如实**：已验证 / 部分验证 / 未验证 / 阻塞 必须如实标注，失败与过期证据不得润色成通过。
 7. **依赖克制**：不引大型框架 / 非必要依赖（例：配置为手写平面 TOML 子集解析，不引 toml crate——控 EXE 体积与供应链面，D-07）。
+8. **绝不自动删除用户文件**：导出 / 报告等交给用户的文件只增不删，清理权归用户；程序自留地（日志等）单文件有界或轮转、文件数量不无限繁殖（E20 / v0.3.15）。
 
 ## 7. 头号报障场景排查入口：「设备识别不到 / 托盘 ?」
 
 新加入者第一天最可能接到的活就是用户报障。按此顺序排查（各步依据见 [01](01-engineering-lessons.md) 对应条目）：
 
-**第一步：拿到诊断导出 + 重建物理情境。** 让用户用托盘菜单「导出诊断信息」生成 JSON——任何子项失败都会降级为空 + reason，导出本身永不失败（E4 / D-69），放心要。同时问清三件事：鼠标当时是否在休眠、用户有没有动过它、系统是否刚重启（E4 物理解读教训：空导出可能只是鼠标在睡）。
+**第一步：拿到诊断导出 + 重建物理情境。** 让用户用托盘菜单「**诊断面板…**」导出诊断 JSON（菜单项实际名称以此为准，v0.3.15 起弹出「另存为」对话框、保存位置用户自选）——任何子项失败都会降级为空 + reason，导出本身永不失败（E4 / D-69），放心要。同时问清三件事：鼠标当时是否在休眠、用户有没有动过它、系统是否刚重启（E4 物理解读教训：空导出可能只是鼠标在睡）。
 
 **第二步：按字段读诊断。**
 
@@ -97,9 +99,11 @@ cargo build --release --locked -p volttray-tray
 | `log_tail` | `io error (handle suspect)` 连败 → 死句柄（E2）；`handshake no response`（超时 / 协议类）→ 多为设备休眠（E3） |
 | `log_tail` | `rescan round N: channels=n slots=0 ...` 反复出现且 slots 恒为 0 → 0 槽位 + 死缓存句柄死锁（E2；v0.3.11 已修，旧版本唯一出口是手动刷新） |
 | `last_enum`（最近枚举快照） | 候选通道数 / 各通道打开失败原因 → 枚举层问题（接收器未就绪、驱动重载，v0.3.9 / D-65 修复主线） |
+| `last_enum` | 同一台鼠标出现在多条通道（有线模式枚举出 7 个 USB 接口 MI_00~MI_06、各注册一条）→ 确诊 T6 重复条目（E17），无需再查他处 |
 | `devices` 为空数组 | 不等于 bug：先回第一步确认物理情境（E4） |
+| `devices` 事件流 | 「电量显示不准 / 跳变」类报障：文件夹暂无已定性根因——按 E7 纪律先取证（事件流中的连续读数、电量来源回退路径、版本号与轮询档位），如实标注「未定性」，不凭猜测给用户结论 |
 
-**第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）。
+**第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复未随 v0.3.15 发布、将随下一版本发布**——对 ≤v0.3.15 的用户不要说「升级即可修复」，已发布版本暂无经真机验证的临时缓解措施（改用无线连接或重启软件是否有效未经验证，不做推荐）。
 
 **边界**：排查动作同样受红线约束——不要在软件侧为排查增加对休眠设备的主动探测（红线 1 / D-33）。
 
@@ -115,7 +119,7 @@ cargo build --release --locked -p volttray-tray
 | 文档 | 读它解决什么 |
 | --- | --- |
 | 根 `README.md` | 产品功能、配置键、用户视角行为 |
-| `volttray/docs/decisions.md`（D-01 ~ D-69） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
+| `volttray/docs/decisions.md`（D-01 ~ D-71） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | [本知识库 01](01-engineering-lessons.md) | 事故教训三段式 |
 | [本知识库 03](03-release-quality-gate.md) | 发布前逐条核验 |
@@ -124,8 +128,9 @@ cargo build --release --locked -p volttray-tray
 
 ## 10. 已知文档滞后点（以代码为准）
 
-- 根 `README.md`「功能列表 / 快速上手」中的轮询间隔段落仍是 v0.3.9 之前的旧档位（60/300/600/900/1800 秒、默认 600 秒）。现行档位以代码为准：`crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
-- `volttray/RELEASES.md` 当前止于 v0.3.12——v0.3.13 的发布说明只存在于 GitHub Releases 页。找最新版本的说明：先看 GitHub Releases，再对 RELEASES.md。
+- 根 `README.md` 的下载入口与「最新版本」表述可能滞后于实际已发布版本（截至 2026-10-17 仍指向 v0.3.14，而 v0.3.15 已发布）。找最新版本：先看 GitHub Releases 页，再对 `volttray/RELEASES.md`。
+- 轮询档位曾长期存在文档旧口径（60/300/600/900/1800 秒），现已统一为 `crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
+- 「30 秒槽位扫描」旧文档表述为「每 30 秒例行枚举」，实际是嵌在枚举循环内、外层每次迭代才查门限：空闲时一个轮询周期至多扫一次（v0.3.15 起文档口径已修正，定性见 [01 E18](01-engineering-lessons.md#e18-托盘应用性能审查先定性每个周期唤醒几次查几次画几次再谈优化)）。
 
 ## 11. 术语表
 
@@ -151,6 +156,6 @@ cargo build --release --locked -p volttray-tray
 ## 12. 上手第一周建议路径
 
 1. 读本文件 + 根 README，装环境跑通构建与全量测试；
-2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线），理解两条主战场；
-3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 6 条，把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
+2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复），理解三条主战场；
+3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 11 条（E1–E6 + E16–E20），把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
 4. 接到用户报障时先走 §7 排查入口；领任务前读 [02 协作方法论](02-collaboration-playbook.md)，交付前照 [03 门禁清单](03-release-quality-gate.md) 自查。
