@@ -20,6 +20,7 @@
 | B2 | **fmt 自动回推错位已对齐**：若 main HEAD 比构建提交新一个无 CI 的格式化提交，用整树 diff（token 多重集比对）证明语义等价，并在交付中写明 | 对比两个提交的整树。实操：`git diff --name-only <构建sha>..HEAD` 应只列出被 fmt 重排的文件，再对这些文件 `git diff -w`（忽略空白）比对为空即语义等价；无 git 环境时走 GitHub compare API 取两提交的文件列表与 patch 核对 | 拿「HEAD 全绿」当构建提交的证据 |
 | B3 | EXE 内嵌版本资源（FileVersion / ProductVersion）与发布版本一致 | 下载产物查文件属性版本 | 版本资源停留旧版（本项目 v0.3.8 起由 `CARGO_PKG_VERSION` 派生，防手工脱节） |
 | B4 | 构建产物来源可追溯 | 记录 CI run / 构建提交 / 下载渠道 | 「本地随手 build 的包」进 Release |
+| B5 | **Windows 专属改动已过本地交叉验证**：触及 `cfg(windows)` 代码的提交，推送 CI 前已按 Windows target 本地 `cargo check` + `clippy`（如 zig 交叉 `x86_64-pc-windows-msvc`） | 看修复 / 提交记录中的交叉验证说明，或自己复跑 | Linux 侧全绿、Windows CI 第一次编译就炸（v0.3.15 首个 CI run 的 clippy 失败，详见 [01 E16](01-engineering-lessons.md#e16-windows-专属代码合并前必须本地交叉验证别把-ci-当第一道编译器)） |
 
 ## C. 产物校验（证据优于自述）
 
@@ -52,3 +53,5 @@
 - **v0.3.9 打回（P1）**：多设备同睡误判死句柄 → 违反零鼠标电池红线，返工后以 v0.3.10 发布（详见 [01 E3](01-engineering-lessons.md#e3-hid-协议与鼠标休眠的工程现实)）。
 - **fmt 错位取证**：交付二进制的构建提交 ≠ main HEAD（fmt bot 自动回推），用整树 diff 证明语义等价后在交付中说明（详见 [01 E5](01-engineering-lessons.md#e5-ci--github-实战陷阱沙箱与-api-环境)）。
 - **测试数取证**：CI 日志接口 403 时改用「源码实测 + CI test 步骤绿灯」交叉口径，并如实标注未验证边界（详见 [02 E7](02-collaboration-playbook.md#e7-证据优于自述第一原则)）。
+- **v0.3.15 首个 CI run 打回（clippy）**：Linux 侧全绿的提交在 Windows CI 首次编译 `cfg(windows)` 代码即报 5 文件错误（windows crate 模块路径、`OPENFILENAMEW` 无 `Default`、闭包逃逸等）→ 催生门禁 B5（本地交叉验证前置），详见 [01 E16](01-engineering-lessons.md#e16-windows-专属代码合并前必须本地交叉验证别把-ci-当第一道编译器)。
+- **T6 红队 P1 打回（数据完整性）**：设备身份晋级路径采信别名槽位冻结的 unitId，RF 重配对场景下会把 A 鼠标的台账绑到 B 端点 → 必修「晋级前重新验明 unitId」后放行，裁决原话「数据完整性风险不用进度换」（详见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）。
