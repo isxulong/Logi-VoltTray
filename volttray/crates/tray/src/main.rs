@@ -79,7 +79,9 @@ mod imp {
         UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
         WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
-    use volttray_device::battery::{probe_battery, probe_battery_with_policy, UnknownDiagPolicy, UnknownReason};
+    use volttray_device::battery::{
+        probe_battery, probe_battery_with_policy, UnknownDiagPolicy, UnknownReason,
+    };
     use volttray_device::handshake::{handshake, Handshake, NoResponseCause};
     use volttray_device::identity::read_unit_id;
     use volttray_device::name::read_device_name;

@@ -147,7 +147,6 @@ fn hidpp1_device_uses_register() {
     assert_eq!(r.source, BatterySource::Hidpp1Register0x0D);
 }
 
-
 /// F5 次修 P2：#255 接收器直连槽的结构性 error_response 噪声——
 /// Suppress 策略下压掉 BatteryUnknown 事件（tray 侧改记 debug 级
 /// bootlog），返回分类不变；默认 Emit 策略行为不变（事件照常派发）。

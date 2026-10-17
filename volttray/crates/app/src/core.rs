@@ -476,7 +476,8 @@ impl AppCore {
         let threshold = self.gray_threshold();
         let mut out = Vec::new();
         for e in &mut self.entries {
-            if e.device.state == DeviceState::Online && e.is_gray(now, threshold) && !e.gray_alerted {
+            if e.device.state == DeviceState::Online && e.is_gray(now, threshold) && !e.gray_alerted
+            {
                 e.gray_alerted = true;
                 out.push(e.device.name.clone());
             }
@@ -675,8 +676,13 @@ mod tests {
         core.record_success("a", reading(80, false), t0);
         // F5 主修复 (a)：默认档 1800s 下阈值锚定为 3600s，91s 不再触发。
         let threshold = core.gray_threshold();
-        assert_eq!(threshold, GRAY_AFTER.max(Duration::from_secs(1800) * GRAY_MIN_POLLS));
-        assert!(core.newly_gray(t0 + GRAY_AFTER + Duration::from_secs(1)).is_empty());
+        assert_eq!(
+            threshold,
+            GRAY_AFTER.max(Duration::from_secs(1800) * GRAY_MIN_POLLS)
+        );
+        assert!(core
+            .newly_gray(t0 + GRAY_AFTER + Duration::from_secs(1))
+            .is_empty());
         let later = t0 + threshold + Duration::from_secs(1);
         assert_eq!(core.newly_gray(later), vec!["Mouse a".to_string()]);
         assert!(core.newly_gray(later).is_empty()); // 不重复
@@ -739,7 +745,10 @@ mod tests {
         let before = t0 + Duration::from_secs(59);
         assert!(!core.probe_round_allows("a", before));
         assert!(!core.probe_round_allows("b", before));
-        assert!(!core.probe_round_allows("ghost", before), "未注册 id 不放行");
+        assert!(
+            !core.probe_round_allows("ghost", before),
+            "未注册 id 不放行"
+        );
         // 窗口内（61s）：豁免命中，探测轮放行一次查询。
         let near = t0 + Duration::from_secs(61);
         assert!(core.probe_round_allows("a", near), "临近灰显豁免应放行");
@@ -754,7 +763,10 @@ mod tests {
         let _ = core.record_timeout("b");
         assert!(core.wake_probe_candidate("b"));
         assert!(!core.near_gray_exemption("b", near), "休眠设备不吃在线豁免");
-        assert!(core.probe_round_allows("b", near), "休眠候选仍由唤醒路径放行");
+        assert!(
+            core.probe_round_allows("b", near),
+            "休眠候选仍由唤醒路径放行"
+        );
         assert!(!core.wake_probe_candidate("a"), "在线设备不是唤醒候选");
     }
 
@@ -773,7 +785,10 @@ mod tests {
         core.record_success("b", reading(30, false), t0 + Duration::from_secs(40));
         let near = t0 + Duration::from_secs(61);
         assert!(core.probe_round_allows("a", near));
-        assert!(!core.probe_round_allows("b", near), "豁免按设备计时，不连坐");
+        assert!(
+            !core.probe_round_allows("b", near),
+            "豁免按设备计时，不连坐"
+        );
         // b 真离线：连续两次超时 → Sleeping（既有路径原样）。
         assert_eq!(core.record_timeout("b"), TimeoutOutcome::Counting(1));
         assert_eq!(core.record_timeout("b"), TimeoutOutcome::EnteredSleep);
