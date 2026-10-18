@@ -469,12 +469,13 @@ fn apply_alpha_pulse(rgba: &mut [u8], factor: f64) {
     }
 }
 
-/// #5：由字形墨迹边界框计算「居中所需平移量」。
+/// v0.3.18（U-4）：扫描字形墨迹边界框（替代 ink_center_shift 的「平移量」
+/// 形式——探针流程需要的是 bbox 本身：既判定真实墨迹是否超出背景块，
+/// 也用作输出位图开窗居中的锚点）。
 ///
 /// 墨迹判定阈值 0x10（BGRA 任意通道亮度）；无墨迹（空文本/字体回退失败）
-/// 返回 (0, 0)。目标位置 = bbox 居中于位图：左上角平移到
-/// ((size - w) / 2, (size - h) / 2)，对齐偏差允许 ±1px（整数除法余数）。
-fn ink_center_shift(src: &[u8], size: i32) -> (i32, i32) {
+/// 返回 None。有墨迹返回闭区间 (x0, y0, x1, y1)。
+fn ink_bbox(src: &[u8], size: i32) -> Option<(i32, i32, i32, i32)> {
     let stride = size as usize;
     let mut x0 = i32::MAX;
     let mut x1 = i32::MIN;
@@ -490,12 +491,7 @@ fn ink_center_shift(src: &[u8], size: i32) -> (i32, i32) {
             y1 = y1.max(py);
         }
     }
-    if x0 > x1 {
-        return (0, 0);
-    }
-    let w = x1 - x0 + 1;
-    let h = y1 - y0 + 1;
-    ((size - w) / 2 - x0, (size - h) / 2 - y0)
+    (x0 <= x1).then_some((x0, y0, x1, y1))
 }
 
 /// GDI 渲染：黑底白字取覆盖率，再按「形状底 + 字色」直出 RGBA。
@@ -540,8 +536,10 @@ pub fn render_text_bitmap(
         size_i * 3 / 4
     };
     let mut font_h = (base_h * ts / 100).max(1).min(cap);
-    // 数字宽度 ≈ 0.55 × 字高；CJK 宽度 ≈ 1.0 × 字高。
-    let mut est_w: i32 = chars
+    // 数字宽度 ≈ 0.55 × 字高；CJK 宽度 ≈ 1.0 × 字高。估算字宽只用于
+    // 首轮候选字高：超宽先按比例缩字作起点——估算对粗字重字体系统性
+    // 偏小（U-4 根因），最终是否放得下由下方探针循环按真实墨迹判定。
+    let est_w: i32 = chars
         .iter()
         .map(|c| {
             if c.is_ascii() {
@@ -552,12 +550,17 @@ pub fn render_text_bitmap(
         })
         .sum();
     if est_w > cap {
-        // 超宽：按 cap/est_w 比例缩字，保证文本不溢出背景块（est_w 与 font_h 成比例，缩后即 cap）。
+        // 超宽：按 cap/est_w 比例缩字（est_w 与 font_h 成比例，缩后即 cap）。
         font_h = (font_h * cap / est_w.max(1)).max(1);
-        est_w = cap;
     }
-    let x = ((size_i - est_w) / 2).max(0);
-    let y = ((size_i - font_h) / 2).max(0);
+    // v0.3.18（U-4）：探针画布边长 = 位图 + 2×cap。旧流程按估算位置直接
+    // 在输出位图上落字，再按墨迹 bbox 平移修正——估算偏小时文字已被
+    // 位图边缘裁切，bbox 扫到的是残缺墨迹，修正无效（图2：Arial Black
+    // @160% 底部裁切、未居中）。改为在放大的探针画布上真实落字、量
+    // 真实墨迹、按 bbox 居中开窗拷贝回输出位图，从根上消除对估算精度
+    // 的依赖。
+    let ps = size_i + 2 * cap;
+    let ps_n = (ps * ps) as usize;
     let text_w: Vec<u16> = text.encode_utf16().collect();
     let face_w = wide(face);
 
@@ -569,8 +572,8 @@ pub fn render_text_bitmap(
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size_i,
-                biHeight: -size_i, // top-down
+                biWidth: ps,
+                biHeight: -ps, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -584,39 +587,70 @@ pub fn render_text_bitmap(
             return rgba;
         };
         if !bits.is_null() {
-            std::ptr::write_bytes(bits, 0, n * 4);
             let old = SelectObject(hdc, HGDIOBJ(hbmp.0));
-            let font = CreateFontW(
-                -font_h,
-                0,
-                0,
-                0,
-                700,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                Default::default(),
-                Default::default(),
-                ANTIALIASED_QUALITY,
-                0,
-                PCWSTR::from_raw(face_w.as_ptr()),
-            );
-            let old_font = SelectObject(hdc, HGDIOBJ(font.0));
             let _ = SetBkMode(hdc, TRANSPARENT);
             let _ = SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
-            // 第一遍：按估算位置落字。
-            let _ = TextOutW(hdc, x, y, &text_w);
-            // #5：按字形实际墨迹边界框计算居中平移量。
-            let probe = std::slice::from_raw_parts(bits as *const u8, n * 4);
-            let (dx, dy) = ink_center_shift(probe, size_i);
-            if dx != 0 || dy != 0 {
-                // 第二遍：清空后在平移后的位置重画。
-                std::ptr::write_bytes(bits, 0, n * 4);
-                let _ = TextOutW(hdc, x + dx, y + dy, &text_w);
+            // 探针循环（U-4）：候选字高在探针画布上真实落字 → 扫真实墨迹
+            // bbox → 超过背景块即按比例缩字重试。步进 (font_h/8).max(1)，
+            // 粗字体 2~4 次收敛；32 次迭代保底（font_h 到 1 必停）。
+            // 收敛后墨迹 bbox 必然 ≤ block ≤ size——预览（U-5 单一渲染源后
+            // 即本函数产物）与任务栏都不会再出现裁切。
+            let mut ink: Option<(i32, i32, i32, i32)> = None;
+            for _ in 0..32 {
+                std::ptr::write_bytes(bits, 0, ps_n * 4);
+                let font = CreateFontW(
+                    -font_h,
+                    0,
+                    0,
+                    0,
+                    700,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    Default::default(),
+                    Default::default(),
+                    ANTIALIASED_QUALITY,
+                    0,
+                    PCWSTR::from_raw(face_w.as_ptr()),
+                );
+                let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+                let cur_est_w: i32 = chars
+                    .iter()
+                    .map(|c| {
+                        if c.is_ascii() {
+                            font_h * 11 / 20
+                        } else {
+                            font_h
+                        }
+                    })
+                    .sum();
+                // 候选位置：按估算宽高在探针画布居中（估算偏小只会让墨迹
+                // 略偏，bbox 扫描会量出真实位置，不影响结果正确性）。
+                let _ = TextOutW(hdc, (ps - cur_est_w) / 2, (ps - font_h) / 2, &text_w);
+                SelectObject(hdc, old_font);
+                let _ = DeleteObject(HGDIOBJ(font.0));
+                let probe = std::slice::from_raw_parts(bits as *const u8, ps_n * 4);
+                ink = ink_bbox(probe, ps);
+                let fits = ink.is_some_and(|(x0, y0, x1, y1)| {
+                    x1 - x0 + 1 <= block && y1 - y0 + 1 <= block
+                });
+                // 无墨迹（空文本/字体回退失败）或已放进背景块：收工；
+                // font_h 到 1 仍放不下的极端情形接受当前结果——输出按
+                // bbox 居中开窗拷贝，超出部分裁掉但保持居中（旧行为是
+                // 既裁切又偏移，此处严格更优）。
+                if fits || ink.is_none() || font_h <= 1 {
+                    break;
+                }
+                font_h = (font_h - (font_h / 8).max(1)).max(1);
             }
-            // BGRA → RGBA：取字覆盖度（亮度），与形状底色合成。
-            let src = std::slice::from_raw_parts(bits as *const u8, n * 4);
+            // BGRA → RGBA：以墨迹 bbox 中心为锚，在探针上开 size×size
+            // 窗口取字覆盖度（亮度），与形状底色合成。
+            let src = std::slice::from_raw_parts(bits as *const u8, ps_n * 4);
+            let (off_x, off_y) = ink.map_or((0, 0), |(x0, y0, x1, y1)| {
+                ((x0 + x1 + 1 - size_i) / 2, (y0 + y1 + 1 - size_i) / 2)
+            });
+            let has_ink = ink.is_some();
             let cx = (size_i - 1) as f32 / 2.0;
             // v0.3.4 #4：背景块几何基于 block（100% 时与 v0.3.3 相同）。
             let radius = block as f32 / 2.0;
@@ -624,8 +658,15 @@ pub fn render_text_bitmap(
             let hi = lo + block - 1;
             for i in 0..n {
                 let (py, px) = ((i / size as usize) as i32, (i % size as usize) as i32);
-                let (bb, gg, rr) = (src[i * 4], src[i * 4 + 1], src[i * 4 + 2]);
-                let t = bb.max(gg).max(rr) as f32 / 255.0;
+                // 开窗拷贝：输出像素 (px,py) 对应探针 (px+off_x, py+off_y)，
+                // bbox 中心恰好落在输出位图中心（cx）；越界视为无墨迹。
+                let (qx, qy) = (px + off_x, py + off_y);
+                let t = if has_ink && qx >= 0 && qy >= 0 && qx < ps && qy < ps {
+                    let s = ((qy * ps + qx) * 4) as usize;
+                    src[s].max(src[s + 1]).max(src[s + 2]) as f32 / 255.0
+                } else {
+                    0.0
+                };
                 let (br, bgc, bb_, ba) = match bg {
                     Some((br_, bg__, bl_)) => {
                         // 形状覆盖度：圆底 = 内切圆 1px 软边缘；直角 = 四边 1px 软边缘。
@@ -663,9 +704,7 @@ pub fn render_text_bitmap(
                 rgba[i * 4 + 2] = mix(b, bb_);
                 rgba[i * 4 + 3] = (out_a * 255.0 + 0.5) as u8;
             }
-            SelectObject(hdc, old_font);
             SelectObject(hdc, old);
-            let _ = DeleteObject(HGDIOBJ(font.0));
         }
         let _ = DeleteObject(HGDIOBJ(hbmp.0));
         let _ = DeleteDC(hdc);
