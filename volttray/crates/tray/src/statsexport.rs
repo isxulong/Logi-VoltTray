@@ -372,9 +372,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         }
         // R-5：自有字体对象随对话框关闭释放（stock 对象不删）。
         if font_owned {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(ui_font.0));
-            }
+            let _ = DeleteObject(HGDIOBJ(ui_font.0));
         }
         state.result
     }
