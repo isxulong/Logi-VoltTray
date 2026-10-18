@@ -1,5 +1,39 @@
 # 发布说明
 
+## v0.3.17
+
+真机五问题终审修复（二轮 R-1~R-9、R-11）+ 项目级一审 P0 五条落地。
+
+### 电量与扫描纪律（R-1 / R-2）
+
+- **R-1 0xFF 电量探测 run 内负缓存**：接收器 0xFF 槽位电量查询返回 error_response 后，本次运行内不再重复探测该槽位电量（消除每轮一次的无效查询）；强制枚举（手动刷新/唤醒）清缓存立即穿透。负缓存仅抑制 HID++ 2.0 接收器槽位；HID++ 1.0 直连设备（无 error_response 语义）下一轮自动清缓存重试，不被长期误抑。
+- **R-2 死槽扫描降频**：握手连续 10 轮无响应超时的槽位进入冷却，每 10 轮扫 1 次（复用 SlotScanStreak 模式）；响应或 IO 错误即复位，强制枚举清零。**权衡披露：新配对设备自动发现延迟由 ≤30s 放宽至 ≤5 分钟；0 注册槽位时动鼠标立即穿透，已有注册设备时请点「立即刷新」手动穿透。**
+
+### 唤醒链（R-3 / R-4）
+
+- **R-3 唤醒装填扩展**：通道归因成功路径装填范围扩为 Sleeping∪(Online∧灰显)（灰显在线设备同获探测资格）；arm-all 仍仅 Sleeping，但当 Online-灰显恰为 1 台时一并装填（误装填他机代价为零）。
+- **R-4 裁决链可观测**：唤醒决策链落 bootlog（attribution 结果 / 装填集合 / 动作）；attribution miss 日志采样为每分钟 1 条 + 窗口内压制计数（蓝牙/有线系统性 miss 不再刷屏）；鼠标活动稳态下的零信息决策行（归因成功但未装填、保持休眠）同样按每分钟 1 条 + 计数采样，装填/探测/失败等状态跃迁行仍逐条保留。
+
+### 界面与文案（R-5 ~ R-9）
+
+- **R-5 导出对话框字体回退栈**：Microsoft YaHei UI → Segoe UI → MS Shell Dlg 2，EnumFontFamiliesExW 实测存在性、逐控件 WM_SETFONT（修复简体中文系统对话框乱码）；三选皆缺退回 DEFAULT_GUI_FONT。
+- **R-6 复选框宽度实测**：GetTextExtentPoint32W 实测文本宽 +20% 余量 + 勾选框占位，窗口宽运行时计算不再硬编码（长文本不再截断）。
+- **R-7 菜单更名**：「诊断面板…」→「导出诊断信息…」（与实际另存为导出行为对齐，README 同步）。
+- **R-8 双预览标签拆分**：设置页 1×「任务栏实际效果」与 4×「放大（像素细节）」各自署名，不再一签双义。
+- **R-9 功耗文案补全**：轮询间隔提示追加「设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关」。
+
+### 诊断导出（R-11）
+
+- summary 追加六类字段：frame_tx/rx 帧计数、avg_tx_interval_ms 平均写间隔（无样本省略键）、feature_index 收发分类计数（HID++ 帧第 3 字节，2.0 帧为功能索引、1.0 帧为 sub_id）、arm_all 装填与唤醒成功数、miss 子分类（no-path / no-match / ambiguous）。仅追加，既有字段与结构不动；帧遥测在 SharedChannel write/read 挂钩（get_feature_report 控制传输不计入）。
+
+### 项目级一审 P0
+
+- **LICENSE 入库**：MIT（Copyright (c) 2026 isxulong），README 许可证指向改 LICENSE 文件。
+- **CI 卫生**：新增 pull_request 触发；fmt 从 bot 直推 HEAD:main 改为 --check 失败由作者本地修；CI 权限降 contents: read；协议冻结 Python 门禁入 CI。
+- **RefreshNow 竞态修复**：循环顶 try_recv 显式匹配转发 request_refresh（修复唤醒裁决后手动刷新被静默丢弃），含时序单测。
+- **协议冻结门禁修复**：RED_DIR 指向库内 red/（原指父目录常年 FileNotFoundError）、red 基线逆推重建、构造差异断言改 difflib 结构性。
+- **配置落盘原子写**：persist_kv / 默认配置回写 / 设置应用统一 tmp→rename；persist_kv 键匹配由前缀改等号锚定；4 处静默吞错接 bootlog（delete→rename 残余窗口为已知风险，见提交说明）。
+
 ## v0.3.16
 
 v3 设计包整体落地：D-72 电量图标「?」/ 误报离线修复 + WP-A 持久化与休眠 + WP-C 按设备计时轮询 + WP-B 耗电统计。全程遵守零鼠标电耗红线（休眠设备零主动查询，统计只消费已有轮询/唤醒读数）。
