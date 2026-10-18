@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::icon::{font_rgb, render_text_bitmap, IconColor};
+use crate::icon::{cache_from_config, font_rgb, IconColor};
 use volttray_app::autostart;
 use volttray_app::config::{
     colorref_to_rgb, contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers,
@@ -187,7 +187,7 @@ const IDC_FONT_SWATCH: i32 = 2043;
 const IDC_TIER_HINT: i32 = 2044;
 /// 背景覆盖度说明。
 const IDC_COVER_HINT: i32 = 2045;
-/// 4× 放大预览。
+/// 放大预览（v0.3.18 U-3：144 逻辑像素画布，不再标注倍数）。
 const IDC_PREVIEW_BIG: i32 = 2046;
 /// 轮询间隔说明提示。
 const IDC_INTERVAL_HINT: i32 = 2047;
@@ -212,10 +212,9 @@ const IDC_LOW_RANGE: i32 = 2069;
 /// 倍数（用户只看布局，实际大小以任务栏为准），标签文案固定「预览」。
 const IDC_LBL_PREVIEW_BIG: i32 = 2070;
 
-/// 预览位图边长（逻辑像素；实际按 DPI 缩放）。
-const PREVIEW_PX: i32 = 48;
-/// v0.3.18（U-3）：放大预览画布边长（逻辑像素）——4×(192) 略大，收敛到
-/// 144（96dpi 下恰为 3×）；画布与源位图尺寸推得整数放大倍率，不写死。
+/// v0.3.18（U-3/U-5）：放大预览画布边长（逻辑像素）——4×(192) 略大，
+/// 收敛到 144（96dpi 下恰为 3×）；画布与源位图（托盘档位尺寸）推得
+/// 整数放大倍率，不写死。源位图边长即 tray_size，不再有独立预览尺寸。
 const PREVIEW_BIG_PX: i32 = 144;
 /// 分档色点边长（规范裁决 2：16×16 圆点）。
 const DOT_PX: i32 = 16;
@@ -368,6 +367,9 @@ struct Ctx {
     /// 持久化路径。
     path: PathBuf,
     dark_theme: bool,
+    /// v0.3.18（U-5）：托盘图标位图边长（当前 DPI 档）——预览单一渲染源
+    /// 的渲染尺寸，打开窗口时由主事件循环传入。
+    tray_size: u32,
     /// 程序化同步控件时抑制自身事件。
     syncing: Cell<bool>,
     /// 预览文本（如当前电量数字）。
@@ -472,7 +474,15 @@ fn settings_applied_note(prev: &Config, next: &Config) -> String {
 }
 
 /// 打开（或前置）设置窗口。`preview_text` 为预览数字（如当前电量文本）。
-pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, preview_text: &str) {
+/// v0.3.18（U-5）：`tray_size` 为托盘图标当前 DPI 档位位图边长——预览
+/// 走单一渲染源，须与任务栏同尺寸渲染再放大，否则预览与真机不对应。
+pub fn open_settings(
+    arc: &Arc<RwLock<Config>>,
+    path: &Path,
+    dark_theme: bool,
+    tray_size: u32,
+    preview_text: &str,
+) {
     // v0.3.7（D-63）：设置窗口注册/创建是启动后关键路径之一，失败留痕。
     crate::bootlog::stage("settings-open");
     let existing = SETTINGS_HWND.load(Ordering::SeqCst);
@@ -569,6 +579,7 @@ pub fn open_settings(arc: &Arc<RwLock<Config>>, path: &Path, dark_theme: bool, p
             arc: arc.clone(),
             path: path.to_path_buf(),
             dark_theme,
+            tray_size,
             syncing: Cell::new(false),
             preview_text: preview_text.to_string(),
             theme: theme(dark_theme),
@@ -2169,20 +2180,18 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         cfg.icon_font_color,
         tiers,
     );
-    let bg_opt = (cfg.icon_shape != IconShape::Transparent).then_some(cfg.icon_background.rgb());
-    let px = ctx.sc(PREVIEW_PX);
-    let rgba = render_text_bitmap(
-        px as u32,
-        &ctx.preview_text,
-        rgb,
-        bg_opt,
-        cfg.icon_shape,
-        &cfg.icon_font_family,
-        cfg.icon_text_scale,
-        cfg.icon_bg_scale,
-    );
+    // v0.3.18（U-5，单一渲染源）：预览位图直接取自真实托盘图标的渲染
+    // 结果——按当前草稿配置临时构建 IconCache，走与任务栏完全相同的
+    // IconCache::render_frame 路径、同一位图尺寸（tray_size），不再维护
+    // 第二套「相似」实现（旧实现独立调 render_text_bitmap，图3 证实两者
+    // 在大字体下结果不一致：预览显示包裹、任务栏实际溢出）。缓存每次
+    // 刷新按草稿重建，滑块拖动即时可见（R4 AF-4）；单帧渲染成本与
+    // 任务栏同级，可忽略。
+    let cache = cache_from_config(&cfg, ctx.tray_size, ctx.dark_theme);
+    let rgba = cache.render_frame_rgba(level, &ctx.preview_text);
+    let px = ctx.tray_size as i32;
 
-    // 合成到 6 格棋盘底（同时示意深浅两种任务栏），再建 HBITMAP。
+    // 合成到棋盘底（同时示意深浅两种任务栏），再建 HBITMAP。
     let n = (px * px) as usize;
     let mut bgra = vec![0u8; n * 4];
     let cell = (px / 6).max(1);

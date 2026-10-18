@@ -2968,7 +2968,9 @@ mod imp {
                     .and_then(|d| d.percent)
                     .map(|p| icon_text(Some(p), false))
                     .unwrap_or_else(|| "50".to_string());
-                crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, &preview);
+                // v0.3.18（U-5）：预览走单一渲染源，需与托盘同一 DPI 档位
+                // 位图边长（cur_size 随 DPI/配置变化在事件循环中维护）。
+                crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, *cur_size, &preview);
             } else if e.id == ids.diag {
                 export_diag(observer, enum_snap, channel_map_miss);
             } else if e.id == ids.stats_export {

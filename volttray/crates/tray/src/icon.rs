@@ -344,6 +344,14 @@ impl IconCache {
         rgba
     }
 
+    /// v0.3.18（U-5，单一渲染源）：设置窗预览直接取用真实托盘图标的
+    /// 常态帧位图——与任务栏同一函数、同一渲染结果，预览不再维护
+    /// 第二套相似实现。固定 bright=false（常态帧；R4 BF-9：闪烁提亮帧
+    /// 不是用户在任务栏看到的常态，预览呈现常态才有对照意义）。
+    pub fn render_frame_rgba(&self, color: IconColor, text: &str) -> Vec<u8> {
+        self.render_frame(color, text, false)
+    }
+
     /// 任何渲染输入变化（DPI 档 / 主题 / 形状 / 背景 / 字色 / 字体 / 分档表 /
     /// 文本与背景缩放）时重建缓存。
     #[allow(clippy::too_many_arguments)]
