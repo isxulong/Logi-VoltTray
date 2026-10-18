@@ -653,6 +653,12 @@ def check_html(ck, path, events, segments, keys, off):
 
 
 def main():
+    # Windows 控制台/管道默认编码（cp1252/GBK）无法输出中文摘要——
+    # 统一把 stdout/stderr 重配为 UTF-8（CI windows-latest 实测 cp1252
+    # UnicodeEncodeError；Python 3.7+ reconfigure 可用，3.6 及以下跳过）。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="WP-B（I-08）耗电统计导出复算对账")
     ap.add_argument("--stats", required=True, help="当前 stats.jsonl")
     ap.add_argument("--archive", help="stats.archive.jsonl（轮转后旧文件，先读）")
