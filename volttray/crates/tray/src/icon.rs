@@ -645,8 +645,7 @@ pub fn render_text_bitmap(
                 let _ = DeleteObject(HGDIOBJ(font.0));
                 let probe = std::slice::from_raw_parts(bits as *const u8, ps_n * 4);
                 ink = ink_bbox(probe, ps);
-                let fits = ink
-                    .is_some_and(|(x0, y0, x1, y1)| x1 - x0 + 1 <= block && y1 - y0 + 1 <= block);
+                let fits = ink.is_some_and(|(x0, y0, x1, y1)| x1 - x0 < block && y1 - y0 < block);
                 // 无墨迹（空文本/字体回退失败）或已放进背景块：收工；
                 // font_h 到 1 仍放不下的极端情形接受当前结果——输出按
                 // bbox 居中开窗拷贝，超出部分裁掉但保持居中（旧行为是
