@@ -22,8 +22,15 @@
 //! | `icon_font_tiers_enabled` | bool | `true` | 按电量分档着色（v0.3.5 #5 默认开：字体颜色「自动(按电量档位)」即分档；旧配置「勾选关 + auto」迁移为开，D-56） |
 //! | `icon_font_tier_thresholds` | int 数组 | `[20, 50]` | N-1 个边界（N 档 2..=5）；阈值含该值归上一档；1–99 严格递增（越界钳制 / 递进修复 + 警告） |
 //! | `icon_font_tier_colors` | str 数组 | `["#E81123", "#FFD21F", "#00CC6A"]` | N 个分档色（缺失补默认色、多余截断 + 警告） |
-//! | `icon_text_scale` | int | `100` | `40`–`160`，图标文本大小（%，D-48/D-57 范围拓展，越界钳制） |
+//! | `icon_text_scale` | int | `140` | `40`–`160`，图标文本大小（%，D-48/D-57 范围拓展，越界钳制；v0.3.18 默认 100→140，U-1） |
+//! | `icon_text_scale_migrated_v0318` | bool | `true` | v0.3.18 默认值迁移标记（U-1）：缺失且 scale 恰为旧默认 100 → 迁 140 + 警告 |
 //! | `icon_bg_scale` | int | `100` | `20`–`100`，图标背景覆盖度（%，D-57；100% = 满出血零边距，几何上限） |
+//!
+//! `icon_text_scale` 百分数基准语义（v0.3.18 查证并冻结，R4 BF-3）：
+//! 100% = 字高 = 托盘位图边长 ×5/8（≥2 字符）/ ×3/4（单字符）——v0.3.3
+//! 起冻结的几何，与系统字号/DPI 无关；位图边长随 DPI 档位缩放
+//! （96dpi→16px，100% 档两位数文本字高仅 10px，是「默认偏小」的根因）；
+//! 96dpi 下两位数文本的有效上限 ≈140%（再大触发按背景块宽度的缩字）。
 //!
 //! 废弃键（保留迁移语义）：
 //! - `low_threshold_warn`：迁移为 `low_threshold`（钳 5..=50）+ 警告；
@@ -54,6 +61,11 @@ pub const LOW_THRESHOLD_MAX: u8 = 50;
 pub const ICON_TEXT_SCALE_MIN: u8 = 40;
 /// 图标文本大小上限（%，D-48；D-57 由 140 拓展到 160）。
 pub const ICON_TEXT_SCALE_MAX: u8 = 160;
+/// 图标文本大小默认值（%，v0.3.18 U-1）：100% 档在 96dpi（位图 16px）
+/// 下字高仅 10px（边长×5/8），用户反馈默认偏小、日常使用顶格 160；
+/// 140% ≈ 96dpi 下两位数文本的有效上限（字高 14px 恰好顶满背景块
+/// 15/16 安全边，再大即触发缩字），默认值一步到位、不浪费档位。
+pub const ICON_TEXT_SCALE_DEFAULT: u8 = 140;
 /// 图标背景覆盖度下限（%，D-57 由 60 拓展到 20）。
 pub const ICON_BG_SCALE_MIN: u8 = 20;
 /// 图标背景覆盖度上限（%，D-48/D-57）：100% = 满出血零边距，已触及位图
@@ -470,8 +482,14 @@ pub struct Config {
     pub icon_font_tier_thresholds: Vec<u8>,
     /// 分档颜色（N 个，默认红/黄/绿）。
     pub icon_font_tier_colors: Vec<RgbColor>,
-    /// 图标文本大小（% 相对基准字号，D-48/D-57），默认 100，范围 40..=160。
+    /// 图标文本大小（% 相对基准字号，D-48/D-57；基准语义见模块文档），
+    /// 默认 140（v0.3.18 U-1，原 100），范围 40..=160。
     pub icon_text_scale: u8,
+    /// v0.3.18（U-1）默认值迁移标记：缺失（旧配置）且 icon_text_scale
+    /// 恰为旧默认 100 → 视为「从未调整过」迁到 140 + 警告；标记存在即
+    /// 不再迁移。解析后恒置 true 并随 to_toml 写出；旧版本读取时按
+    /// 未知键忽略并警告（降级兼容，R4 BF-2/BF-7 口径）。
+    pub icon_text_scale_migrated_v0318: bool,
     /// 图标背景覆盖度（% 相对位图内切块，D-48/D-57），默认 100，范围
     /// 20..=100（100% = 满出血零边距，已触及位图边界，故上限为 100）。
     pub icon_bg_scale: u8,
@@ -495,7 +513,8 @@ impl Default for Config {
             icon_font_tiers_enabled: true,
             icon_font_tier_thresholds: DEFAULT_FONT_TIER_THRESHOLDS.to_vec(),
             icon_font_tier_colors: DEFAULT_FONT_TIER_COLORS.to_vec(),
-            icon_text_scale: 100,
+            icon_text_scale: ICON_TEXT_SCALE_DEFAULT,
+            icon_text_scale_migrated_v0318: true,
             icon_bg_scale: 100,
         }
     }
@@ -579,6 +598,7 @@ impl Config {
         let mut saw_low_threshold = false;
         let mut migrated_warn_threshold: Option<u64> = None;
         let mut saw_tier_thresholds = false;
+        let mut saw_text_scale_marker = false;
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -693,6 +713,10 @@ impl Config {
                     }
                     cfg.icon_text_scale = clamped as u8;
                 }
+                ("icon_text_scale_migrated_v0318", Value::Bool(b)) => {
+                    saw_text_scale_marker = true;
+                    cfg.icon_text_scale_migrated_v0318 = *b;
+                }
                 ("icon_bg_scale", Value::Int(n)) => {
                     // D-57：越界钳制到 [20, 100] + 警告（>100 会溢出位图）。
                     let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
@@ -772,6 +796,7 @@ impl Config {
                     | "low_threshold"
                     | "blink_enabled"
                     | "icon_text_scale"
+                    | "icon_text_scale_migrated_v0318"
                     | "icon_bg_scale"
                     | "icon_font_tiers_enabled"
                     | "icon_font_tier_thresholds"
@@ -806,6 +831,25 @@ impl Config {
                          tiers enabled to preserve per-battery-level coloring"
                     .into(),
             });
+        }
+        // v0.3.18（U-1）默认值迁移：旧配置文件（无迁移标记）且文本大小
+        // 恰为旧默认 100 → 视为「从未调整过」，随新默认迁到 140 并留警告
+        // （显式写 100 的少数情形会被误迁，可接受，已在发布说明披露——
+        // 用户调回 100 后标记已置位，不会再迁）。未含该键的旧配置则由
+        // 新默认值自然生效（Default 即 140，无需警告）。标记恒置 true
+        // 并随 to_toml 写出：后续启动不再迁移；旧版本读取时按未知键
+        // 忽略 + 警告（降级兼容）。
+        if !saw_text_scale_marker {
+            if cfg.icon_text_scale == 100 {
+                cfg.icon_text_scale = ICON_TEXT_SCALE_DEFAULT;
+                warnings.push(ConfigWarning {
+                    key: "icon_text_scale".into(),
+                    reason: "migrated (v0.3.18): default text scale 100 -> 140; \
+                             adjust in settings if 100 was intentional"
+                        .into(),
+                });
+            }
+            cfg.icon_text_scale_migrated_v0318 = true;
         }
         // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
         {
@@ -852,6 +896,7 @@ impl Config {
              icon_font_tier_thresholds = [{}]\n\
              icon_font_tier_colors = [{}]\n\
              icon_text_scale = {}\n\
+             icon_text_scale_migrated_v0318 = {}\n\
              icon_bg_scale = {}\n",
             self.autostart,
             self.poll_interval_secs,
@@ -868,6 +913,7 @@ impl Config {
             tier_thresholds,
             tier_colors,
             self.icon_text_scale,
+            self.icon_text_scale_migrated_v0318,
             self.icon_bg_scale,
         )
     }
@@ -939,8 +985,11 @@ mod tests {
         assert_eq!(c.icon_font_family, "Segoe UI");
         assert_eq!(c.low_threshold, 20);
         assert!(c.blink_enabled);
-        // D-48：文本/背景缩放默认 100%。
-        assert_eq!(c.icon_text_scale, 100);
+        // v0.3.18（U-1）：文本大小默认 140（原 100）；背景缩放默认 100%。
+        assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_DEFAULT);
+        assert_eq!(c.icon_text_scale, 140);
+        // 默认值自带迁移标记（不触发迁移）。
+        assert!(c.icon_text_scale_migrated_v0318);
         assert_eq!(c.icon_bg_scale, 100);
     }
 
@@ -1211,10 +1260,41 @@ mod tests {
         let (c, w) = Config::parse("icon_bg_scale = 10\n");
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MIN);
         assert_eq!(w.len(), 1);
-        // 非整数 / 布尔 → 默认保留 + 警告。
+        // 非整数 / 布尔 → 默认保留 + 警告（v0.3.18：默认 140）。
         let (c, w) = Config::parse("icon_text_scale = true\n");
-        assert_eq!(c.icon_text_scale, 100);
+        assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_DEFAULT);
         assert_eq!(w.len(), 1);
+    }
+
+    /// v0.3.18（U-1）：默认值 100→140 的迁移语义——无标记且恰为旧默认
+    /// 100 才迁移；显式其他值不动；已有标记不重复迁移；迁移结果可
+    /// roundtrip（标记写出后再次解析不再迁移、无警告）。
+    #[test]
+    fn icon_text_scale_v0318_default_migration() {
+        // 无标记 + 恰为旧默认 100 → 迁 140 + 警告 + 标记置位。
+        let (c, w) = Config::parse("icon_text_scale = 100\n");
+        assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_DEFAULT);
+        assert!(c.icon_text_scale_migrated_v0318);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "icon_text_scale" && x.reason.contains("v0.3.18")),
+            "{w:?}"
+        );
+        // 无标记 + 显式非默认值 → 保持不变、不警告、标记置位。
+        let (c, w) = Config::parse("icon_text_scale = 130\n");
+        assert_eq!(c.icon_text_scale, 130);
+        assert!(c.icon_text_scale_migrated_v0318);
+        assert!(!w.iter().any(|x| x.key == "icon_text_scale"), "{w:?}");
+        // 已有标记 + 显式 100 → 不迁移（新版本上主动调回 100 受尊重）。
+        let (c, w) =
+            Config::parse("icon_text_scale = 100\nicon_text_scale_migrated_v0318 = true\n");
+        assert_eq!(c.icon_text_scale, 100);
+        assert!(!w.iter().any(|x| x.key == "icon_text_scale"), "{w:?}");
+        // roundtrip：迁移结果序列化后再解析，值与标记稳定、零警告。
+        let (c1, _) = Config::parse("icon_text_scale = 100\n");
+        let (c2, w2) = Config::parse(&c1.to_toml());
+        assert_eq!(c1, c2);
+        assert!(!w2.iter().any(|x| x.key == "icon_text_scale"), "{w2:?}");
     }
 
     #[test]

@@ -539,7 +539,7 @@ pub fn render_text_bitmap(
     // 数字宽度 ≈ 0.55 × 字高；CJK 宽度 ≈ 1.0 × 字高。估算字宽只用于
     // 首轮候选字高：超宽先按比例缩字作起点——估算对粗字重字体系统性
     // 偏小（U-4 根因），最终是否放得下由下方探针循环按真实墨迹判定。
-    let est_w: i32 = chars
+    let mut est_w: i32 = chars
         .iter()
         .map(|c| {
             if c.is_ascii() {
@@ -549,9 +549,22 @@ pub fn render_text_bitmap(
             }
         })
         .sum();
-    if est_w > cap {
-        // 超宽：按 cap/est_w 比例缩字（est_w 与 font_h 成比例，缩后即 cap）。
-        font_h = (font_h * cap / est_w.max(1)).max(1);
+    // 超宽：逐档递减字高直至估算宽度放进安全边。R4 BF-1：旧实现按
+    // cap/est_w 比例缩字，整数截断下非单调（size=24 时 ts=160 缩到 20
+    // 反比 ts=140 的 21 更矮，字高随档位变大反而变小）；逐档递减从
+    // 「不超过 ts 对应字高」的起点只向下走，保证最终字高随 ts 单调不减。
+    while est_w > cap && font_h > 1 {
+        font_h -= 1;
+        est_w = chars
+            .iter()
+            .map(|c| {
+                if c.is_ascii() {
+                    font_h * 11 / 20
+                } else {
+                    font_h
+                }
+            })
+            .sum();
     }
     // v0.3.18（U-4）：探针画布边长 = 位图 + 2×cap。旧流程按估算位置直接
     // 在输出位图上落字，再按墨迹 bbox 平移修正——估算偏小时文字已被
@@ -1480,6 +1493,88 @@ mod tests {
         assert!(and_mask_packed_from_alpha(&solid, 2)
             .iter()
             .all(|b| *b == 0));
+    }
+
+    /// v0.3.18（R4 BF-1）：缩字机制单调性——文本大小档位越高，渲染墨迹
+    /// 高度不得变小（旧比例缩字在整数截断下，size=24 时 ts=160 反矮于
+    /// ts=140）。逐档递减修复后对全部位图档位 × 全部文本档位验证。
+    #[test]
+    fn shrink_keeps_glyph_height_monotonic() {
+        for size in [16u32, 24, 32, 48] {
+            let mut prev_h = 0i32;
+            for ts in (40u8..=160).step_by(10) {
+                let rgba = render_text_bitmap(
+                    size,
+                    "83",
+                    (0xFF, 0xFF, 0xFF),
+                    None,
+                    IconShape::Transparent,
+                    "Segoe UI",
+                    ts,
+                    100,
+                );
+                let mut y0 = i32::MAX;
+                let mut y1 = i32::MIN;
+                for (i, px) in rgba.chunks_exact(4).enumerate() {
+                    if px[3] >= 0x10 {
+                        let py = (i / size as usize) as i32;
+                        y0 = y0.min(py);
+                        y1 = y1.max(py);
+                    }
+                }
+                assert!(y0 <= y1, "size={size} ts={ts}: no ink rendered");
+                let h = y1 - y0 + 1;
+                assert!(
+                    h >= prev_h,
+                    "size={size}: ts={ts} ink height {h} < previous {prev_h} (non-monotonic)"
+                );
+                prev_h = h;
+            }
+        }
+    }
+
+    /// v0.3.18（U-4 回归）：粗字重字体在最高档位下，墨迹必须完整落在
+    /// 背景块内（图2：Arial Black @160% 底部裁切、未居中）。探针循环按
+    /// 真实墨迹判定，GDI 字体回退（无 Arial Black 的环境）同样被约束。
+    #[test]
+    fn heavy_font_at_max_scale_stays_within_block() {
+        let size = 16u32;
+        let bs = 80u8;
+        let block = size as i32 * bs as i32 / 100; // 12
+        let lo = (size as i32 - block) / 2; // 2
+        let hi = lo + block - 1; // 13
+        let with_text = render_text_bitmap(
+            size,
+            "83",
+            (0xFF, 0xFF, 0xFF),
+            Some((0x80, 0, 0)),
+            IconShape::Square,
+            "Arial Black",
+            160,
+            bs,
+        );
+        let bg_only = render_text_bitmap(
+            size,
+            "",
+            (0xFF, 0xFF, 0xFF),
+            Some((0x80, 0, 0)),
+            IconShape::Square,
+            "Arial Black",
+            160,
+            bs,
+        );
+        let mut ink = 0usize;
+        for i in 0..(size * size) as usize {
+            if with_text[i * 4..i * 4 + 4] != bg_only[i * 4..i * 4 + 4] {
+                let (py, px) = ((i / size as usize) as i32, (i % size as usize) as i32);
+                assert!(
+                    (lo..=hi).contains(&px) && (lo..=hi).contains(&py),
+                    "ink outside block at ({px},{py}); block = [{lo},{hi}]"
+                );
+                ink += 1;
+            }
+        }
+        assert!(ink > 0, "no ink rendered (text missing entirely)");
     }
 
     /// v0.3.4 #4 / v0.3.5 #8（D-57）验收：缩放矩阵（文本 40/100/160 × 背景

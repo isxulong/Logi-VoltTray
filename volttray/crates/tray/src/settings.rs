@@ -49,8 +49,8 @@ use volttray_app::config::{
     colorref_to_rgb, font_tier_for_percent, normalize_font_tiers, rgb_to_colorref, Config,
     IconBackground, IconFontColor, IconShape, RgbColor, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS,
     FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN,
-    ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN,
-    LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
+    ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_DEFAULT, ICON_TEXT_SCALE_MAX,
+    ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -2626,7 +2626,8 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         // 行内重置（规范默认：底行 + 就地）。
         IDC_TEXT_RESET if clicked => {
-            cfg.icon_text_scale = 100;
+            // v0.3.18（U-1）：默认档随新基准 140（不再硬编码 100）。
+            cfg.icon_text_scale = ICON_TEXT_SCALE_DEFAULT;
             touched = true;
             resync = true;
         }
