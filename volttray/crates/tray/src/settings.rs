@@ -153,7 +153,6 @@ const IDC_SHAPE: i32 = 2001;
 const IDC_BG: i32 = 2002;
 const IDC_FONT_FAMILY: i32 = 2004;
 const IDC_FONT_COLOR: i32 = 2005;
-const IDC_PREVIEW: i32 = 2007;
 const IDC_RESET_LOW: i32 = 2010;
 const IDC_RESET_ALL: i32 = 2011;
 const IDC_BLINK: i32 = 2012;
@@ -201,7 +200,6 @@ const IDC_LBL_TIER_COLOR: i32 = 2052;
 /// 需要随分档卡收起而移动的标签/分区标题。
 const IDC_LBL_TEXT: i32 = 2060;
 const IDC_LBL_BGCOVER: i32 = 2061;
-const IDC_LBL_PREVIEW: i32 = 2062;
 const IDC_SEC_REFRESH: i32 = 2063;
 const IDC_LBL_INTERVAL: i32 = 2064;
 const IDC_SEC_LOW: i32 = 2065;
@@ -268,7 +266,7 @@ fn tier_hint_dynamic(thresholds: &[u8]) -> String {
 
 /// 展开态下方控件坐标表：(id, x, y, w, h)（逻辑像素）。
 /// 收起分档卡时整组上移 TIER_DELTA；提示语宽度在 relayout 中按实测宽覆盖。
-const BELOW: [(i32, i32, i32, i32, i32); 27] = [
+const BELOW: [(i32, i32, i32, i32, i32); 25] = [
     (IDC_LBL_TEXT, 16, 278, 64, 20),
     (IDC_TEXT_SLIDER, 88, 274, 196, 26),
     (IDC_TEXT_VAL, 292, 278, 44, 20),
@@ -280,11 +278,8 @@ const BELOW: [(i32, i32, i32, i32, i32); 27] = [
     (IDC_BG_RESET, 344, 306, 48, 24),
     (IDC_BG_RANGE, 400, 312, 84, 14),
     (IDC_COVER_HINT, 88, 338, 396, 14),
-    // R-8：双标签拆分——1× / 4× 预览各自署名；标签列 x=16 宽 ≤68，
-    // 不与 x=88 起的预览位图重叠；纵向上分别与 1×（中心 386）、
-    // 4×（中心 458）位图居中对齐。
-    (IDC_LBL_PREVIEW, 16, 370, 68, 32),
-    (IDC_PREVIEW, 88, 362, PREVIEW_PX, PREVIEW_PX),
+    // v0.3.18（U-2）：「任务栏实际效果」小预览删除——任务栏即真实效果，
+    // 双预览冗余；只保留单一大预览（标签列 x=16 宽 ≤68，不与位图重叠）。
     (IDC_LBL_PREVIEW_BIG, 16, 434, 68, 48),
     (IDC_PREVIEW_BIG, 152, 362, PREVIEW_PX * 4, PREVIEW_PX * 4),
     (IDC_SEC_REFRESH, 16, 566, 80, 18),
@@ -1534,21 +1529,13 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                 IDC_LBL_TEXT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("文本大小")),
                 IDC_LBL_BGCOVER => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("背景覆盖度")),
                 IDC_COVER_HINT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(COVER_HINT_TEXT)),
-                IDC_LBL_PREVIEW => (
-                    "STATIC",
-                    ws(0),
-                    WINDOW_EX_STYLE(0),
-                    Some("任务栏实际\n效果"),
-                ),
                 IDC_LBL_PREVIEW_BIG => (
                     "STATIC",
                     ws(0),
                     WINDOW_EX_STYLE(0),
                     Some("4× 放大\n（像素\n细节）"),
                 ),
-                IDC_PREVIEW | IDC_PREVIEW_BIG => {
-                    ("STATIC", ws(SS_BITMAP), WINDOW_EX_STYLE(0), None)
-                }
+                IDC_PREVIEW_BIG => ("STATIC", ws(SS_BITMAP), WINDOW_EX_STYLE(0), None),
                 IDC_SEC_REFRESH => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("刷新")),
                 IDC_SEC_LOW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("低电提醒")),
                 IDC_LBL_INTERVAL => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("轮询间隔")),
@@ -2154,7 +2141,7 @@ unsafe fn draw_owner_button(ctx: &Ctx, dis: &DRAWITEMSTRUCT) {
     let _ = DeleteObject(HGDIOBJ(br.0));
 }
 
-/// 校验外观对比度（<3.0 仅警告不阻断）并刷新预览（1× + 4× 放大）。
+/// 校验外观对比度（<3.0 仅警告不阻断）并刷新预览（v0.3.18 U-2：小预览已删，仅保留放大预览）。
 fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     let cfg = ctx.cfg.borrow();
     let tiered = cfg.icon_font_tiers_enabled;
@@ -2217,20 +2204,7 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         bgra[i * 4 + 3] = 255;
     }
     unsafe {
-        let preview = ctl(hwnd, IDC_PREVIEW);
-        let hbmp = bgra_dib_premultiplied(&bgra, px, px);
-        if !hbmp.is_invalid() {
-            let old = SendMessageW!(
-                preview,
-                STM_SETIMAGE,
-                WPARAM(IMAGE_BITMAP.0 as usize),
-                LPARAM(hbmp.0 as isize)
-            );
-            if old != 0 {
-                let _ = DeleteObject(HGDIOBJ(old as *mut core::ffi::c_void));
-            }
-        }
-        // 4× 放大预览（最近邻块放大，呈现像素级效果；规范：1× 与 4× 并排）。
+        // 放大预览（最近邻块放大，呈现像素级效果；v0.3.18 U-2：小预览已删）。
         let big = px * 4;
         let mut big_bgra = vec![0u8; (big * big * 4) as usize];
         for by in 0..big {
