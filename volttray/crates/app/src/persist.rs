@@ -459,8 +459,10 @@ impl LastKnownStore {
     }
 
     /// fsync 当前文件（5min 定时点 / 退出路径；文件不存在视为无需 fsync）。
+    /// 以写权限打开：Windows 下 FlushFileBuffers 要求 GENERIC_WRITE，
+    /// 只读句柄 sync_all 会报 Access Denied（Linux 只读 fsync 合法，CI 实测）。
     fn fsync_file(&self) -> io::Result<()> {
-        match fs::File::open(&self.path) {
+        match fs::OpenOptions::new().write(true).open(&self.path) {
             Ok(f) => f.sync_all(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
