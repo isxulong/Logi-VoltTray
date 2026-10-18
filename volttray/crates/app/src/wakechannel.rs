@@ -70,6 +70,46 @@ pub fn channel_for_raw_path(raw_path: &str, candidates: &[(String, String)]) -> 
     hit
 }
 
+/// `channel_for_raw_path` 的分类版本（BF-3 / R-11）：把「零匹配」与
+/// 「多匹配歧义」从笼统的 None 中拆开，另区分「指纹不可解析」（非
+/// HID 路径 / BTHHID 降级路径），供唤醒遥测 miss 子分类计数。归因
+/// 语义与原函数完全一致：Hit 即其 Some 分支，其余三种对应 None。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMatch {
+    /// 唯一指纹命中，值为候选下标。
+    Hit(usize),
+    /// raw_path 指纹不可解析（非 HID 路径 / BTHHID 等降级路径）。
+    NoFingerprint,
+    /// 指纹可解析但零候选匹配（设备不在本机接收器后）。
+    ZeroMatch,
+    /// 多个候选同指纹，歧义不可归因。
+    Ambiguous,
+}
+
+/// 见 [`ChannelMatch`]。候选构造与匹配规则同 `channel_for_raw_path`。
+pub fn channel_for_raw_path_classified(
+    raw_path: &str,
+    candidates: &[(String, String)],
+) -> ChannelMatch {
+    let fp = match channel_fingerprint(raw_path) {
+        Some(fp) => fp,
+        None => return ChannelMatch::NoFingerprint,
+    };
+    let mut hit = None;
+    for (i, (_, hid_path)) in candidates.iter().enumerate() {
+        if channel_fingerprint(hid_path).as_ref() == Some(&fp) {
+            if hit.is_some() {
+                return ChannelMatch::Ambiguous; // 歧义：多个候选同指纹
+            }
+            hit = Some(i);
+        }
+    }
+    match hit {
+        Some(i) => ChannelMatch::Hit(i),
+        None => ChannelMatch::ZeroMatch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +193,60 @@ mod tests {
         let lower = r"\\?\hid#vid_046d&pid_c52b&mi_01#7&2f3a1b2c&0&0001#{g}";
         let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
         assert_eq!(channel_for_raw_path(lower, &candidates), Some(0));
+    }
+
+    #[test]
+    fn classified_hit_matches_option_version() {
+        // BF-3：Hit 分支与原函数 Some 分支逐一一致。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01&Col02#7&2f3a1b2c&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("bolt".to_string(), BOLT_CHAN.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(
+            channel_for_raw_path_classified(raw, &candidates),
+            ChannelMatch::Hit(1)
+        );
+        assert_eq!(channel_for_raw_path(raw, &candidates), Some(1));
+    }
+
+    #[test]
+    fn classified_splits_zero_match_from_ambiguous() {
+        // BF-3 核心诉求：零匹配与歧义不再混为一个 None。
+        // 零匹配：另一台同型号接收器（实例前缀不同）。
+        let zero = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let one = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(
+            channel_for_raw_path_classified(zero, &one),
+            ChannelMatch::ZeroMatch
+        );
+        // 歧义：两个候选同指纹。
+        let dup = vec![
+            ("a".to_string(), UNIFYING_CHAN.to_string()),
+            ("b".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&2f3a1b2c&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        assert_eq!(
+            channel_for_raw_path_classified(raw, &dup),
+            ChannelMatch::Ambiguous
+        );
+        // 两者在原函数下均为 None（行为不变，仅遥测可区分）。
+        assert_eq!(channel_for_raw_path(zero, &one), None);
+        assert_eq!(channel_for_raw_path(raw, &dup), None);
+    }
+
+    #[test]
+    fn classified_marks_unparseable_raw_path() {
+        // BTHHID / 空串 / 无 VID 段 → NoFingerprint（系统性失配场景）。
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        let bt = r"\\?\BTHHID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID_b01a#9&1c2d3e4f&0&0000#{4d1e55b2-f16e-11cf-88cb-001111000030}";
+        assert_eq!(
+            channel_for_raw_path_classified(bt, &candidates),
+            ChannelMatch::NoFingerprint
+        );
+        assert_eq!(
+            channel_for_raw_path_classified("", &candidates),
+            ChannelMatch::NoFingerprint
+        );
     }
 }

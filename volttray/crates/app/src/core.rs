@@ -608,14 +608,23 @@ impl AppCore {
     }
 
     /// 被动唤醒信号（D-33）：系统层观测到鼠标活动（Raw Input）→ 给休眠
-    /// 设备装填一次唤醒探测资格。在线设备忽略（正常轮询节奏不变）。
+    /// 设备装填一次唤醒探测资格。
+    /// R-3（v0.3.17）：装填范围扩展为 Sleeping ∪ (Online ∧ 灰显)——
+    /// 灰显在线设备电量未知，鼠标已活动时装填一次探测资格，让它随
+    /// 唤醒探测轮提前刷新（不装填就要等到档位到期才自愈）。新鲜在线
+    /// 设备忽略（正常轮询节奏不变）。
     /// A-1b：虚拟条目不装填（无真实端点可探测）。
     /// WP-C（v3 C-1，冷却 per-entry 不变 I-12）：装填同时把本设备
     /// next_due 提到「尽快」——冷却窗口内排在冷却结束点（探测节奏仍
     /// 受 WAKE_PROBE_COOLDOWN 约束），否则立即到期。
     pub fn note_wake_signal(&mut self, id: &str, now: Instant) {
+        let cfg = self.config();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
-            if entry.device.state == DeviceState::Sleeping && !entry.is_virtual {
+            let armable = !entry.is_virtual
+                && (entry.device.state == DeviceState::Sleeping
+                    || (entry.device.state == DeviceState::Online
+                        && entry.is_gray(now, gray_threshold_of(entry, &cfg))));
+            if armable {
                 entry.wake_armed = true;
                 entry.next_due = Some(match entry.last_wake_probe {
                     Some(t) if now.duration_since(t) < WAKE_PROBE_COOLDOWN => {
@@ -635,6 +644,23 @@ impl AppCore {
         self.entries
             .iter()
             .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping && !e.is_virtual)
+    }
+
+    /// R-3（v0.3.17）：已装填唤醒资格的「在线且灰显」设备本轮是否允许
+    /// 被探测——与休眠候选同口径（资格已装填 + 已过 WAKE_PROBE_COOLDOWN
+    /// 冷却），只是设备状态为 Online ∧ 灰显。探测轮据此把此类设备从
+    /// 「一律跳过」放宽为「放行一次」。虚拟条目一律 false。
+    pub fn wake_armed_gray(&self, id: &str, now: Instant) -> bool {
+        let cfg = self.config();
+        self.entries.iter().any(|e| {
+            e.device.id == id
+                && !e.is_virtual
+                && e.device.state == DeviceState::Online
+                && e.wake_armed
+                && e.last_wake_probe
+                    .is_none_or(|t| now.duration_since(t) >= WAKE_PROBE_COOLDOWN)
+                && e.is_gray(now, gray_threshold_of(e, &cfg))
+        })
     }
 
     /// 临近到期豁免（WP-C，v3 C-1/C-4：D-72 临近灰显豁免与 per-device
@@ -659,9 +685,12 @@ impl AppCore {
     }
 
     /// 探测轮槽位准入的合并裁决点（WP-C 与 D-33）：
-    /// 休眠候选（唤醒探测）或临近到期豁免命中者放行，其余在线设备跳过。
+    /// 休眠候选（唤醒探测）、已装填唤醒资格的在线灰显设备（R-3，
+    /// v0.3.17）或临近到期豁免命中者放行，其余在线设备跳过。
     pub fn probe_round_allows(&self, id: &str, now: Instant) -> bool {
-        self.wake_probe_candidate(id) || self.near_due_exemption(id, now)
+        self.wake_probe_candidate(id)
+            || self.wake_armed_gray(id, now)
+            || self.near_due_exemption(id, now)
     }
 
     /// 当前处于休眠的**真实**设备 id 列表（IO 线程收到唤醒信号后批量
@@ -671,6 +700,23 @@ impl AppCore {
         self.entries
             .iter()
             .filter(|e| e.device.state == DeviceState::Sleeping && !e.is_virtual)
+            .map(|e| e.device.id.clone())
+            .collect()
+    }
+
+    /// R-3（v0.3.17）：当前「在线且灰显」的**真实**设备 id 列表——
+    /// 唤醒装填扩展集 (Online ∧ 灰显) 的枚举口径，与 sleeping_ids
+    /// 并列构成唤醒装填全集 Sleeping ∪ (Online ∧ 灰显)。虚拟条目
+    /// 不在其列（同 sleeping_ids 的零查询红线口径）。
+    pub fn online_gray_ids(&self, now: Instant) -> Vec<String> {
+        let cfg = self.config();
+        self.entries
+            .iter()
+            .filter(|e| {
+                !e.is_virtual
+                    && e.device.state == DeviceState::Online
+                    && e.is_gray(now, gray_threshold_of(e, &cfg))
+            })
             .map(|e| e.device.id.clone())
             .collect()
     }
@@ -973,6 +1019,74 @@ mod tests {
         let _ = core.record_timeout("b", now);
         assert!(core.wake_probe_candidate("b"));
         assert!(!core.wake_probe_candidate("a"), "在线设备不得成为候选");
+    }
+
+    /// R-3（v0.3.17）①：唤醒信号给「在线且灰显」设备装填探测资格——
+    /// 装填范围 Sleeping ∪ (Online ∧ 灰显)；新鲜在线设备不装填；
+    /// 装填后探测轮准入放行。
+    #[test]
+    fn wake_signal_arms_online_gray_device() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), t0);
+        core.record_success("b", reading(60, false), t0);
+        let threshold = core.gray_threshold_for(&core.entries()[0]);
+        let later = t0 + threshold + Duration::from_secs(1);
+        // b 在灰显阈值内保持新鲜；a 已派生灰。
+        core.record_success("b", reading(60, false), later - Duration::from_secs(1));
+        core.note_wake_signal("a", later);
+        core.note_wake_signal("b", later);
+        assert!(core.wake_armed_gray("a", later), "在线灰显设备应被装填");
+        assert!(!core.wake_armed_gray("b", later), "新鲜在线设备不得装填");
+        assert!(core.probe_round_allows("a", later), "装填后探测轮放行");
+    }
+
+    /// R-3（v0.3.17）②：装填的灰显设备与休眠候选同受
+    /// WAKE_PROBE_COOLDOWN 约束——冷却窗口内不放行，冷却过后放行。
+    #[test]
+    fn wake_armed_gray_respects_cooldown() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), t0);
+        let threshold = core.gray_threshold_for(&core.entries()[0]);
+        let later = t0 + threshold + Duration::from_secs(1);
+        core.note_wake_signal("a", later);
+        assert!(core.wake_armed_gray("a", later));
+        // 探测消耗资格并进入冷却；冷却内再次装填也不放行。
+        core.begin_wake_probe("a", later);
+        core.note_wake_signal("a", later + Duration::from_secs(1));
+        assert!(
+            !core.wake_armed_gray("a", later + Duration::from_secs(1)),
+            "冷却窗口内不放行"
+        );
+        assert!(
+            core.wake_armed_gray("a", later + WAKE_PROBE_COOLDOWN + Duration::from_secs(1)),
+            "冷却过后放行"
+        );
+    }
+
+    /// R-3（v0.3.17）③：online_gray_ids 枚举口径——在线灰显真实设备
+    /// 在列；新鲜在线、休眠设备不在列（休眠走 sleeping_ids）。
+    #[test]
+    fn online_gray_ids_excludes_fresh_and_sleeping() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.upsert_device(dev("c", 3));
+        core.record_success("a", reading(50, false), t0);
+        core.record_success("b", reading(60, false), t0);
+        core.record_success("c", reading(70, false), t0);
+        let threshold = core.gray_threshold_for(&core.entries()[0]);
+        let later = t0 + threshold + Duration::from_secs(1);
+        // b 保持新鲜；c 超时连击进入休眠。
+        core.record_success("b", reading(60, false), later - Duration::from_secs(1));
+        let _ = core.record_timeout("c", later);
+        let _ = core.record_timeout("c", later);
+        assert_eq!(core.online_gray_ids(later), vec!["a".to_string()]);
     }
 
     #[test]

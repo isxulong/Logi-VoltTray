@@ -296,6 +296,44 @@ impl DeadSlotScan {
     }
 }
 
+/// R-3（v0.3.17）：唤醒装填集裁决（纯函数，IO 线程 WakeSignal 处理的
+/// 唯一装填口径，四例矩阵单测覆盖）：
+///
+/// - **归因成功**（`on_channel = Some`）：装填该通道上的
+///   Sleeping ∪ (Online ∧ 灰显)——灰显在线设备电量未知，鼠标已活动，
+///   装填一次探测资格让它随探测轮提前刷新；
+/// - **归因失败回退 arm-all**（`on_channel = None`）：仅 Sleeping——
+///   无归因证据时不对在线设备发任何额外查询（电池红线保守侧）；
+///   **豁免**：Online-灰显恰为 1 台时一并装填（此时全系统只有它一台
+///   灰显，arm-all 的「误装填他机」代价为零）。
+///
+/// 返回 (装填 id 列表, 豁免是否生效)；豁免标记供 IO 线程落日志。
+pub fn wake_arm_set(
+    sleeping: &[String],
+    online_gray: &[String],
+    on_channel: Option<&std::collections::HashSet<&str>>,
+) -> (Vec<String>, bool) {
+    match on_channel {
+        Some(on_chan) => (
+            sleeping
+                .iter()
+                .chain(online_gray.iter())
+                .filter(|id| on_chan.contains(id.as_str()))
+                .cloned()
+                .collect(),
+            false,
+        ),
+        None => {
+            let mut ids: Vec<String> = sleeping.to_vec();
+            let exempt = online_gray.len() == 1;
+            if exempt {
+                ids.extend(online_gray.iter().cloned());
+            }
+            (ids, exempt)
+        }
+    }
+}
+
 /// 重枚举/重连状态机（IO 线程持有，Instant 注入可测）。
 #[derive(Debug, Clone)]
 pub struct Reconnect {
@@ -963,5 +1001,53 @@ mod tests {
         d.clear();
         assert!(d.should_scan(6), "force 后立即穿透冷却");
         assert_eq!(d.streak(6), 0);
+    }
+
+    use super::wake_arm_set;
+
+    /// R-3 矩阵 ①（归因命中，过滤含灰显）：只装填命中通道上的
+    /// Sleeping ∪ (Online ∧ 灰显)，他通道设备不装填；无豁免标记。
+    #[test]
+    fn wake_arm_set_attributed_filters_by_channel() {
+        let sleeping = vec!["a".to_string(), "b".to_string()];
+        let gray = vec!["g1".to_string(), "g2".to_string()];
+        let on_chan: std::collections::HashSet<&str> = ["a", "g1"].into_iter().collect();
+        let (ids, exempt) = wake_arm_set(&sleeping, &gray, Some(&on_chan));
+        assert_eq!(ids, vec!["a".to_string(), "g1".to_string()]);
+        assert!(!exempt);
+    }
+
+    /// R-3 矩阵 ②（归因命中但通道上无可装填设备）：空集、不触发
+    /// 探测轮（armed_any=false），无豁免标记。
+    #[test]
+    fn wake_arm_set_attributed_empty_channel() {
+        let sleeping = vec!["a".to_string()];
+        let gray = vec!["g1".to_string()];
+        let on_chan: std::collections::HashSet<&str> = ["x"].into_iter().collect();
+        let (ids, exempt) = wake_arm_set(&sleeping, &gray, Some(&on_chan));
+        assert!(ids.is_empty());
+        assert!(!exempt);
+    }
+
+    /// R-3 矩阵 ③（arm-all，多台灰显不豁免）：仅装填 Sleeping——
+    /// 无归因证据时不对在线设备发额外查询（电池红线保守侧）。
+    #[test]
+    fn wake_arm_set_arm_all_multi_gray_no_exemption() {
+        let sleeping = vec!["a".to_string(), "b".to_string()];
+        let gray = vec!["g1".to_string(), "g2".to_string()];
+        let (ids, exempt) = wake_arm_set(&sleeping, &gray, None);
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        assert!(!exempt);
+    }
+
+    /// R-3 矩阵 ④（arm-all，单灰显豁免）：Online-灰显恰为 1 台时
+    /// 一并装填并标记豁免（误装填他机代价为零）。
+    #[test]
+    fn wake_arm_set_arm_all_single_gray_exempt() {
+        let sleeping = vec!["a".to_string()];
+        let gray = vec!["g1".to_string()];
+        let (ids, exempt) = wake_arm_set(&sleeping, &gray, None);
+        assert_eq!(ids, vec!["a".to_string(), "g1".to_string()]);
+        assert!(exempt);
     }
 }

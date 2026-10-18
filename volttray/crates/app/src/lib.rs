@@ -51,9 +51,9 @@ pub use persist::{
 };
 pub use physkey::{identity_confirmed, pick_promotion, repin, AliasSlot};
 pub use reconnect::{
-    wake_action, ChannelLiveness, DeadSlotScan, EnumTransition, Reconnect, SlotOutcome,
-    SlotScanFailure, SlotScanStreak, WakeAction, DEAD_SLOT_COOLDOWN_ROUNDS, ENUM_BACKOFF_STEPS,
-    HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL, SLOT_SCAN_REOPEN_THRESHOLD,
+    wake_action, wake_arm_set, ChannelLiveness, DeadSlotScan, EnumTransition, Reconnect,
+    SlotOutcome, SlotScanFailure, SlotScanStreak, WakeAction, DEAD_SLOT_COOLDOWN_ROUNDS,
+    ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL, SLOT_SCAN_REOPEN_THRESHOLD,
     WAKE_PROBE_INVALIDATE_THRESHOLD,
 };
 pub use stats::{
@@ -62,4 +62,4 @@ pub use stats::{
     StatsLoadOutcome, StatsStore, SOURCE_CHARGING_FAST, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
     STATS_ARCHIVE_NAME, STATS_FILE_NAME, STATS_MAX_BYTES,
 };
-pub use wakechannel::channel_for_raw_path;
+pub use wakechannel::{channel_for_raw_path, channel_for_raw_path_classified, ChannelMatch};

@@ -66,7 +66,7 @@ mod imp {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
-    use volttray_app::wakechannel::channel_for_raw_path;
+    use volttray_app::wakechannel::{channel_for_raw_path_classified, ChannelMatch};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Controls::Dialogs::{
         CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
@@ -87,8 +87,8 @@ mod imp {
         LocalTimeParts, LOG_TAIL_MAX_LINES,
     };
     use volttray_app::{
-        identity_confirmed, pick_promotion, repin, wake_action, Alert, AliasSlot, AppCore,
-        ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition, Observer,
+        identity_confirmed, pick_promotion, repin, wake_action, wake_arm_set, Alert, AliasSlot,
+        AppCore, ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition, Observer,
         PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
         Snapshot, TimeoutOutcome, UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD,
         SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
@@ -668,6 +668,57 @@ mod imp {
         true
     }
 
+    /// R-11（v0.3.17）：唤醒路径遥测（诊断导出 summary 追加字段）——
+    /// 进程级静态计数，IO 线程写、导出时读，避免跨线程签名穿线。
+    /// arm_all 装填数 / 唤醒成功数 / attribution miss 子分类（no-path /
+    /// no-match / ambiguous，BF-3 拆分：no-match 含指纹不可解析与零
+    /// 候选匹配两类系统性失配，与「多候选同指纹」的歧义相区分）。
+    static WAKE_ARM_ALL_FILLS: AtomicU64 = AtomicU64::new(0);
+    static WAKE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+    static WAKE_MISS_NO_PATH: AtomicU64 = AtomicU64::new(0);
+    static WAKE_MISS_NO_MATCH: AtomicU64 = AtomicU64::new(0);
+    static WAKE_MISS_AMBIGUOUS: AtomicU64 = AtomicU64::new(0);
+
+    /// R-4（v0.3.17）：attribution miss 日志采样——BT/有线系统性失配
+    /// 场景 miss 随每次鼠标活动高频出现，逐条落 bootlog 会刷屏：每个
+    /// 60s 窗口只落第 1 条，窗口内被压制的条数合并进下一条汇报
+    /// （「每分钟 1 条 + 计数」）。
+    struct MissLogSampler {
+        window_start: Option<Instant>,
+        suppressed: u64,
+    }
+
+    impl MissLogSampler {
+        fn new() -> Self {
+            Self {
+                window_start: None,
+                suppressed: 0,
+            }
+        }
+
+        /// 记录一次 miss，返回本次应落的日志行（None = 窗口内压制）。
+        fn note_miss(&mut self, msg: &str, now: Instant) -> Option<String> {
+            match self.window_start {
+                Some(t) if now.duration_since(t) < Duration::from_secs(60) => {
+                    self.suppressed = self.suppressed.saturating_add(1);
+                    None
+                }
+                _ => {
+                    let suppressed = self.suppressed;
+                    self.window_start = Some(now);
+                    self.suppressed = 0;
+                    if suppressed > 0 {
+                        Some(format!(
+                            "{msg} (suppressed {suppressed} similar in last 60s)"
+                        ))
+                    } else {
+                        Some(msg.to_string())
+                    }
+                }
+            }
+        }
+    }
+
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
     /// v0.3.12（D-69）：`enum_snap` 接收每轮枚举快照（导出诊断时 GUI 线程读取）。
     #[allow(clippy::too_many_arguments)]
@@ -750,6 +801,12 @@ mod imp {
         // 任何设备的到期点；任一在线设备到期即降级回整轮，探测轮不会
         // 饿死各设备自己的轮询节奏。
         let mut probe_only_next = false;
+        // R-4（v0.3.17）：attribution miss 日志采样（每分钟 1 条 + 计数）。
+        let mut wake_miss_sampler = MissLogSampler::new();
+        // BF-2（v0.3.17）：零信息裁决日志采样——hit ∧ 未装填 ∧ stay-asleep
+        // 是鼠标活动稳态下的高频无变化行，逐条落盘即刷屏；状态跃迁行
+        //（armed / probe-round / miss / core-lock-failed）仍逐条保留。
+        let mut wake_idle_sampler = MissLogSampler::new();
         'outer: loop {
             // WP-B：循环顶部的 try_recv 原本只识别 Shutdown——非 Shutdown
             // 命令在此被消费即丢弃（RefreshNow/WakeSignal 丢弃无害：轮次
@@ -1369,8 +1426,14 @@ mod imp {
                             i += 1;
                             continue;
                         }
+                        // R-3（v0.3.17）：已装填唤醒资格的在线灰显设备按
+                        // 唤醒探测口径处理（静默进 probe_outcomes 放宽判死、
+                        // 成功计唤醒成功数）。仅探测轮存在此态；整轮里在线
+                        // 设备走自己的到期门（装填已把到期点提前）。
+                        let armed_gray =
+                            probe_only && !sleeping && core.wake_armed_gray(&s.id, now);
                         // 唤醒探测开始：消耗唤醒资格并进入冷却（D-33）。
-                        if sleeping {
+                        if sleeping || armed_gray {
                             core.begin_wake_probe(&s.id, now);
                         }
                         let mut t = Transport::new(
@@ -1381,7 +1444,8 @@ mod imp {
                             probe_battery(&mut t, &s.id, s.index, &s.features, CURVE, s.is_hidpp1);
                         // D-67：唤醒探测与普通轮询的静默分开计数——已知休眠
                         // 的设备探测静默是常态，判死口径放宽（P3-唤醒探测）。
-                        let outcomes = if sleeping {
+                        // R-3：装填灰显设备的探测同口径进 probe_outcomes。
+                        let outcomes = if sleeping || armed_gray {
                             &mut probe_outcomes
                         } else {
                             &mut normal_outcomes
@@ -1390,6 +1454,11 @@ mod imp {
                             Ok(r) => {
                                 s.hard_failures = 0;
                                 outcomes.push(SlotOutcome::Success);
+                                // R-3/R-11（v0.3.17）：唤醒探测（休眠或装填
+                                // 灰显）成功计数，供诊断导出 summary。
+                                if sleeping || armed_gray {
+                                    WAKE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                                }
                                 // WP-A：轮询成功读数写入持久化（同上节流）。
                                 let _ =
                                     core.persist_note_success(&mut store, &s.id, wall_secs(), now);
@@ -1774,18 +1843,29 @@ mod imp {
                                  (device physically awake; host-side scan)",
                             );
                         }
-                        // v0.3.15（P1-1）：唤醒信号只装填休眠设备的探测
-                        // 资格——有设备被装填、或恰好到了枚举门控点，才跑
-                        // 一轮「仅探测」；无事可做的唤醒信号不再触发整轮
-                        // 重查（裁决纯逻辑 wake_action 在 app 层单测覆盖）。
+                        // v0.3.15（P1-1）：唤醒信号只装填探测资格——有设备
+                        // 被装填、或恰好到了枚举门控点，才跑一轮「仅探测」；
+                        // 无事可做的唤醒信号不再触发整轮重查（裁决纯逻辑
+                        // wake_action 在 app 层单测覆盖）。
+                        // R-3（v0.3.17）：装填全集扩展为 Sleeping ∪
+                        // (Online ∧ 灰显)——灰显在线设备电量未知，鼠标已
+                        // 活动时装填一次探测资格提前刷新；装填集裁决纯逻辑
+                        // wake_arm_set 在 app 层单测覆盖（四例矩阵）。
                         // WP-A（v3 A-3 通道归因）：Raw Input hDevice → 设备
                         // 接口路径 → HID 通道指纹唯一匹配，只装填该通道上的
-                        // 休眠设备；无路径 / 失配 / 多配 → 回退全量装填并
-                        // 记 channel_map_miss（进诊断导出）。BT/有线系统性
+                        // 设备；无路径 / 失配 / 多配 → 回退 arm-all 并记
+                        // channel_map_miss（进诊断导出）。arm-all 仅装填
+                        // Sleeping，但 Online-灰显恰为 1 台时一并装填
+                        //（R-3 豁免：误装填他机代价为零）。BT/有线系统性
                         // 失配为 v3 明示的已知降级。
-                        let armed_any = if let Ok(mut c) = core.lock() {
-                            let all_ids = c.sleeping_ids();
-                            let ids: Vec<String> = match raw_path.as_deref() {
+                        let (armed_any, attribution, n_sleeping, n_gray) = if let Ok(mut c) =
+                            core.lock()
+                        {
+                            let sleeping = c.sleeping_ids();
+                            let online_gray = c.online_gray_ids(Instant::now());
+                            let n_sleeping = sleeping.len();
+                            let n_gray = online_gray.len();
+                            let (ids, attribution, exempt) = match raw_path.as_deref() {
                                 Some(rp) => {
                                     let mut candidates: Vec<(String, String)> = Vec::new();
                                     for ch in &channels {
@@ -1799,8 +1879,8 @@ mod imp {
                                             ));
                                         }
                                     }
-                                    match channel_for_raw_path(rp, &candidates) {
-                                        Some(ci) => {
+                                    match channel_for_raw_path_classified(rp, &candidates) {
+                                        ChannelMatch::Hit(ci) => {
                                             let key = candidates[ci].0.clone();
                                             let on_chan: HashSet<&str> = channels
                                                 .iter()
@@ -1809,37 +1889,111 @@ mod imp {
                                                     ch.slots.iter().map(|s| s.id.as_str())
                                                 })
                                                 .collect();
-                                            all_ids
-                                                .into_iter()
-                                                .filter(|id| on_chan.contains(id.as_str()))
-                                                .collect()
-                                        }
-                                        None => {
-                                            channel_map_miss.fetch_add(1, Ordering::Relaxed);
-                                            bootlog::note(
-                                                "wake channel attribution miss; fallback arm-all",
+                                            let (ids, _) = wake_arm_set(
+                                                &sleeping,
+                                                &online_gray,
+                                                Some(&on_chan),
                                             );
-                                            all_ids
+                                            (ids, "hit", false)
+                                        }
+                                        ChannelMatch::Ambiguous => {
+                                            channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                                            // R-4/R-11（v0.3.17）：miss 子
+                                            // 分类计数 + 采样日志（每分
+                                            // 钟 1 条+计数）。
+                                            WAKE_MISS_AMBIGUOUS.fetch_add(1, Ordering::Relaxed);
+                                            if let Some(line) = wake_miss_sampler.note_miss(
+                                                    "wake channel attribution miss (ambiguous); fallback arm-all",
+                                                    Instant::now(),
+                                                ) {
+                                                    bootlog::note(&line);
+                                                }
+                                            let (ids, exempt) =
+                                                wake_arm_set(&sleeping, &online_gray, None);
+                                            (ids, "miss-ambiguous", exempt)
+                                        }
+                                        ChannelMatch::ZeroMatch | ChannelMatch::NoFingerprint => {
+                                            channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                                            // BF-3（v0.3.17）：零匹配 / 指纹
+                                            // 不可解析与歧义分桶——系统性失
+                                            // 配（BT / 有线 / 他机接收器）
+                                            // 单独计数，不再计入 ambiguous。
+                                            WAKE_MISS_NO_MATCH.fetch_add(1, Ordering::Relaxed);
+                                            if let Some(line) = wake_miss_sampler.note_miss(
+                                                    "wake channel attribution miss (no-match); fallback arm-all",
+                                                    Instant::now(),
+                                                ) {
+                                                    bootlog::note(&line);
+                                                }
+                                            let (ids, exempt) =
+                                                wake_arm_set(&sleeping, &online_gray, None);
+                                            (ids, "miss-no-match", exempt)
                                         }
                                     }
                                 }
                                 None => {
                                     channel_map_miss.fetch_add(1, Ordering::Relaxed);
-                                    all_ids
+                                    WAKE_MISS_NO_PATH.fetch_add(1, Ordering::Relaxed);
+                                    if let Some(line) = wake_miss_sampler.note_miss(
+                                            "wake channel attribution miss (no raw path); fallback arm-all",
+                                            Instant::now(),
+                                        ) {
+                                            bootlog::note(&line);
+                                        }
+                                    let (ids, exempt) = wake_arm_set(&sleeping, &online_gray, None);
+                                    (ids, "miss-no-path", exempt)
                                 }
                             };
+                            if exempt {
+                                // R-3：arm-all 豁免——Online-灰显恰为
+                                // 1 台，一并装填（误装填他机代价为零）。
+                                bootlog::note(
+                                    "wake arm-all exemption: exactly 1 online-gray device armed",
+                                );
+                            }
+                            if attribution != "hit" {
+                                // R-11：arm-all 装填数（诊断导出）。
+                                WAKE_ARM_ALL_FILLS.fetch_add(ids.len() as u64, Ordering::Relaxed);
+                            }
                             for id in &ids {
                                 // WP-C：装填同时把该设备到期点提到「尽快」
                                 //（冷却窗口内排在冷却结束点，I-12 不变）。
                                 c.note_wake_signal(id, Instant::now());
                             }
-                            !ids.is_empty()
+                            (!ids.is_empty(), attribution, n_sleeping, n_gray)
                         } else {
-                            false
+                            (false, "core-lock-failed", 0, 0)
                         };
                         let enum_due =
                             reconnect.should_enumerate(Instant::now(), !channels.is_empty());
-                        match wake_action(armed_any, enum_due) {
+                        let action = wake_action(armed_any, enum_due);
+                        // R-4（v0.3.17）：唤醒裁决链落 bootlog——归因
+                        // 结果、装填构成、枚举门控与最终裁决（集合可能很
+                        // 大，只记数量不记 id）。
+                        // BF-2（v0.3.17）：零信息情形（hit ∧ 未装填 ∧
+                        // stay-asleep，鼠标活动稳态高频行）经采样器每
+                        // 分钟 1 条+计数；状态跃迁（装填 / 探测 / miss /
+                        // core-lock-failed）仍逐条保留。
+                        let decision_line = format!(
+                            "wake decision: attribution={attribution} armed={armed_any} (sleeping={n_sleeping} online-gray={n_gray}) enum_due={enum_due} action={}",
+                            match action {
+                                WakeAction::ProbeRound => "probe-round",
+                                WakeAction::StayAsleep => "stay-asleep",
+                            }
+                        );
+                        if attribution == "hit"
+                            && !armed_any
+                            && matches!(action, WakeAction::StayAsleep)
+                        {
+                            if let Some(line) =
+                                wake_idle_sampler.note_miss(&decision_line, Instant::now())
+                            {
+                                bootlog::note(&line);
+                            }
+                        } else {
+                            bootlog::note(&decision_line);
+                        }
+                        match action {
                             WakeAction::ProbeRound => {
                                 probe_only_next = true;
                                 continue 'outer;
@@ -3059,6 +3213,26 @@ mod imp {
                 PCWSTR(title.as_ptr()),
                 MB_OK | MB_ICONINFORMATION,
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod wake_path_tests {
+        use super::*;
+
+        /// R-4：miss 采样——60s 窗口内只发第 1 条，压制计数合并进下一条。
+        #[test]
+        fn miss_log_sampler_throttles_per_minute() {
+            let mut s = MissLogSampler::new();
+            let t0 = Instant::now();
+            assert_eq!(s.note_miss("m", t0).as_deref(), Some("m"));
+            assert_eq!(s.note_miss("m", t0 + Duration::from_secs(10)), None);
+            assert_eq!(s.note_miss("m", t0 + Duration::from_secs(20)), None);
+            assert_eq!(
+                s.note_miss("m", t0 + Duration::from_secs(61)).as_deref(),
+                Some("m (suppressed 2 similar in last 60s)")
+            );
+            assert_eq!(s.note_miss("m", t0 + Duration::from_secs(62)), None);
         }
     }
 
