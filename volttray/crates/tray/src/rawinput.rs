@@ -159,7 +159,6 @@ pub fn is_logitech_mouse_input(lparam: LPARAM) -> bool {
     }
 }
 
-
 /// WP-A（v3 A-3 通道归因）：取触发本消息的 Raw Input 设备接口路径
 /// （RIDI_DEVICENAME，两段式调用）。任一环节失败返回 None——调用方
 /// 回退全量装填并记 channel_map_miss，不影响唤醒功能本身。

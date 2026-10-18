@@ -384,8 +384,9 @@ fn merge_below_window(segs: &mut Vec<Segment>) {
             }
         }
         w.merged = true; // 单轮不级联：已参与者不再作为合并目标
-        // 并入后整段仍不足 1h：标 below_window（不二次级联）。
-        if w.duration_secs() < MERGE_WINDOW_SECS && !w.notes.contains(&NOTE_BELOW_WINDOW.to_string())
+                         // 并入后整段仍不足 1h：标 below_window（不二次级联）。
+        if w.duration_secs() < MERGE_WINDOW_SECS
+            && !w.notes.contains(&NOTE_BELOW_WINDOW.to_string())
         {
             w.notes.push(NOTE_BELOW_WINDOW.to_string());
         }
@@ -510,10 +511,7 @@ pub fn fnv1a64_hex(s: &str) -> String {
 ///（首现顺序漂移不影响；键集变化时编号可能平移——算法本身由 v3 钉死，
 /// 该性质如实记录于 D-75）。
 pub fn anonymize_map(keys: &BTreeSet<String>) -> HashMap<String, String> {
-    let mut hashed: Vec<(String, &String)> = keys
-        .iter()
-        .map(|k| (fnv1a64_hex(k), k))
-        .collect();
+    let mut hashed: Vec<(String, &String)> = keys.iter().map(|k| (fnv1a64_hex(k), k)).collect();
     hashed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
     hashed
         .into_iter()
@@ -544,8 +542,6 @@ pub fn event_keys(events: &[StatsEvent]) -> BTreeSet<String> {
     }
     keys
 }
-
-
 
 // ---------------------------------------------------------------------------
 // 图表底层数据（volttray-data 数据块内容；AC-B8 复算对账唯一取数源）
@@ -578,10 +574,7 @@ fn build_chart1(segments: &[Segment], devices: &[(String, String)]) -> Vec<Chart
     let last_bucket = max_ts.div_euclid(CHART1_BUCKET_SECS);
     let mut out = Vec::new();
     for (key, name) in devices {
-        let segs: Vec<&Segment> = segments
-            .iter()
-            .filter(|s| &s.device_key == key)
-            .collect();
+        let segs: Vec<&Segment> = segments.iter().filter(|s| &s.device_key == key).collect();
         let mut points = Vec::new();
         for b in first_bucket..=last_bucket {
             let b0 = b * CHART1_BUCKET_SECS;
@@ -730,11 +723,9 @@ fn build_recent_rates(
             t = next;
         }
     }
-    let days_covered = (all_days.len() as i64).min(RECENT_DAYS).max(if all_days.is_empty() {
-        0
-    } else {
-        1
-    });
+    let days_covered = (all_days.len() as i64)
+        .min(RECENT_DAYS)
+        .max(if all_days.is_empty() { 0 } else { 1 });
     // 显式累计（Σdrain, Σhours）后一次求商（时间加权均值）。
     let mut acc: BTreeMap<String, (f64, f64)> = BTreeMap::new();
     for s in segments {
@@ -768,7 +759,6 @@ fn build_recent_rates(
     }
     out
 }
-
 
 // ---------------------------------------------------------------------------
 // CSV 导出（蓝队场景 9 列 schema，AC-B2 对账基准；UTF-8 with BOM）
@@ -962,11 +952,7 @@ pub fn build_report_data(
     let (chart3_per_dev, chart3_total) = build_chart3(&segs);
     let now_ref = events.iter().map(|e| e.ts()).max().unwrap_or(generated_ts);
     let recent = build_recent_rates(&segs, now_ref, offset_minutes);
-    let days_covered = recent
-        .values()
-        .map(|r| r.days_covered)
-        .max()
-        .unwrap_or(0);
+    let days_covered = recent.values().map(|r| r.days_covered).max().unwrap_or(0);
     let sparse_note = if segments.is_empty() {
         None
     } else if days_covered < RECENT_DAYS {
@@ -1207,7 +1193,6 @@ if(!segs.length){emptyMark("c1");emptyMark("c2");emptyMark("c3");document.getEle
 </html>
 "##;
 
-
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -1291,7 +1276,10 @@ mod tests {
             StatsEvent::RunStart { ts: 1000 },
             ev_poll(2000, k, 90),
             ev_poll(9200, k, 88),
-            StatsEvent::SleepEnter { ts: 10000, physical_key: k.into() },
+            StatsEvent::SleepEnter {
+                ts: 10000,
+                physical_key: k.into(),
+            },
             ev_read(24400, k, 85, false, SOURCE_WAKE_FIRST_READ),
             ev_read(28000, k, 87, true, SOURCE_POLL),
             ev_read(31600, k, 95, true, SOURCE_POLL),
@@ -1385,7 +1373,10 @@ mod tests {
         let k = "kbd-1";
         let events = vec![
             ev_poll(500, k, 90),
-            StatsEvent::SleepEnter { ts: 1000, physical_key: k.into() },
+            StatsEvent::SleepEnter {
+                ts: 1000,
+                physical_key: k.into(),
+            },
             StatsEvent::RunStop { ts: 2000 },
             StatsEvent::RunStart { ts: 90000 },
             ev_read(95000, k, 88, false, SOURCE_WAKE_FIRST_READ),
@@ -1406,7 +1397,11 @@ mod tests {
             ev_poll(1000, k, 90),
             StatsEvent::Boundary {
                 ts: 8200,
-                devices: vec![BoundaryDevice { physical_key: k.into(), percent: 85, charging: false }],
+                devices: vec![BoundaryDevice {
+                    physical_key: k.into(),
+                    percent: 85,
+                    charging: false,
+                }],
             },
             ev_poll(15400, k, 83),
         ];
@@ -1536,7 +1531,15 @@ mod tests {
                 display_name: "My \"K380\", Keys".into(),
                 ..seg("kbd-1", SegmentType::Active, 2000, 9200, 90, 88, &[])
             },
-            seg("kbd-1", SegmentType::Unknown, 10000, 24400, 88, 85, &[NOTE_EVIDENCE_MISSING]),
+            seg(
+                "kbd-1",
+                SegmentType::Unknown,
+                10000,
+                24400,
+                88,
+                85,
+                &[NOTE_EVIDENCE_MISSING],
+            ),
         ];
         let csv = render_csv(&segs, None, CST);
         let mut lines = csv.lines();
@@ -1572,7 +1575,10 @@ mod tests {
         assert!(rows[0].starts_with("D1,"), "row0: {}", rows[0]);
         assert!(rows[1].starts_with("D2,"), "row1: {}", rows[1]);
         // 键列（行首）不得出现原键（display_name 保留真实值属预期）。
-        assert!(!csv.lines().any(|l| l.starts_with("dev-")), "匿名化后键列不得含原键");
+        assert!(
+            !csv.lines().any(|l| l.starts_with("dev-")),
+            "匿名化后键列不得含原键"
+        );
     }
 
     // -- JSON 导出（I-07）-----------------------------------------------------
@@ -1581,12 +1587,23 @@ mod tests {
     fn json_export_anonymizes_physical_key_and_preserves_names() {
         let events = vec![
             ev_poll(1000, "kbd-1", 90),
-            StatsEvent::SleepEnter { ts: 2000, physical_key: "kbd-1".into() },
+            StatsEvent::SleepEnter {
+                ts: 2000,
+                physical_key: "kbd-1".into(),
+            },
             StatsEvent::Boundary {
                 ts: 3000,
                 devices: vec![
-                    BoundaryDevice { physical_key: "kbd-1".into(), percent: 88, charging: false },
-                    BoundaryDevice { physical_key: "mouse-2".into(), percent: 60, charging: true },
+                    BoundaryDevice {
+                        physical_key: "kbd-1".into(),
+                        percent: 88,
+                        charging: false,
+                    },
+                    BoundaryDevice {
+                        physical_key: "mouse-2".into(),
+                        percent: 60,
+                        charging: true,
+                    },
                 ],
             },
             StatsEvent::RunStop { ts: 4000 },
@@ -1601,7 +1618,10 @@ mod tests {
         let k = anon["kbd-1"].clone();
         let m = anon["mouse-2"].clone();
         assert_eq!(arr[0]["physical_key"], k);
-        assert_eq!(arr[0]["display_name"], "Name-kbd-1", "display_name 保留真实值");
+        assert_eq!(
+            arr[0]["display_name"], "Name-kbd-1",
+            "display_name 保留真实值"
+        );
         assert_eq!(arr[0]["source"], SOURCE_POLL);
         assert_eq!(arr[1]["physical_key"], k);
         assert_eq!(arr[1]["event"], "sleep_enter");
@@ -1610,10 +1630,17 @@ mod tests {
         assert_eq!(arr[3]["event"], "run_stop");
         let s = render_json_events(&events, Some(&anon), 1);
         // physical_key 字段值不得为原键（display_name 保留真实值属预期）。
-        assert!(!s.contains("\"physical_key\":\"kbd-1\""), "read 事件键未脱敏");
-        assert!(!s.contains("\"physical_key\":\"mouse-2\""), "boundary 设备键未脱敏");
+        assert!(
+            !s.contains("\"physical_key\":\"kbd-1\""),
+            "read 事件键未脱敏"
+        );
+        assert!(
+            !s.contains("\"physical_key\":\"mouse-2\""),
+            "boundary 设备键未脱敏"
+        );
         // 空态：events: []。
-        let empty: serde_json::Value = serde_json::from_str(&render_json_events(&[], None, 1)).unwrap();
+        let empty: serde_json::Value =
+            serde_json::from_str(&render_json_events(&[], None, 1)).unwrap();
         assert_eq!(empty["events"].as_array().unwrap().len(), 0);
         // 未开匿名化：原键保留。
         let plain: serde_json::Value =
@@ -1630,7 +1657,10 @@ mod tests {
             StatsEvent::RunStart { ts: 1000 },
             ev_poll(2000, k, 90),
             ev_poll(9200, k, 88),
-            StatsEvent::SleepEnter { ts: 10000, physical_key: k.into() },
+            StatsEvent::SleepEnter {
+                ts: 10000,
+                physical_key: k.into(),
+            },
             ev_read(24400, k, 85, false, SOURCE_WAKE_FIRST_READ),
             ev_read(28000, k, 87, true, SOURCE_POLL),
             ev_read(31600, k, 95, true, SOURCE_POLL),
@@ -1737,7 +1767,13 @@ mod tests {
         let html = render_html(&report);
         // 零外部资源引用（SVG 命名空间 URI 是标识符、不产生请求，不计）。
         for pat in [
-            "<script src", "<link", "<img", "@import", "url(", "fetch(", "XMLHttpRequest",
+            "<script src",
+            "<link",
+            "<img",
+            "@import",
+            "url(",
+            "fetch(",
+            "XMLHttpRequest",
         ] {
             assert!(!html.contains(pat), "HTML 含外部请求模式: {pat}");
         }
@@ -1854,7 +1890,10 @@ mod tests {
                     events.push(ev_read(ts, &key, pct, false, SOURCE_POLL));
                     ts += 120;
                 }
-                events.push(StatsEvent::SleepEnter { ts, physical_key: key.clone() });
+                events.push(StatsEvent::SleepEnter {
+                    ts,
+                    physical_key: key.clone(),
+                });
                 ts += 11 * 3600; // 夜间休眠 11h
                 pct = pct.saturating_sub(1);
                 events.push(ev_read(ts, &key, pct, false, SOURCE_WAKE_FIRST_READ));
@@ -1895,7 +1934,6 @@ mod tests {
         assert!(segs.len() < events.len() / 10, "段数 {}", segs.len());
     }
 }
-
 
 #[cfg(test)]
 mod filename_tests {

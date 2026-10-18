@@ -393,8 +393,7 @@ impl AppCore {
             charging: rec.charging,
             // source 字符串无法还原时回退占位（仅影响诊断展示，不影响
             // 电量数值与归并）。
-            source: BatterySource::from_name(&rec.source)
-                .unwrap_or(BatterySource::UnifiedBattery),
+            source: BatterySource::from_name(&rec.source).unwrap_or(BatterySource::UnifiedBattery),
         });
         device.state = DeviceState::Sleeping;
         let mut entry = DeviceEntry::new(device);
@@ -444,8 +443,7 @@ impl AppCore {
     pub fn remove_virtual_by_keys(&mut self, keys: &[String]) -> Vec<String> {
         let mut removed = Vec::new();
         self.entries.retain(|e| {
-            let drop = e.is_virtual
-                && keys.iter().any(|k| k == e.device.physical_key.as_str());
+            let drop = e.is_virtual && keys.iter().any(|k| k == e.device.physical_key.as_str());
             if drop {
                 removed.push(e.device.id.clone());
             }
@@ -1334,7 +1332,10 @@ mod tests {
         let (mut core, now) = sleeping_core("a");
         let e = &core.entries()[0];
         assert_eq!(e.device.state, DeviceState::Sleeping);
-        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(
+            core.record_timeout("a", now),
+            TimeoutOutcome::AlreadySleeping
+        );
         assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
     }
 
@@ -1398,7 +1399,10 @@ mod tests {
         let (mut core, now) = sleeping_core("a");
         core.note_wake_signal("a", now);
         core.begin_wake_probe("a", now);
-        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(
+            core.record_timeout("a", now),
+            TimeoutOutcome::AlreadySleeping
+        );
         assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
         let later = now + Duration::from_secs(3600);
         assert_eq!(core.poll_decision("a", later), PollDecision::Skip);
@@ -1733,7 +1737,10 @@ mod tests {
         );
         // 首个实时读数接管显示。
         core.record_success("ep9", reading(80, false), now);
-        assert_eq!(core.entries()[0].device.battery.map(|b| b.percent), Some(80));
+        assert_eq!(
+            core.entries()[0].device.battery.map(|b| b.percent),
+            Some(80)
+        );
 
         // Name 回退键归并（同名字符串、无 provenance）。
         let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
@@ -1751,7 +1758,8 @@ mod tests {
     fn key_conflict_detection_and_three_package_behavior() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let now = Instant::now();
-        let mut store = LastKnownStore::new(std::env::temp_dir().join("vt-core-conflict-test.json"));
+        let mut store =
+            LastKnownStore::new(std::env::temp_dir().join("vt-core-conflict-test.json"));
 
         // 虚拟 + 真实同键：待归并，不是冲突。
         assert!(core.seed_virtual(&persisted("Mouse Duo", "Mouse Duo", 70)));
@@ -1851,8 +1859,7 @@ mod tests {
 
         // K2 被淘汰：清虚拟条目；Mouse K1 已归并为真实条目——即便其键
         // 列入清除名单也不被动（is_virtual 守卫）。
-        let removed =
-            core.remove_virtual_by_keys(&["K2".to_string(), "Mouse K1".to_string()]);
+        let removed = core.remove_virtual_by_keys(&["K2".to_string(), "Mouse K1".to_string()]);
         assert_eq!(removed, vec!["virtual#K2".to_string()]);
         assert_eq!(core.entries().len(), 1);
         assert_eq!(core.entries()[0].device.id, "epR");
@@ -1872,7 +1879,10 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(60, true), t0);
         assert_eq!(core.entries()[0].next_due, Some(t0 + POLL_CHARGING));
-        assert!(!core.is_due("a", t0 + Duration::from_secs(13)), "+13s 未到期");
+        assert!(
+            !core.is_due("a", t0 + Duration::from_secs(13)),
+            "+13s 未到期"
+        );
         assert!(core.is_due("a", t0 + POLL_CHARGING), "+15s 到期");
         // 节拍保持：每到都读到充电 → 下一个到期点恒为「本次读数 +15s」。
         let t1 = t0 + POLL_CHARGING;
@@ -2000,7 +2010,10 @@ mod tests {
         let _ = core.record_timeout("a", t1);
         assert_eq!(
             core.next_poll_due(),
-            Some(t0 + Duration::from_secs(60) + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            Some(
+                t0 + Duration::from_secs(60)
+                    + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)
+            ),
             "a 休眠后预算由 b 的到期点接管"
         );
         // 快照与默认展示回归：两台都在册，b 低电占默认展示位。

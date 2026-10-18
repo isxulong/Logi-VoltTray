@@ -102,9 +102,8 @@ fn clock_rewind_tail_fixture_matches_recheck_py() {
     }
     let fixture = repo_root().join("fixtures/stats_clock_rewind_tail.jsonl");
     for anon in [false, true] {
-        run_recheck(&fixture, anon).unwrap_or_else(|e| {
-            panic!("回拨尾段固件对账失败（anon={anon}）：{e}")
-        });
+        run_recheck(&fixture, anon)
+            .unwrap_or_else(|e| panic!("回拨尾段固件对账失败（anon={anon}）：{e}"));
     }
 }
 
@@ -116,8 +115,7 @@ fn adversarial_fixture_matches_recheck_py() {
     }
     let fixture = repo_root().join("fixtures/stats_adversarial.jsonl");
     for anon in [false, true] {
-        run_recheck(&fixture, anon).unwrap_or_else(|e| {
-            panic!("对抗样本固件对账失败（anon={anon}）：{e}")
-        });
+        run_recheck(&fixture, anon)
+            .unwrap_or_else(|e| panic!("对抗样本固件对账失败（anon={anon}）：{e}"));
     }
 }

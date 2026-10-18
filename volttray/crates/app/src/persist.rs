@@ -244,7 +244,10 @@ impl LastKnownStore {
         }
         let mut records: Vec<PersistedDevice> = map.into_values().collect();
         enforce_caps(&mut records);
-        store.records = records.into_iter().map(|r| (r.physical_key.clone(), r)).collect();
+        store.records = records
+            .into_iter()
+            .map(|r| (r.physical_key.clone(), r))
+            .collect();
         store.persisted = store.records.clone();
         let n = store.records.len();
         (store, LoadOutcome::Loaded(n))
@@ -297,7 +300,9 @@ impl LastKnownStore {
             }
         };
         if changed {
-            self.dirty_since.entry(physical_key.to_string()).or_insert(now);
+            self.dirty_since
+                .entry(physical_key.to_string())
+                .or_insert(now);
         }
         changed
     }
@@ -351,12 +356,9 @@ impl LastKnownStore {
                     .keys()
                     .filter(|k| {
                         fallback
-                            || self
-                                .last_persisted_at
-                                .get(*k)
-                                .is_none_or(|t| {
-                                    now.duration_since(*t) >= self.tuning.per_device_debounce
-                                })
+                            || self.last_persisted_at.get(*k).is_none_or(|t| {
+                                now.duration_since(*t) >= self.tuning.per_device_debounce
+                            })
                     })
                     .cloned()
                     .collect();
@@ -414,7 +416,10 @@ impl LastKnownStore {
             self.dirty_since.remove(k);
             self.last_persisted_at.remove(k);
         }
-        self.persisted = all.into_iter().map(|r| (r.physical_key.clone(), r)).collect();
+        self.persisted = all
+            .into_iter()
+            .map(|r| (r.physical_key.clone(), r))
+            .collect();
         self.write_atomic()?;
         self.last_flush = Some(now);
         self.writes_since_fsync += 1;
@@ -464,8 +469,12 @@ impl LastKnownStore {
 
     /// 启动清理同目录孤儿 `*.tmp`（原子写中途崩溃残留；尽力而为）。
     fn cleanup_orphan_tmps(&self) {
-        let Some(dir) = self.path.parent() else { return };
-        let Ok(entries) = fs::read_dir(dir) else { return };
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let name = e.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -487,11 +496,7 @@ fn truncate_name(name: &str) -> String {
 fn enforce_caps(records: &mut Vec<PersistedDevice>) -> Vec<String> {
     let mut evicted = Vec::new();
     let evict_oldest = |records: &mut Vec<PersistedDevice>, evicted: &mut Vec<String>| {
-        if let Some((idx, _)) = records
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, r)| r.last_seen)
-        {
+        if let Some((idx, _)) = records.iter().enumerate().min_by_key(|(_, r)| r.last_seen) {
             evicted.push(records.remove(idx).physical_key);
         }
     };
@@ -677,9 +682,12 @@ mod tests {
     fn on_disk_percent(dir: &Path, key: &str) -> Option<u64> {
         let raw = fs::read_to_string(dir.join(STORE_FILE_NAME)).ok()?;
         let f: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        f["devices"].as_array().unwrap().iter().find(|d| d["physical_key"] == key).map(
-            |d| d["percent"].as_u64().unwrap(),
-        )
+        f["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["physical_key"] == key)
+            .map(|d| d["percent"].as_u64().unwrap())
     }
 
     #[test]
@@ -709,7 +717,11 @@ mod tests {
         let out = store.flush_if_due(t0 + Duration::from_secs(2)).unwrap();
         assert!(out.wrote);
         assert_eq!(on_disk_percent(&dir, "k2"), Some(60));
-        assert_eq!(on_disk_percent(&dir, "k1"), Some(80), "k1 仍在 per-device 窗口");
+        assert_eq!(
+            on_disk_percent(&dir, "k1"),
+            Some(80),
+            "k1 仍在 per-device 窗口"
+        );
         // k1 距上次持久化满 3s → 写入。
         let out = store.flush_if_due(t0 + Duration::from_secs(4)).unwrap();
         assert!(out.wrote);
@@ -743,7 +755,11 @@ mod tests {
         // 兜底：dirty 满 6s → per-device 未满也强制落盘。
         let out = store.flush_if_due(t0 + Duration::from_secs(8)).unwrap();
         assert!(out.wrote);
-        assert_eq!(on_disk_percent(&dir, "k1"), Some(81), "60s 兜底应压过 per-device 窗口");
+        assert_eq!(
+            on_disk_percent(&dir, "k1"),
+            Some(81),
+            "60s 兜底应压过 per-device 窗口"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -757,21 +773,43 @@ mod tests {
         let out = store.flush_if_due(t0 + Duration::from_secs(1)).unwrap();
         assert!(out.wrote && out.fsynced);
         // 间隔内再次落盘：不 fsync。
-        store.note_reading("k1", "M", 81, false, "unified_battery", 1001, t0 + Duration::from_secs(2));
+        store.note_reading(
+            "k1",
+            "M",
+            81,
+            false,
+            "unified_battery",
+            1001,
+            t0 + Duration::from_secs(2),
+        );
         let out = store.flush_if_due(t0 + Duration::from_secs(5)).unwrap();
         assert!(out.wrote && !out.fsynced);
         // 过 fsync 间隔（10s）后 → fsync。
-        store.note_reading("k1", "M", 82, false, "unified_battery", 1002, t0 + Duration::from_secs(9));
+        store.note_reading(
+            "k1",
+            "M",
+            82,
+            false,
+            "unified_battery",
+            1002,
+            t0 + Duration::from_secs(9),
+        );
         let out = store.flush_if_due(t0 + Duration::from_secs(12)).unwrap();
         assert!(out.wrote && out.fsynced);
         // 退出：强制落盘全部 dirty + fsync（无视防抖窗口）。
-        store.note_reading("k1", "M", 83, false, "unified_battery", 1003, t0 + Duration::from_secs(13));
+        store.note_reading(
+            "k1",
+            "M",
+            83,
+            false,
+            "unified_battery",
+            1003,
+            t0 + Duration::from_secs(13),
+        );
         let out = store.shutdown_flush(t0 + Duration::from_secs(13)).unwrap();
         assert!(out.wrote && out.fsynced);
-        let f: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(dir.join(STORE_FILE_NAME)).unwrap(),
-        )
-        .unwrap();
+        let f: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(STORE_FILE_NAME)).unwrap()).unwrap();
         assert_eq!(f["devices"][0]["percent"].as_u64().unwrap(), 83);
         assert_eq!(f["version"].as_u64().unwrap(), SCHEMA_VERSION as u64);
         // 无 dirty 的退出也保证 fsync 语义且不写盘。
@@ -790,7 +828,11 @@ mod tests {
         seed_file(&dir, devices);
         let (mut store, outcome) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
         assert_eq!(outcome, LoadOutcome::Loaded(MAX_DEVICES));
-        let keys: Vec<_> = store.records().into_iter().map(|r| r.physical_key).collect();
+        let keys: Vec<_> = store
+            .records()
+            .into_iter()
+            .map(|r| r.physical_key)
+            .collect();
         assert!(!keys.contains(&"k00".to_string()));
         assert!(!keys.contains(&"k01".to_string()));
         assert!(keys.contains(&"k33".to_string()));
@@ -862,7 +904,15 @@ mod tests {
         let dir = tmpdir("reload");
         let (mut store, _) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
         let t0 = Instant::now();
-        store.note_reading("k1", "MX Master", 62, true, "battery_status", 1_700_000_000, t0);
+        store.note_reading(
+            "k1",
+            "MX Master",
+            62,
+            true,
+            "battery_status",
+            1_700_000_000,
+            t0,
+        );
         let out = store.flush_if_due(t0 + Duration::from_secs(1)).unwrap();
         assert!(out.wrote);
         let (store2, outcome) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
@@ -906,15 +956,18 @@ mod tests {
             if out.wrote {
                 let size = fs::metadata(dir.join(STORE_FILE_NAME)).unwrap().len() as usize;
                 assert!(size <= MAX_BYTES, "文件超限：{size}");
-                let f: serde_json::Value = serde_json::from_str(
-                    &fs::read_to_string(dir.join(STORE_FILE_NAME)).unwrap(),
-                )
-                .unwrap();
+                let f: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(dir.join(STORE_FILE_NAME)).unwrap())
+                        .unwrap();
                 assert!(f["devices"].as_array().unwrap().len() <= MAX_DEVICES);
             }
         }
         // LRU：40 台轮换，最后 300 轮注入的 10 台必在库中。
-        let keys: Vec<String> = store.records().into_iter().map(|r| r.physical_key).collect();
+        let keys: Vec<String> = store
+            .records()
+            .into_iter()
+            .map(|r| r.physical_key)
+            .collect();
         for d in 0..10u64 {
             let key = format!("dev-{}", (299 * 10 + d) % 40);
             assert!(keys.contains(&key), "最近活跃设备被误淘汰：{key}");

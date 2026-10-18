@@ -29,13 +29,13 @@ mod menu;
 #[cfg(windows)]
 mod rawinput;
 // WP-A（A-1b）：虚拟条目「最后更新于」时间注释的本地时格式化。
-mod timelocal;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod single;
 #[cfg(windows)]
 mod statsexport;
+mod timelocal;
 #[cfg(windows)]
 mod toast;
 
@@ -645,9 +645,7 @@ mod imp {
         let (mut store, load_outcome) =
             LastKnownStore::load(persist::default_path(), FlushTuning::default());
         match load_outcome {
-            LoadOutcome::Empty => {
-                bootlog::note("last_known.json: no usable store (fresh start)")
-            }
+            LoadOutcome::Empty => bootlog::note("last_known.json: no usable store (fresh start)"),
             LoadOutcome::Loaded(n) => {
                 bootlog::note(&format!("last_known.json: loaded {n} record(s)"))
             }
@@ -682,9 +680,9 @@ mod imp {
             volttray_app::stats::StatsLoadOutcome::Ready => {
                 bootlog::note("stats.jsonl: existing store ready")
             }
-            volttray_app::stats::StatsLoadOutcome::Repaired(n) => bootlog::note(
-                &format!("stats.jsonl: truncated {n} trailing byte(s) (crash mid-write repair)"),
-            ),
+            volttray_app::stats::StatsLoadOutcome::Repaired(n) => bootlog::note(&format!(
+                "stats.jsonl: truncated {n} trailing byte(s) (crash mid-write repair)"
+            )),
         }
         stats_store.note_run_start(wall_secs() as i64, Instant::now());
         // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
@@ -1004,9 +1002,14 @@ mod imp {
                             let shared = SharedChannel(Arc::new(Mutex::new(ch)));
                             let mut slots = Vec::new();
                             for slot in SCAN_SLOTS {
-                                if let Ok((s, rebound)) =
-                                    try_slot(&core, &observer, &shared, &info, slot, &mut stats_store)
-                                {
+                                if let Ok((s, rebound)) = try_slot(
+                                    &core,
+                                    &observer,
+                                    &shared,
+                                    &info,
+                                    slot,
+                                    &mut stats_store,
+                                ) {
                                     slots.push(s);
                                     if let Some((old_id, _)) = rebound {
                                         pending_aliases.push(old_id);
@@ -1343,7 +1346,9 @@ mod imp {
                                         "battery query failed id={} reason=query_timeout (sleep path)",
                                         s.id
                                     ));
-                                    if core.record_timeout(&s.id, now) == TimeoutOutcome::EnteredSleep {
+                                    if core.record_timeout(&s.id, now)
+                                        == TimeoutOutcome::EnteredSleep
+                                    {
                                         // WP-B：sleep_enter 事件（分段归因
                                         // 唯一起点；判定本就发生、仅多落一
                                         // 行日志，零新增设备查询——P0-1）。
@@ -1352,9 +1357,7 @@ mod imp {
                                                 .entries()
                                                 .iter()
                                                 .find(|e| e.device.id == s.id)
-                                                .map(|e| {
-                                                    e.device.physical_key.as_str().to_string()
-                                                })
+                                                .map(|e| e.device.physical_key.as_str().to_string())
                                                 .unwrap_or_default();
                                             if !pk.is_empty() {
                                                 stats_store.note_sleep_enter(
@@ -1591,7 +1594,9 @@ mod imp {
                 bootlog::note(&format!("stats.jsonl flush failed: {e}"));
             }
             if stats_store.take_rotation_notice() {
-                bootlog::note("stats.jsonl approaching rotation watermark; prompting user to export");
+                bootlog::note(
+                    "stats.jsonl approaching rotation watermark; prompting user to export",
+                );
                 let (title, body) = (
                     "LogiVoltTray 耗电统计".to_string(),
                     "统计历史即将轮转，建议先导出".to_string(),
@@ -1599,9 +1604,7 @@ mod imp {
                 if notify_enabled {
                     match toast::notify(&title, &body, silent) {
                         Ok(()) => bootlog::note("toast dispatched: stats rotation notice"),
-                        Err(e) => bootlog::note(
-                            &format!("stats rotation toast failed: {e}"),
-                        ),
+                        Err(e) => bootlog::note(&format!("stats rotation toast failed: {e}")),
                     }
                 } else {
                     bootlog::note("toast suppressed (notifications disabled): stats rotation");
@@ -1758,14 +1761,10 @@ mod imp {
                         if let Err(e) =
                             stats_store.shutdown_flush(Instant::now(), wall_secs() as i64)
                         {
-                            bootlog::note(
-                                &format!("stats.jsonl shutdown flush failed: {e}"),
-                            );
+                            bootlog::note(&format!("stats.jsonl shutdown flush failed: {e}"));
                         }
                         if let Err(e) = store.shutdown_flush(Instant::now()) {
-                            bootlog::note(
-                                &format!("last_known.json shutdown flush failed: {e}"),
-                            );
+                            bootlog::note(&format!("last_known.json shutdown flush failed: {e}"));
                         }
                         // WP-B（I-02）：回执落盘完成。
                         let _ = shutdown_ack.send(());
@@ -1823,8 +1822,7 @@ mod imp {
         let stem = req.csv_path.with_extension("");
         if req.json {
             let p = stem.with_extension("json");
-            let content =
-                attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
+            let content = attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
             match write_tmp_rename(&p, &content) {
                 Ok(()) => done.push(p.display().to_string()),
                 Err(e) => failed.push(format!("{}: {e}", p.display())),

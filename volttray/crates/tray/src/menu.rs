@@ -31,7 +31,10 @@ fn device_row_text(dev: &DeviceSnapshot) -> String {
             }
             (Some(p), None) => format!("{p}% 最后已知"),
             (None, Some(t)) => {
-                format!("最后已知 · 更新于 {} · 电量未知", crate::timelocal::fmt_hhmm(t))
+                format!(
+                    "最后已知 · 更新于 {} · 电量未知",
+                    crate::timelocal::fmt_hhmm(t)
+                )
             }
             (None, None) => "最后已知 · 电量未知".to_string(),
         };
@@ -76,8 +79,12 @@ pub fn build_menu(
         let checked = pinned.map_or(default_device == Some(dev.id.as_str()), |p| p == dev.id);
         // WP-A（v3 A-2）：可展示数据即可点（含休眠灰行与虚拟最后已知行）；
         // 点击语义不变（pin + refresh_ui，零查询）。无任何读数才禁用。
-        let item =
-            CheckMenuItem::new(device_row_text(dev), dev.has_displayable_data(), checked, None);
+        let item = CheckMenuItem::new(
+            device_row_text(dev),
+            dev.has_displayable_data(),
+            checked,
+            None,
+        );
         device_rows.push((item.id().clone(), dev.id.clone()));
         let _ = menu.append(&item);
     }

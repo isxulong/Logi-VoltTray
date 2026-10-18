@@ -594,7 +594,9 @@ impl StatsStore {
 
 /// 启动清理同目录孤儿 `*.tmp`（WP-A 原子写中途崩溃残留；尽力而为）。
 fn cleanup_orphan_tmps(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -615,7 +617,9 @@ pub fn load_events(dir: &Path) -> Vec<StatsEvent> {
 pub fn load_events_from(archive: &Path, current: &Path) -> Vec<StatsEvent> {
     let mut out = Vec::new();
     for path in [archive, current] {
-        let Ok(body) = fs::read_to_string(path) else { continue };
+        let Ok(body) = fs::read_to_string(path) else {
+            continue;
+        };
         for line in body.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -800,7 +804,10 @@ mod tests {
         // 灌到「再追加一行事件即触顶」的水位。
         let filler = "x".repeat((STATS_MAX_BYTES - 128) as usize);
         {
-            let mut f = fs::OpenOptions::new().append(true).open(dir.join(STATS_FILE_NAME)).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join(STATS_FILE_NAME))
+                .unwrap();
             // 单行非法事件（读取端会 skip）只用于占位灌满。
             f.write_all(filler.as_bytes()).unwrap();
             f.write_all(b"\n").unwrap();
@@ -844,7 +851,10 @@ mod tests {
         st.shutdown_flush(t0, 101).unwrap();
         let filler = "x".repeat((STATS_ROTATE_WARN_BYTES - 4096) as usize);
         {
-            let mut f = fs::OpenOptions::new().append(true).open(dir.join(STATS_FILE_NAME)).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join(STATS_FILE_NAME))
+                .unwrap();
             f.write_all(filler.as_bytes()).unwrap();
             f.write_all(b"\n").unwrap();
         }
@@ -872,7 +882,10 @@ mod tests {
         let cur_len = fs::metadata(dir.join(STATS_FILE_NAME)).unwrap().len();
         let filler2 = "x".repeat((STATS_MAX_BYTES - cur_len - 64) as usize);
         {
-            let mut f = fs::OpenOptions::new().append(true).open(dir.join(STATS_FILE_NAME)).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join(STATS_FILE_NAME))
+                .unwrap();
             f.write_all(filler2.as_bytes()).unwrap();
             f.write_all(b"\n").unwrap();
         }
@@ -953,7 +966,10 @@ mod tests {
             StatsLoadOutcome::Repaired(n) => n,
             other => panic!("expected Repaired, got {other:?}"),
         };
-        assert_eq!(repaired_len, "{\"ts\":2,\"physical_key\":\"u\",\"displa".len() as u64);
+        assert_eq!(
+            repaired_len,
+            "{\"ts\":2,\"physical_key\":\"u\",\"displa".len() as u64
+        );
         let after = fs::read_to_string(&path).unwrap();
         assert_eq!(after, format!("{good}\n"));
         let _ = fs::remove_dir_all(&dir);
@@ -977,7 +993,10 @@ mod tests {
         let dir = tmpdir("readboth");
         fs::write(
             dir.join(STATS_ARCHIVE_NAME),
-            format!("{}\nbad line\n", StatsEvent::RunStart { ts: 1 }.to_json_line()),
+            format!(
+                "{}\nbad line\n",
+                StatsEvent::RunStart { ts: 1 }.to_json_line()
+            ),
         )
         .unwrap();
         fs::write(
@@ -988,7 +1007,10 @@ mod tests {
         let events = load_events(&dir);
         assert_eq!(
             events,
-            vec![StatsEvent::RunStart { ts: 1 }, StatsEvent::RunStop { ts: 2 }]
+            vec![
+                StatsEvent::RunStart { ts: 1 },
+                StatsEvent::RunStop { ts: 2 }
+            ]
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1026,7 +1048,9 @@ mod tests {
         st2.note_reading("u1", "A", 79, false, SOURCE_POLL, 3, t0);
         let out = st2.flush_if_due(t0 + Duration::from_secs(11), 4).unwrap();
         assert!(out.wrote && !out.fsynced, "within fsync interval");
-        let out = st2.flush_if_due(t0 + Duration::from_secs(301), 400).unwrap();
+        let out = st2
+            .flush_if_due(t0 + Duration::from_secs(301), 400)
+            .unwrap();
         assert!(out.fsynced, "fsync interval elapsed must fsync");
         let events = load_events(&dir);
         assert_eq!(events.len(), 2);

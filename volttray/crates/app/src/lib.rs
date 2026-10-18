@@ -19,6 +19,14 @@ pub mod reconnect;
 pub mod stats;
 pub mod wakechannel;
 
+pub use attribution::{
+    anonymize_map, build_report_data, build_segments, event_keys, fmt_local_date, fmt_rfc3339,
+    fnv1a64_hex, render_csv, render_html, render_json_events, stats_export_filename_local,
+    Chart1Series, DayDrain, RecentRate, Segment, SegmentType, TypeDurations, CHART1_BUCKET_SECS,
+    CHART1_DEFAULT_WINDOW_DAYS, CSV_HEADER, GAP_OVER_LIMIT_SECS, MERGE_WINDOW_SECS,
+    NOTE_BELOW_WINDOW, NOTE_BOUNDARY, NOTE_CLOCK_ANOMALY, NOTE_EVIDENCE_MISSING, NOTE_GAP_OVER_7D,
+    NOTE_RUN_GAP, RECENT_DAYS,
+};
 pub use config::{
     brighten, contrast_ok, contrast_ratio, flash_rgb, font_tier_for_percent, normalize_font_tiers,
     normalize_poll_secs, Config, ConfigWarning, ConfigWatcher, IconBackground, IconFontColor,
@@ -49,16 +57,8 @@ pub use reconnect::{
 };
 pub use stats::{
     default_dir as default_stats_dir, default_path as default_stats_path, load_events,
-    load_events_from, BoundaryDevice, ReadEvent, StatsEvent, StatsFlushOutcome, StatsLoadOutcome,
-    read_source, StatsStore, SOURCE_CHARGING_FAST, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
+    load_events_from, read_source, BoundaryDevice, ReadEvent, StatsEvent, StatsFlushOutcome,
+    StatsLoadOutcome, StatsStore, SOURCE_CHARGING_FAST, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
     STATS_ARCHIVE_NAME, STATS_FILE_NAME, STATS_MAX_BYTES,
-};
-pub use attribution::{
-    anonymize_map, build_report_data, build_segments, event_keys, fmt_local_date, fmt_rfc3339,
-    fnv1a64_hex, render_csv, render_html, render_json_events, Chart1Series, DayDrain, RecentRate,
-    stats_export_filename_local, Segment, SegmentType, TypeDurations, CHART1_BUCKET_SECS,
-    CHART1_DEFAULT_WINDOW_DAYS,
-    CSV_HEADER, GAP_OVER_LIMIT_SECS, MERGE_WINDOW_SECS, NOTE_BELOW_WINDOW, NOTE_BOUNDARY,
-    NOTE_CLOCK_ANOMALY, NOTE_EVIDENCE_MISSING, NOTE_GAP_OVER_7D, NOTE_RUN_GAP, RECENT_DAYS,
 };
 pub use wakechannel::channel_for_raw_path;

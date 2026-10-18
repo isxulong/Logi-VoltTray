@@ -19,7 +19,11 @@ fn main() {
         eprintln!("usage: recheck_export <stats.jsonl> <archive|-> <out.csv> <tz_min> <anon 0|1>");
         std::process::exit(2);
     }
-    let archive = if args[2] == "-" { "/dev/null" } else { &args[2] };
+    let archive = if args[2] == "-" {
+        "/dev/null"
+    } else {
+        &args[2]
+    };
     let events = load_events_from(Path::new(archive), Path::new(&args[1]));
     let segments = build_segments(&events);
     let anon = if args[5] == "1" {
@@ -36,5 +40,10 @@ fn main() {
     std::fs::write(stem.with_extension("html"), render_html(&report)).expect("write html");
     let json = render_json_events(&events, anon.as_ref(), generated);
     std::fs::write(stem.with_extension("json"), json).expect("write json");
-    println!("events={} segments={} -> {}(.csv/.html/.json)", events.len(), segments.len(), args[3]);
+    println!(
+        "events={} segments={} -> {}(.csv/.html/.json)",
+        events.len(),
+        segments.len(),
+        args[3]
+    );
 }

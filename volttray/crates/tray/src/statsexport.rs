@@ -67,8 +67,7 @@ unsafe extern "system" fn export_dlg_wndproc(
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as u32;
             if id == ID_EXPORT_OK || id == ID_EXPORT_CANCEL {
-                let state_ptr =
-                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
                 if !state_ptr.is_null() {
                     if id == ID_EXPORT_OK {
                         let check = |cid: u32| {
@@ -149,15 +148,20 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::bootlog::note(&format!(
-                    "stats export dialog: CreateWindowExW failed: {e}"
-                ));
+                crate::bootlog::note(&format!("stats export dialog: CreateWindowExW failed: {e}"));
                 return None;
             }
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut DialogState as isize);
         // 控件：说明 + 三勾选 + 确定/取消（子窗口随父窗口销毁，无需显式释放）。
-        let mk = |cls: &str, text: &str, style: WINDOW_STYLE, x: i32, y: i32, w: i32, h: i32, id: u32| {
+        let mk = |cls: &str,
+                  text: &str,
+                  style: WINDOW_STYLE,
+                  x: i32,
+                  y: i32,
+                  w: i32,
+                  h: i32,
+                  id: u32| {
             let cls_w = wide(cls);
             let text_w = wide(text);
             CreateWindowExW(
@@ -170,7 +174,9 @@ pub fn pick_export_options() -> Option<ExportOptions> {
                 w,
                 h,
                 Some(hwnd),
-                Some(windows::Win32::UI::WindowsAndMessaging::HMENU(id as *mut core::ffi::c_void)),
+                Some(windows::Win32::UI::WindowsAndMessaging::HMENU(
+                    id as *mut core::ffi::c_void,
+                )),
                 Some(hinst),
                 None,
             )
@@ -237,7 +243,12 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             ID_EXPORT_CANCEL,
         );
         // 默认勾选 HTML 报告（本期拍板特性）。
-        SendMessageW(h_html, BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), None);
+        SendMessageW(
+            h_html,
+            BM_SETCHECK,
+            Some(WPARAM(BST_CHECKED.0 as usize)),
+            None,
+        );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd);
         // 模态循环：对话框销毁时 PostQuitMessage 退出本循环。
@@ -332,9 +343,7 @@ pub fn install_endsession_window(cmd_tx: mpsc::Sender<IoCmd>, ack_rx: mpsc::Rece
         let hinst = match windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
             Ok(h) => windows::Win32::Foundation::HINSTANCE(h.0),
             Err(e) => {
-                crate::bootlog::note(&format!(
-                    "endsession window: GetModuleHandleW failed: {e}"
-                ));
+                crate::bootlog::note(&format!("endsession window: GetModuleHandleW failed: {e}"));
                 return;
             }
         };
@@ -371,9 +380,7 @@ pub fn install_endsession_window(cmd_tx: mpsc::Sender<IoCmd>, ack_rx: mpsc::Rece
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::bootlog::note(&format!(
-                    "endsession window: CreateWindowExW failed: {e}"
-                ));
+                crate::bootlog::note(&format!("endsession window: CreateWindowExW failed: {e}"));
                 return;
             }
         };
