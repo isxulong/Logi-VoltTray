@@ -82,4 +82,4 @@ cargo build --release --locked -p volttray-tray
 
 ## 许可证
 
-MIT（见 `volttray/Cargo.toml`）。罗技（Logitech）相关商标归其所有者所有，本项目与罗技公司无任何关联。
+MIT（见仓库根 `LICENSE` 文件）。罗技（Logitech）相关商标归其所有者所有，本项目与罗技公司无任何关联。

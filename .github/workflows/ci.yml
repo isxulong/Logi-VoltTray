@@ -3,11 +3,13 @@ name: ci
 on:
   push:
     branches: [main]
+  # v0.3.17（一轮 P0-②）：PR 同门禁（此前仅 push main 触发，PR 零验证）
+  pull_request: {}
   workflow_dispatch: {}
 
-# fmt 自动回推需要写权限（github-actions[bot] 提交格式化结果）
+# v0.3.17（一轮 P0-②）：fmt 不再自动回推，CI 无任何写权限需求
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,22 +32,9 @@ jobs:
         with:
           workspaces: volttray
 
-      # 自动格式化并回推：cargo fmt 修平差异后提交回 main（HEAD:main 推送避免 detached HEAD 问题），
-      # 无差异则跳过；随后 fmt --check 作为最终守卫
-      - name: fmt (auto-fix)
-        shell: bash
-        run: |
-          cargo fmt --all
-          if git diff --quiet; then
-            echo "fmt clean, nothing to push"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "style: apply cargo fmt (CI auto-fix)"
-            git push origin HEAD:main
-          fi
-
+      # v0.3.17（一轮 P0-②）：fmt 改纯检查——check 失败由作者本地
+      # cargo fmt 修（消除 bot 直推 main 的写权限面与「bot 提交再次
+      # 触发 CI」的循环风险）。
       - name: fmt --check
         run: cargo fmt --all -- --check
 
@@ -62,6 +51,12 @@ jobs:
         run: |
           set -o pipefail
           cargo test --workspace --locked 2>&1 | tee ../test.log
+
+      # v0.3.17（一轮 P0-④）：协议冻结门禁纳入 CI（Python 单侧，仓库根
+      # 执行；tests/_winstub.py 提供 hid 桩，windows runner 自带 python）
+      - name: protocol freeze (python unittest)
+        working-directory: ${{ github.workspace }}
+        run: python -m unittest discover -s tests -v
 
       - name: build release
         run: cargo build --release --locked -p volttray-tray

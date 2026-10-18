@@ -427,7 +427,14 @@ impl Ctx {
         if let Ok(mut guard) = self.arc.write() {
             *guard = cfg.clone();
         }
-        let _ = std::fs::write(&self.path, cfg.to_toml());
+        // v0.3.17（一轮 P0-⑤）：配置落盘改 tmp→rename 原子写，失败落
+        // bootlog 不再静默（写中途崩溃不留半截 TOML）。
+        if let Err(e) = crate::write_tmp_rename(&self.path, &cfg.to_toml()) {
+            crate::bootlog::note(&format!(
+                "settings persist to {} failed: {e}",
+                self.path.display()
+            ));
+        }
         crate::bootlog::note(&settings_applied_note(&prev, cfg));
     }
 }

@@ -42,7 +42,7 @@ mod toast;
 // WP-B：statsexport 子模块需要 crate 根可见的 IoCmd 与泛化 Save-As
 //（实现本体在 imp 内，此处再导出；statsexport 与 imp 互相引用）。
 #[cfg(windows)]
-pub(crate) use imp::{pick_save_path_with_filter, IoCmd};
+pub(crate) use imp::{pick_save_path_with_filter, write_tmp_rename, IoCmd};
 
 /// v0.3.8（D-64/B-2）：启动时图标渲染回退出厂默认的原因；首次打开设置
 /// 窗口时提示一次后取走（None = 未发生回退或已提示过）。
@@ -379,11 +379,15 @@ mod imp {
     /// 平面 TOML 的标量键就地改写；键不存在则追加到文件尾（配置所有权在 app，
     /// 托盘/设置窗口只触发持久化）。读取失败（如文件不存在）则只写该键。
     fn persist_kv(path: &Path, key: &str, value: &str) {
+        // v0.3.17（一轮 P0-⑤）：落盘改 tmp→rename 原子写（写中途崩溃
+        // 不留半截 TOML）；键匹配由前缀改等号锚定（避免「thresholds」
+        // 误中同前缀键）；写失败落 bootlog，不再静默吞错。
         if let Ok(text) = std::fs::read_to_string(path) {
             let mut out = String::with_capacity(text.len() + 16);
             let mut done = false;
             for line in text.lines() {
-                if !done && line.trim_start().starts_with(key) {
+                let line_key = line.trim_start().split('=').next().map(str::trim);
+                if !done && line_key == Some(key) {
                     out.push_str(&format!("{key} = {value}"));
                     done = true;
                 } else {
@@ -394,9 +398,11 @@ mod imp {
             if !done {
                 out.push_str(&format!("{key} = {value}\n"));
             }
-            let _ = std::fs::write(path, out);
-        } else {
-            let _ = std::fs::write(path, format!("{key} = {value}\n"));
+            if let Err(e) = write_tmp_rename(path, &out) {
+                bootlog::note(&format!("persist {key} to {} failed: {e}", path.display()));
+            }
+        } else if let Err(e) = write_tmp_rename(path, &format!("{key} = {value}\n")) {
+            bootlog::note(&format!("persist {key} to {} failed: {e}", path.display()));
         }
     }
 
@@ -912,9 +918,13 @@ mod imp {
         let mut wake_idle_sampler = MissLogSampler::new();
         'outer: loop {
             // WP-B：循环顶部的 try_recv 原本只识别 Shutdown——非 Shutdown
-            // 命令在此被消费即丢弃（RefreshNow/WakeSignal 丢弃无害：轮次
+            // 命令在此被消费即丢弃（WakeSignal 丢弃无害：轮次
             // 即刻开始，语义不变）；ExportStats 丢弃 = 导出静默丢失，必须
-            // 在此同样派发执行。
+            // 在此同样派发执行。v0.3.17（一轮 P0-③）注释更正：RefreshNow
+            // 丢弃并非无害——底部处理器出队 WakeSignal 后 continue
+            // 'outer，紧随的用户手动刷新会在循环顶此处出队（竞态窗口 =
+            // 底部出队到循环顶 try_recv 的微秒缝），旧语义下被静默
+            // 丢弃、「立即刷新」失效，现显式匹配转发（见下）。
             match cmd.try_recv() {
                 Ok(IoCmd::Shutdown) => {
                     // WP-B：run_stop 生命周期事件 + 强制落盘（每次运行 2 行之一）。
@@ -934,7 +944,13 @@ mod imp {
                     let msg = run_stats_export(&mut stats_store, &req);
                     gui.send(GuiMsg::StatsExportDone(msg));
                 }
-                // RefreshNow / WakeSignal：维持旧语义（轮次即刻开始，丢弃）。
+                // v0.3.17（一轮 P0-③）：循环顶 RefreshNow 显式转发
+                // request_refresh——与底部处理器（~1800）同一语义，修复
+                // 唤醒裁决后手动刷新被丢弃的竞态。
+                Ok(IoCmd::RefreshNow) => {
+                    reconnect.request_refresh();
+                }
+                // WakeSignal：维持旧语义（轮次即刻开始，丢弃无害）。
                 _ => {}
             }
 
@@ -2215,7 +2231,7 @@ mod imp {
     /// tmp→rename 落盘（WP-B JSON/HTML 副产物）：写中途失败不留半截目标
     /// 文件；失败清 tmp。Windows 下 rename 不覆盖既有文件，先删后改
     ///（目标已存在 = 用户在 Save-As 覆盖确认过同主干文件）。
-    fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
+    pub(crate) fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
         let mut tmp_os = path.as_os_str().to_owned();
         tmp_os.push(".tmp");
         let tmp = PathBuf::from(tmp_os);
@@ -2386,7 +2402,14 @@ mod imp {
                 if let Some(parent) = cfg_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let _ = std::fs::write(&cfg_path, c.to_toml());
+                // v0.3.17（一轮 P0-⑤）：默认配置回写改 tmp→rename 原子
+                // 写，失败落 bootlog 不再静默。
+                if let Err(e2) = write_tmp_rename(&cfg_path, &c.to_toml()) {
+                    bootlog::note(&format!(
+                        "default config persist to {} failed: {e2}",
+                        cfg_path.display()
+                    ));
+                }
                 (c, Vec::new())
             }
         };
@@ -3382,6 +3405,20 @@ mod imp {
                 FRAME_STATS.avg_tx_interval_ms(),
                 Some((sum0 + 500) / (cnt0 + 1))
             );
+        }
+
+        /// 一轮 P0-③：循环顶 RefreshNow 转发的时序语义——record_result
+        /// 关门（force 已消费、30s 门控生效）后 request_refresh 重新
+        /// 开门，should_enumerate 立即放行。修复前该命令在循环顶被
+        /// 静默丢弃，本断言即竞态修复的锁定。
+        #[test]
+        fn refresh_now_at_loop_top_sets_pending_force() {
+            let now = Instant::now();
+            let mut r = Reconnect::new();
+            r.record_result(now, 1);
+            assert!(!r.should_enumerate(now, true));
+            r.request_refresh();
+            assert!(r.should_enumerate(now, true));
         }
     }
 

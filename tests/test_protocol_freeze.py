@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """HID++ 协议冻结核验（合并后重新验证）。
 
-质检裁决：红版 logi_hidpp 与 T1 基线逐字节一致（审查方 cmp 实证），
-蓝版仅 +15 行构造函数失败清理。合并版 = 红版 + 同一处构造函数清理。
-因此以红版（=T1 基线代理）为参照：
+质检裁决：蓝版仅 +15 行构造函数失败清理。合并版 = 红版 + 同一处
+构造函数清理。因此以红版（=T1 基线代理）为参照：
   * 29 个协议常量必须与红版逐一相等；
   * 11 个协议函数源码必须与红版逐行一致；
   * 唯一允许的差异是 Channel.__init__（构造失败清理）。
+v0.3.17（一轮 P0-④）：red/ 基线为「合并版逆推重建」（T1 原件不可考，
+终审勘误：质检引用 commit 359b27a 实为 ea9b672，属报告层笔误、仓库
+无修复对象）；构造差异断言相应改为结构性（difflib），不再依赖与
+不可考原件的逐字节关系。
 """
 import inspect
 import os
@@ -15,8 +18,10 @@ import unittest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 MERGED_DIR = os.path.dirname(TESTS_DIR)
-# 红版目录（= T1 基线代理，质检报告 §0 验证记录 4：cmp 逐字节一致）
-RED_DIR = os.path.join(os.path.dirname(MERGED_DIR), 'red')
+# 红版目录（= T1 基线代理）。v0.3.17（一轮 P0-④）修复：此前指向
+# 仓库上级目录的 red/——父目录下并不存在该目录，门禁常年
+# FileNotFoundError；现指向库内 red/（基线已逆推重建入库）。
+RED_DIR = os.path.join(MERGED_DIR, 'red')
 
 sys.path.insert(0, TESTS_DIR)
 import _winstub  # noqa: E402  (hid 桩必须在导入 logi_hidpp 前就位)
@@ -64,18 +69,36 @@ class TestProtocolFreeze(unittest.TestCase):
                              inspect.getsource(getattr(self.r.Endpoint, fn)), fn)
 
     def test_only_constructor_differs(self):
-        """整文件 diff 只允许 Channel.__init__ 一处（构造失败清理）"""
-        for cls_name in ('Channel', 'Endpoint'):
-            for fn in ('__init__',):
-                src_m = inspect.getsource(getattr(getattr(self.m, cls_name), fn))
-                src_r = inspect.getsource(getattr(getattr(self.r, cls_name), fn))
-                if cls_name == 'Channel':
-                    self.assertNotEqual(src_m, src_r,
-                                        'Channel.__init__ 必须包含构造失败清理')
-                    self.assertIn('self.close()', src_m)
-                else:
-                    self.assertEqual(src_m, src_r,
-                                     '%s.%s 不允许有差异' % (cls_name, fn))
+        """整文件结构性 diff 只允许 Channel.__init__ 构造失败清理一处。
+
+        v0.3.17（一轮 P0-④）：red/ 为逆推重建基线（T1 原件不可考），
+        断言口径从「与原件逐字节比对」改为结构性——整文件 diff 的
+        非 equal 块恰好 1 个，且增删行全部落在构造清理语义内。
+        """
+        import difflib
+        with open(os.path.join(MERGED_DIR, 'logi_hidpp.py'), encoding='utf-8') as f:
+            m_lines = f.read().splitlines()
+        with open(os.path.join(RED_DIR, 'logi_hidpp.py'), encoding='utf-8') as f:
+            r_lines = f.read().splitlines()
+        sm = difflib.SequenceMatcher(None, r_lines, m_lines)
+        ops = [op for op in sm.get_opcodes() if op[0] != 'equal']
+        self.assertEqual(len(ops), 1, '只允许 Channel.__init__ 一处差异: %r' % (ops,))
+        _tag, i1, i2, j1, j2 = ops[0]
+        removed = r_lines[i1:i2]
+        added = m_lines[j1:j2]
+        joined_add = '\n'.join(added)
+        # 新增侧必须构成完整的构造失败清理语义
+        for needle in ('try:', 'except Exception:', 'self.close()', 'raise'):
+            self.assertIn(needle, joined_add)
+        # 删除侧只允许「被 try 包裹前的未缩进函数体」——其内容须逐行
+        # 出现在新增侧（仅缩进不同），即无逻辑改动
+        added_stripped = [a.strip() for a in added]
+        for line in removed:
+            self.assertIn(line.strip(), added_stripped)
+        # Endpoint.__init__ 不允许有差异
+        src_m = inspect.getsource(self.m.Endpoint.__init__)
+        src_r = inspect.getsource(self.r.Endpoint.__init__)
+        self.assertEqual(src_m, src_r)
 
 
 if __name__ == '__main__':

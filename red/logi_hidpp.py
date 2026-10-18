@@ -172,18 +172,13 @@ class Channel(object):
 
         self.short = None
         self.long = None
-        try:
-            self.short = hid.device()
-            self.short.open_path(short_path or long_path)
-            self.short.set_nonblocking(1)
-            if long_path:
-                self.long = hid.device()
-                self.long.open_path(long_path)
-                self.long.set_nonblocking(1)
-        except Exception:
-            # 构造中途失败（如长报文口打不开）时关掉已开的口，避免句柄泄漏
-            self.close()
-            raise
+        self.short = hid.device()
+        self.short.open_path(short_path or long_path)
+        self.short.set_nonblocking(1)
+        if long_path:
+            self.long = hid.device()
+            self.long.open_path(long_path)
+            self.long.set_nonblocking(1)
 
 
     def close(self):
