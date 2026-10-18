@@ -869,7 +869,7 @@ mod tests {
             LoadOutcome::Loaded(n) => n,
             other => panic!("expected Loaded, got {other:?}"),
         };
-        assert!(n < 33 && n >= 1, "256KB 保险应淘汰至回落，实际 {n}");
+        assert!((1..33).contains(&n), "256KB 保险应淘汰至回落，实际 {n}");
         let size = serialized_len(&store.records());
         assert!(size <= MAX_BYTES, "回落后仍超限：{size}");
         // 保留的是 last_seen 最新的一批。

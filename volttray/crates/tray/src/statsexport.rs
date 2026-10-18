@@ -68,23 +68,21 @@ unsafe extern "system" fn export_dlg_wndproc(
             let id = (wparam.0 & 0xFFFF) as u32;
             if id == ID_EXPORT_OK || id == ID_EXPORT_CANCEL {
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DialogState;
-                if !state_ptr.is_null() {
-                    if id == ID_EXPORT_OK {
-                        let check = |cid: u32| {
-                            SendMessageW(
-                                GetDlgItem(Some(hwnd), cid as i32).unwrap_or_default(),
-                                BM_GETCHECK,
-                                None,
-                                None,
-                            )
-                            .0 == BST_CHECKED.0 as isize
-                        };
-                        (*state_ptr).result = Some(ExportOptions {
-                            html: check(IDC_HTML),
-                            anonymize: check(IDC_ANON),
-                            json: check(IDC_JSON),
-                        });
-                    }
+                if !state_ptr.is_null() && id == ID_EXPORT_OK {
+                    let check = |cid: u32| {
+                        SendMessageW(
+                            GetDlgItem(Some(hwnd), cid as i32).unwrap_or_default(),
+                            BM_GETCHECK,
+                            None,
+                            None,
+                        )
+                        .0 == BST_CHECKED.0 as isize
+                    };
+                    (*state_ptr).result = Some(ExportOptions {
+                        html: check(IDC_HTML),
+                        anonymize: check(IDC_ANON),
+                        json: check(IDC_JSON),
+                    });
                 }
                 let _ = DestroyWindow(hwnd);
                 return LRESULT(0);

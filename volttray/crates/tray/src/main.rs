@@ -620,6 +620,7 @@ mod imp {
 
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
     /// v0.3.12（D-69）：`enum_snap` 接收每轮枚举快照（导出诊断时 GUI 线程读取）。
+    #[allow(clippy::too_many_arguments)]
     fn io_loop(
         core: Arc<Mutex<AppCore>>,
         observer: Arc<Mutex<Observer>>,
@@ -2594,7 +2595,7 @@ mod imp {
                 export_diag(observer, enum_snap, channel_map_miss);
             } else if e.id == ids.stats_export {
                 // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
-                crate::statsexport::begin_export(&cmd_tx);
+                crate::statsexport::begin_export(cmd_tx);
             } else if e.id == ids.blink {
                 state.blink_enabled = !state.blink_enabled;
                 if let Ok(mut guard) = cfg_arc.write() {
