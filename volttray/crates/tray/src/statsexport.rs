@@ -16,7 +16,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, SIZE, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    CreateFontIndirectW, DeleteObject, EnumFontFamiliesExW, GetDC, GetStockObject,
+    GetTextExtentPoint32W, ReleaseDC, SelectObject, DEFAULT_CHARSET, DEFAULT_GUI_FONT, HFONT,
+    HGDIOBJ, LOGFONTW, TEXTMETRICW,
+};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::BST_CHECKED;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -45,6 +50,101 @@ pub struct ExportOptions {
     pub html: bool,
     pub anonymize: bool,
     pub json: bool,
+}
+
+// —— R-5/R-6（v0.3.17 真机终审修复）：UI 字体回退栈 + 复选框宽度实测 ——
+/// R-5：中文 UI 字体回退栈（逐控件 WM_SETFONT）。真机简体 Windows 上
+/// 默认 MS Shell Dlg 映射缺中文字形导致对话框乱码（终审现象 4）：
+/// 按序探测系统实际安装的字体，首个可用者生效；三选皆缺退回
+/// DEFAULT_GUI_FONT stock 对象。
+const UI_FONT_CANDIDATES: [&str; 3] = ["Microsoft YaHei UI", "Segoe UI", "MS Shell Dlg 2"];
+
+/// R-6：复选框系统字形占位宽（勾选框方块 + 内边距，逻辑像素）。
+const CHECKBOX_GLYPH_W: i32 = 22;
+/// R-6：对话框左 / 右留白（逻辑像素）。
+const DLG_SIDE_MARGIN: i32 = 16;
+const DLG_RIGHT_MARGIN: i32 = 24;
+
+/// CreateFontIndirectW 对不存在的字面值不会失败（字体映射器静默
+/// 替换），字体是否存在必须用 EnumFontFamiliesExW 实测。探测本身
+/// 失败（拿不到 DC 等）按「存在」处理，避免误杀合法字体。
+fn font_available(face: &str) -> bool {
+    struct Hit(bool);
+    unsafe extern "system" fn enum_proc(
+        _lpelf: *const LOGFONTW,
+        _lpntme: *const TEXTMETRICW,
+        _ft: u32,
+        lparam: LPARAM,
+    ) -> i32 {
+        (*(lparam.0 as *mut Hit)).0 = true;
+        0
+    }
+    let face_w = wide(face);
+    let mut lf = LOGFONTW {
+        lfCharSet: DEFAULT_CHARSET,
+        ..Default::default()
+    };
+    let n = (face_w.len() - 1).min(lf.lfFaceName.len() - 1);
+    lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
+    let mut hit = Hit(false);
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.is_invalid() {
+            return true;
+        }
+        EnumFontFamiliesExW(
+            hdc,
+            &lf,
+            Some(enum_proc),
+            LPARAM(&mut hit as *mut Hit as isize),
+            0,
+        );
+        let _ = ReleaseDC(None, hdc);
+    }
+    hit.0
+}
+
+/// 创建 UI 字体：回退栈中首个实际存在的字体；三选皆缺退回
+/// DEFAULT_GUI_FONT（stock 对象，返回 owned=false，不得 DeleteObject）。
+fn create_ui_font() -> (HFONT, bool) {
+    for face in UI_FONT_CANDIDATES {
+        if font_available(face) {
+            let face_w = wide(face);
+            let mut lf = LOGFONTW {
+                lfHeight: -12,
+                lfWeight: 400,
+                lfCharSet: DEFAULT_CHARSET,
+                ..Default::default()
+            };
+            let n = (face_w.len() - 1).min(lf.lfFaceName.len() - 1);
+            lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
+            let font = unsafe { CreateFontIndirectW(&lf) };
+            if !font.is_invalid() {
+                return (font, true);
+            }
+        }
+    }
+    let stock = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
+    (HFONT(stock.0), false)
+}
+
+/// R-6：实测文本像素宽（复选框行宽与窗口宽据此运行时计算，不硬编码）。
+/// 拿不到 DC 时按每字符 8px 兜底估算。
+fn measure_text_width(text: &str, font: HFONT) -> i32 {
+    let text_w = wide(text);
+    let text_w = &text_w[..text_w.len() - 1];
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.is_invalid() {
+            return text_w.len() as i32 * 8;
+        }
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let mut size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, text_w, &mut size);
+        SelectObject(hdc, old);
+        let _ = ReleaseDC(None, hdc);
+        size.cx
+    }
 }
 
 const IDC_HTML: u32 = 1001;
@@ -128,7 +228,23 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         }
         let mut state = DialogState { result: None };
         let title = wide("导出耗电统计");
-        let x = (GetSystemMetrics(SM_CXSCREEN) - 360) / 2;
+        // R-5：UI 字体回退栈（创建一次，逐控件 WM_SETFONT）。
+        let (ui_font, font_owned) = create_ui_font();
+        // R-6：复选框行宽 = 实测文本宽 + 20% 余量 + 勾选框字形占位；
+        // 窗口宽由最宽行运行时计算（不硬编码），下限 200。
+        let cb_texts = [
+            "同时生成可视化报告（HTML，同名主干 .html）",
+            "匿名化设备键（device_key 显示为 D1、D2…）",
+            "同时导出原始事件序列（JSON，同名主干 .json）",
+        ];
+        let widest = cb_texts
+            .iter()
+            .map(|t| measure_text_width(t, ui_font))
+            .max()
+            .unwrap_or(0);
+        let cb_w = widest + widest / 5 + CHECKBOX_GLYPH_W;
+        let win_w = (DLG_SIDE_MARGIN + cb_w + DLG_RIGHT_MARGIN).max(200);
+        let x = (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - 240) / 2;
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -137,7 +253,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
             x.max(0),
             y.max(0),
-            360,
+            win_w,
             240,
             None,
             None,
@@ -152,6 +268,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut DialogState as isize);
         // 控件：说明 + 三勾选 + 确定/取消（子窗口随父窗口销毁，无需显式释放）。
+        // R-5：每个控件创建成功后逐控件 WM_SETFONT（lParam=1 立即重绘）。
         let mk = |cls: &str,
                   text: &str,
                   style: WINDOW_STYLE,
@@ -162,7 +279,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
                   id: u32| {
             let cls_w = wide(cls);
             let text_w = wide(text);
-            CreateWindowExW(
+            let r = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 PCWSTR(cls_w.as_ptr()),
                 PCWSTR(text_w.as_ptr()),
@@ -177,7 +294,16 @@ pub fn pick_export_options() -> Option<ExportOptions> {
                 )),
                 Some(hinst),
                 None,
-            )
+            );
+            if let Ok(h) = &r {
+                SendMessageW(
+                    *h,
+                    WM_SETFONT,
+                    Some(WPARAM(ui_font.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+            r
         };
         let _ = mk(
             "STATIC",
@@ -185,46 +311,35 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             WINDOW_STYLE(0),
             12,
             12,
-            330,
+            win_w - 24,
             32,
             0,
         );
-        let h_html = mk(
-            "BUTTON",
-            "同时生成可视化报告（HTML，同名主干 .html）",
-            WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-            16,
-            52,
-            320,
-            20,
-            IDC_HTML,
-        )
-        .unwrap_or_default();
-        let _ = mk(
-            "BUTTON",
-            "匿名化设备键（device_key 显示为 D1、D2…）",
-            WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-            16,
-            78,
-            320,
-            20,
-            IDC_ANON,
-        );
-        let _ = mk(
-            "BUTTON",
-            "同时导出原始事件序列（JSON，同名主干 .json）",
-            WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-            16,
-            104,
-            320,
-            20,
-            IDC_JSON,
-        );
+        // R-6：三个复选框共用实测行宽（文本数组与上面宽度实测同一份）。
+        let mut h_html = HWND::default();
+        for (i, text) in cb_texts.iter().enumerate() {
+            let id = [IDC_HTML, IDC_ANON, IDC_JSON][i];
+            let h = mk(
+                "BUTTON",
+                text,
+                WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+                DLG_SIDE_MARGIN,
+                52 + i as i32 * 26,
+                cb_w,
+                20,
+                id,
+            )
+            .unwrap_or_default();
+            if id == IDC_HTML {
+                h_html = h;
+            }
+        }
+        // R-6：按钮随窗口宽居中（不再按 360 宽硬编码）。
         let _ = mk(
             "BUTTON",
             "选择保存位置…",
             WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
-            60,
+            win_w / 2 - 120,
             150,
             110,
             28,
@@ -234,7 +349,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             "BUTTON",
             "取消",
             WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
-            190,
+            win_w / 2 + 10,
             150,
             110,
             28,
@@ -254,6 +369,12 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        // R-5：自有字体对象随对话框关闭释放（stock 对象不删）。
+        if font_owned {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(ui_font.0));
+            }
         }
         state.result
     }

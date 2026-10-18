@@ -119,6 +119,32 @@ pub struct DiagExport {
     /// （v3 红队 P2-6：回看回路闭环——miss 集中于某类设备即触发
     /// channel-map 增补评估；蓝牙/有线直连系统性 miss 属预期）。
     pub channel_map_miss: u64,
+    /// R-11（v0.3.17 真机终审）：写帧 / 读帧累计数（含重试；不含
+    /// get_feature_report 控制传输——注册期一次性事务，口径见 tray
+    /// 侧 FrameStats 注释）。仅追加，既有字段与结构不动。
+    pub frame_tx: u64,
+    pub frame_rx: u64,
+    /// 平均写帧间隔（毫秒；无样本时为 null、序列化时省略该键）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_tx_interval_ms: Option<u64>,
+    /// feature_index（HID++ 帧第 3 字节，"0xXX" 字符串键）写帧分类
+    /// 计数。BF-4：该字节在 HID++ 2.0 帧下为 feature_index（功能索
+    /// 引，非 feature_id 功能号），HID++ 1.0 帧下为 sub_id——命名以
+    /// 帧格式实际语义为准。
+    pub feature_index_tx: std::collections::BTreeMap<String, u64>,
+    /// feature_index 读帧分类计数（口径同上）。
+    pub feature_index_rx: std::collections::BTreeMap<String, u64>,
+    /// 唤醒 arm-all 装填累计数（设备台次；attribution miss 时全量装填）。
+    pub arm_all_fills: u64,
+    /// 唤醒成功累计数（探针轮确认设备上线）。
+    pub wake_successes: u64,
+    /// attribution miss 子分类：无 Raw Input 路径（no-path）。
+    pub wake_miss_no_path: u64,
+    /// attribution miss 子分类：零候选匹配 / 指纹不可解析（no-match；
+    /// BF-3 自 ambiguous 拆出——系统性失配：BT / 有线 / 他机接收器）。
+    pub wake_miss_no_match: u64,
+    /// attribution miss 子分类：多候选同指纹无法裁决（ambiguous）。
+    pub wake_miss_ambiguous: u64,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,
     /// 导出程序版本（CARGO_PKG_VERSION）。
@@ -232,6 +258,16 @@ mod tests {
             last_enum: None,
             last_enum_reason: None,
             channel_map_miss: 0,
+            frame_tx: 0,
+            frame_rx: 0,
+            avg_tx_interval_ms: None,
+            feature_index_tx: std::collections::BTreeMap::new(),
+            feature_index_rx: std::collections::BTreeMap::new(),
+            arm_all_fills: 0,
+            wake_successes: 0,
+            wake_miss_no_path: 0,
+            wake_miss_no_match: 0,
+            wake_miss_ambiguous: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
         }
@@ -361,6 +397,16 @@ mod tests {
             last_enum: Some(snap),
             last_enum_reason: None,
             channel_map_miss: 0,
+            frame_tx: 0,
+            frame_rx: 0,
+            avg_tx_interval_ms: None,
+            feature_index_tx: std::collections::BTreeMap::new(),
+            feature_index_rx: std::collections::BTreeMap::new(),
+            arm_all_fills: 0,
+            wake_successes: 0,
+            wake_miss_no_path: 0,
+            wake_miss_no_match: 0,
+            wake_miss_ambiguous: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
         }
@@ -403,11 +449,69 @@ mod tests {
             last_enum: None,
             last_enum_reason: None,
             channel_map_miss: 0,
+            frame_tx: 0,
+            frame_rx: 0,
+            avg_tx_interval_ms: None,
+            feature_index_tx: std::collections::BTreeMap::new(),
+            feature_index_rx: std::collections::BTreeMap::new(),
+            arm_all_fills: 0,
+            wake_successes: 0,
+            wake_miss_no_path: 0,
+            wake_miss_no_match: 0,
+            wake_miss_ambiguous: 0,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
         .to_json_string();
         assert!(!json.contains("12 34 AB CD"), "serial leaked: {json}");
         assert!(json.contains("** ** ** **"), "mask missing: {json}");
+    }
+
+    /// R-11：summary 追加六类字段正常序列化（仅追加、既有字段不动）；
+    /// avg_tx_interval_ms 为 None 时该键省略。
+    #[test]
+    fn summary_extension_fields_serialized() {
+        let mut feature_tx = std::collections::BTreeMap::new();
+        feature_tx.insert("0x10".to_string(), 7u64);
+        let json = DiagExport {
+            devices: serde_json::json!([]),
+            devices_reason: None,
+            log_tail: LogTail {
+                path: String::new(),
+                lines: Vec::new(),
+                reason: None,
+            },
+            last_enum: None,
+            last_enum_reason: None,
+            channel_map_miss: 0,
+            frame_tx: 12,
+            frame_rx: 9,
+            avg_tx_interval_ms: Some(500),
+            feature_index_tx: feature_tx,
+            feature_index_rx: std::collections::BTreeMap::new(),
+            arm_all_fills: 3,
+            wake_successes: 2,
+            wake_miss_no_path: 4,
+            wake_miss_no_match: 5,
+            wake_miss_ambiguous: 1,
+            exported_at: 1,
+            app_version: "0.0.0-test".into(),
+        }
+        .to_json_string();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["frame_tx"], 12);
+        assert_eq!(v["frame_rx"], 9);
+        assert_eq!(v["avg_tx_interval_ms"], 500);
+        assert_eq!(v["feature_index_tx"]["0x10"], 7);
+        assert_eq!(v["feature_index_rx"], serde_json::json!({}));
+        assert_eq!(v["arm_all_fills"], 3);
+        assert_eq!(v["wake_successes"], 2);
+        assert_eq!(v["wake_miss_no_path"], 4);
+        assert_eq!(v["wake_miss_no_match"], 5);
+        assert_eq!(v["wake_miss_ambiguous"], 1);
+        // avg_tx_interval_ms = None → 键省略（skip_serializing_if）。
+        let v2: serde_json::Value =
+            serde_json::from_str(&bundle_json(&missing_log("avg-none"))).unwrap();
+        assert!(v2.get("avg_tx_interval_ms").is_none());
     }
 }

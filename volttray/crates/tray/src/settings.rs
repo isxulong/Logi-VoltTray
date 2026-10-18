@@ -210,6 +210,9 @@ const IDC_LBL_LOW: i32 = 2066;
 const IDC_TEXT_RANGE: i32 = 2067;
 const IDC_BG_RANGE: i32 = 2068;
 const IDC_LOW_RANGE: i32 = 2069;
+/// R-8（v0.3.17 真机终审）：4× 放大预览的独立标签（原「预览」一签双义，
+/// 真机上用户无法区分 1× 与 4× 两个位图各是什么）。
+const IDC_LBL_PREVIEW_BIG: i32 = 2070;
 
 /// 预览位图边长（逻辑像素；实际按 DPI 缩放）。
 const PREVIEW_PX: i32 = 48;
@@ -221,8 +224,8 @@ const DOT_PX: i32 = 16;
 const L_CLIENT_W: i32 = 500;
 /// 分档卡片逻辑高（3 行 + 提示行；规范 96 的微调：避免 8pt 提示贴边）。
 const L_CARD_H: i32 = 104;
-/// 展开态客户区逻辑高。
-const L_EXPANDED_H: i32 = 830;
+/// 展开态客户区逻辑高（v0.3.17 R-9：提示行 32→44，+12）。
+const L_EXPANDED_H: i32 = 842;
 /// 收起分档卡后回收的逻辑高度（卡片 104 + 间距 8）。
 const TIER_DELTA: i32 = L_CARD_H + 8;
 /// 收起态客户区逻辑高。
@@ -235,9 +238,10 @@ const TIER_HINT_SAMPLE: &str =
 /// 背景覆盖度说明（裁决 4：100% = 满出血）。
 const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个内切区域）";
 /// 轮询间隔说明提示（D-66：如实说明轮询电耗可忽略，不再暗示「间隔越短越耗电」）。
-/// 单行放不下 → IDC_INTERVAL_HINT 为两行高静态控件（默认 SS_LEFT 自动换行，
-/// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断）。
-const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。";
+/// 单行放不下 → IDC_INTERVAL_HINT 为三行高静态控件（默认 SS_LEFT 自动换行，
+/// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断；
+/// v0.3.17 R-9 追加保活扫描说明后升为三行）。
+const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关。";
 /// 最长状态文案（宽度实测样本）。
 const MSG_CONTRAST_SAMPLE: &str = "⚠ 字色与背景对比度 12.3 低于 3.0，可能不易读（不阻断使用）";
 
@@ -264,7 +268,7 @@ fn tier_hint_dynamic(thresholds: &[u8]) -> String {
 
 /// 展开态下方控件坐标表：(id, x, y, w, h)（逻辑像素）。
 /// 收起分档卡时整组上移 TIER_DELTA；提示语宽度在 relayout 中按实测宽覆盖。
-const BELOW: [(i32, i32, i32, i32, i32); 26] = [
+const BELOW: [(i32, i32, i32, i32, i32); 27] = [
     (IDC_LBL_TEXT, 16, 278, 64, 20),
     (IDC_TEXT_SLIDER, 88, 274, 196, 26),
     (IDC_TEXT_VAL, 292, 278, 44, 20),
@@ -276,21 +280,26 @@ const BELOW: [(i32, i32, i32, i32, i32); 26] = [
     (IDC_BG_RESET, 344, 306, 48, 24),
     (IDC_BG_RANGE, 400, 312, 84, 14),
     (IDC_COVER_HINT, 88, 338, 396, 14),
-    (IDC_LBL_PREVIEW, 16, 366, 64, 20),
+    // R-8：双标签拆分——1× / 4× 预览各自署名；标签列 x=16 宽 ≤68，
+    // 不与 x=88 起的预览位图重叠；纵向上分别与 1×（中心 386）、
+    // 4×（中心 458）位图居中对齐。
+    (IDC_LBL_PREVIEW, 16, 370, 68, 32),
     (IDC_PREVIEW, 88, 362, PREVIEW_PX, PREVIEW_PX),
+    (IDC_LBL_PREVIEW_BIG, 16, 434, 68, 48),
     (IDC_PREVIEW_BIG, 152, 362, PREVIEW_PX * 4, PREVIEW_PX * 4),
     (IDC_SEC_REFRESH, 16, 566, 80, 18),
     (IDC_LBL_INTERVAL, 16, 592, 64, 20),
     (IDC_INTERVAL, 88, 588, 160, 220),
-    (IDC_INTERVAL_HINT, 88, 620, 396, 32),
-    (IDC_SEC_LOW, 16, 664, 96, 18),
-    (IDC_BLINK, 16, 690, 240, 22),
-    (IDC_LBL_LOW, 16, 720, 64, 20),
-    (IDC_SLIDER, 88, 716, 196, 26),
-    (IDC_THRESH_VAL, 292, 720, 44, 20),
-    (IDC_RESET_LOW, 344, 716, 48, 24),
-    (IDC_LOW_RANGE, 400, 722, 84, 14),
-    (IDC_RESET_ALL, 16, 756, 120, 28),
+    // R-9：提示升三行（32→44），其下整组 +12 联动；窗口展开高 +12。
+    (IDC_INTERVAL_HINT, 88, 620, 396, 44),
+    (IDC_SEC_LOW, 16, 676, 96, 18),
+    (IDC_BLINK, 16, 702, 240, 22),
+    (IDC_LBL_LOW, 16, 732, 64, 20),
+    (IDC_SLIDER, 88, 728, 196, 26),
+    (IDC_THRESH_VAL, 292, 732, 44, 20),
+    (IDC_RESET_LOW, 344, 728, 48, 24),
+    (IDC_LOW_RANGE, 400, 734, 84, 14),
+    (IDC_RESET_ALL, 16, 768, 120, 28),
     // IDC_STATUS 单列（宽度按实测覆盖）。
 ];
 
@@ -1518,7 +1527,18 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                 IDC_LBL_TEXT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("文本大小")),
                 IDC_LBL_BGCOVER => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("背景覆盖度")),
                 IDC_COVER_HINT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(COVER_HINT_TEXT)),
-                IDC_LBL_PREVIEW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("预览")),
+                IDC_LBL_PREVIEW => (
+                    "STATIC",
+                    ws(0),
+                    WINDOW_EX_STYLE(0),
+                    Some("任务栏实际\n效果"),
+                ),
+                IDC_LBL_PREVIEW_BIG => (
+                    "STATIC",
+                    ws(0),
+                    WINDOW_EX_STYLE(0),
+                    Some("4× 放大\n（像素\n细节）"),
+                ),
                 IDC_PREVIEW | IDC_PREVIEW_BIG => {
                     ("STATIC", ws(SS_BITMAP), WINDOW_EX_STYLE(0), None)
                 }

@@ -2,7 +2,7 @@
 //!
 //! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
 //! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
-//! ── / 设置… / 诊断面板… / ── / 退出。
+//! ── / 设置… / 导出诊断信息… / ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use volttray_app::DeviceSnapshot;
@@ -102,7 +102,9 @@ pub fn build_menu(
     let silent_item = CheckMenuItem::new("通知静音（仅关提示音）", true, silent, None);
     let autostart_item = CheckMenuItem::new("开机自启", true, autostart, None);
     let settings = MenuItem::new("设置…", true, None);
-    let diag = MenuItem::new("诊断面板…", true, None);
+    // R-7（v0.3.17 真机终审）：菜单文案与实际行为对齐——该项打开的是
+    // 导出诊断信息的另存为流程，并非「面板」。
+    let diag = MenuItem::new("导出诊断信息…", true, None);
     let stats_export = MenuItem::new("导出耗电统计…", true, None);
     let exit = MenuItem::new("退出", true, None);
 

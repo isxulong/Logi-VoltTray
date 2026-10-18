@@ -168,22 +168,125 @@ mod imp {
         }
     }
 
+    /// R-11（v0.3.17 真机终审）：帧级遥测（诊断导出 summary 追加字段）。
+    /// 写 / 读计数、feature_index 分类、平均写间隔——在 SharedChannel 的
+    /// write / read 上挂钩（get_feature_report 为控制传输、注册期一次性
+    /// 事务，不计入）。进程级静态量避免跨线程签名穿线；const fn new 依赖
+    /// Mutex / BTreeMap / AtomicU64 的 const 构造（与
+    /// APPEARANCE_FALLBACK_NOTE 同款，工具链 1.90 均支持）。
+    struct FrameStatsInner {
+        last_tx: Option<Instant>,
+        tx_interval_sum_ms: u64,
+        tx_interval_count: u64,
+        feature_tx: std::collections::BTreeMap<String, u64>,
+        feature_rx: std::collections::BTreeMap<String, u64>,
+    }
+
+    struct FrameStats {
+        tx: AtomicU64,
+        rx: AtomicU64,
+        inner: Mutex<FrameStatsInner>,
+    }
+
+    impl FrameStats {
+        const fn new() -> Self {
+            Self {
+                tx: AtomicU64::new(0),
+                rx: AtomicU64::new(0),
+                inner: Mutex::new(FrameStatsInner {
+                    last_tx: None,
+                    tx_interval_sum_ms: 0,
+                    tx_interval_count: 0,
+                    feature_tx: std::collections::BTreeMap::new(),
+                    feature_rx: std::collections::BTreeMap::new(),
+                }),
+            }
+        }
+
+        fn note_tx(&self, frame: &[u8], now: Instant) {
+            self.tx.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut g) = self.inner.lock() {
+                if let Some(last) = g.last_tx {
+                    g.tx_interval_sum_ms = g
+                        .tx_interval_sum_ms
+                        .saturating_add(now.duration_since(last).as_millis() as u64);
+                    g.tx_interval_count = g.tx_interval_count.saturating_add(1);
+                }
+                g.last_tx = Some(now);
+                // BF-4：HID++ 长 / 短帧第 3 字节（index 2）在 2.0 帧下为
+                // feature_index（功能索引，非 feature_id 功能号），1.0 帧
+                // 下为 sub_id——键名以帧格式实际语义为准。
+                if let Some(f) = frame.get(2) {
+                    *g.feature_tx.entry(format!("0x{f:02X}")).or_insert(0) += 1;
+                }
+            }
+        }
+
+        fn note_rx(&self, frame: &[u8]) {
+            self.rx.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut g) = self.inner.lock() {
+                if let Some(f) = frame.get(2) {
+                    *g.feature_rx.entry(format!("0x{f:02X}")).or_insert(0) += 1;
+                }
+            }
+        }
+
+        fn avg_tx_interval_ms(&self) -> Option<u64> {
+            let g = self.inner.lock().ok()?;
+            if g.tx_interval_count == 0 {
+                None
+            } else {
+                Some(g.tx_interval_sum_ms / g.tx_interval_count)
+            }
+        }
+
+        fn feature_tx(&self) -> std::collections::BTreeMap<String, u64> {
+            self.inner
+                .lock()
+                .map(|g| g.feature_tx.clone())
+                .unwrap_or_default()
+        }
+
+        fn feature_rx(&self) -> std::collections::BTreeMap<String, u64> {
+            self.inner
+                .lock()
+                .map(|g| g.feature_rx.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    static FRAME_STATS: FrameStats = FrameStats::new();
+
     /// 同一接收器通道的句柄共享：多个槽位（设备）共用一对 HID collection。
     #[derive(Clone)]
     struct SharedChannel(Arc<Mutex<HidDeviceChannel>>);
 
     impl HidChannel for SharedChannel {
         fn write(&mut self, d: &[u8]) -> Result<usize, IoError> {
-            self.0
+            // R-11：写成功记帧遥测（feature_index 分类 + 平均写间隔样本）。
+            let r = self
+                .0
                 .lock()
                 .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
-                .write(d)
+                .write(d);
+            if r.is_ok() {
+                FRAME_STATS.note_tx(d, Instant::now());
+            }
+            r
         }
         fn read(&mut self, buf: &mut [u8], t: Duration) -> Result<usize, IoError> {
-            self.0
+            // R-11：读到非空帧记读遥测（超时 Ok(0) 不计）。
+            let r = self
+                .0
                 .lock()
                 .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
-                .read(buf, t)
+                .read(buf, t);
+            if let Ok(n) = &r {
+                if *n > 0 {
+                    FRAME_STATS.note_rx(&buf[..*n]);
+                }
+            }
+            r
         }
         fn drain(&mut self) {
             if let Ok(mut c) = self.0.lock() {
@@ -3170,6 +3273,16 @@ mod imp {
             last_enum,
             last_enum_reason,
             channel_map_miss: channel_map_miss.load(Ordering::Relaxed),
+            frame_tx: FRAME_STATS.tx.load(Ordering::Relaxed),
+            frame_rx: FRAME_STATS.rx.load(Ordering::Relaxed),
+            avg_tx_interval_ms: FRAME_STATS.avg_tx_interval_ms(),
+            feature_index_tx: FRAME_STATS.feature_tx(),
+            feature_index_rx: FRAME_STATS.feature_rx(),
+            arm_all_fills: WAKE_ARM_ALL_FILLS.load(Ordering::Relaxed),
+            wake_successes: WAKE_SUCCESSES.load(Ordering::Relaxed),
+            wake_miss_no_path: WAKE_MISS_NO_PATH.load(Ordering::Relaxed),
+            wake_miss_no_match: WAKE_MISS_NO_MATCH.load(Ordering::Relaxed),
+            wake_miss_ambiguous: WAKE_MISS_AMBIGUOUS.load(Ordering::Relaxed),
             exported_at,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -3233,6 +3346,42 @@ mod imp {
                 Some("m (suppressed 2 similar in last 60s)")
             );
             assert_eq!(s.note_miss("m", t0 + Duration::from_secs(62)), None);
+        }
+
+        /// R-11：帧遥测计数 / feature_index 分类 / 平均写间隔。静态量进程
+        /// 共享——BF-6：全部断言改为相对增量 / 快照重算（并发测试可能先
+        /// 写入同类帧与间隔样本，绝对断言会假失败）。
+        #[test]
+        fn frame_stats_counts_and_averages() {
+            let tx0 = FRAME_STATS.tx.load(Ordering::Relaxed);
+            let rx0 = FRAME_STATS.rx.load(Ordering::Relaxed);
+            let (f_tx0, f_rx0, sum0, cnt0) = {
+                let g = FRAME_STATS.inner.lock().unwrap();
+                (
+                    g.feature_tx.get("0x10").copied().unwrap_or(0),
+                    g.feature_rx.get("0x10").copied().unwrap_or(0),
+                    g.tx_interval_sum_ms,
+                    g.tx_interval_count,
+                )
+            };
+            let t0 = Instant::now();
+            FRAME_STATS.note_tx(&[0x10, 0x00, 0x10], t0);
+            FRAME_STATS.note_tx(&[0x10, 0x00, 0x10], t0 + Duration::from_millis(500));
+            FRAME_STATS.note_rx(&[0x11, 0x00, 0x10]);
+            assert_eq!(FRAME_STATS.tx.load(Ordering::Relaxed), tx0 + 2);
+            assert_eq!(FRAME_STATS.rx.load(Ordering::Relaxed), rx0 + 1);
+            {
+                let g = FRAME_STATS.inner.lock().unwrap();
+                assert_eq!(g.feature_tx.get("0x10"), Some(&(f_tx0 + 2)));
+                assert_eq!(g.feature_rx.get("0x10"), Some(&(f_rx0 + 1)));
+                // 平均间隔按快照重算：本用例新增 1 个 500ms 样本。
+                assert_eq!(g.tx_interval_sum_ms, sum0 + 500);
+                assert_eq!(g.tx_interval_count, cnt0 + 1);
+            }
+            assert_eq!(
+                FRAME_STATS.avg_tx_interval_ms(),
+                Some((sum0 + 500) / (cnt0 + 1))
+            );
         }
     }
 
