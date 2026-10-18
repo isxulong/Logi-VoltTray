@@ -208,12 +208,15 @@ const IDC_LBL_LOW: i32 = 2066;
 const IDC_TEXT_RANGE: i32 = 2067;
 const IDC_BG_RANGE: i32 = 2068;
 const IDC_LOW_RANGE: i32 = 2069;
-/// R-8（v0.3.17 真机终审）：4× 放大预览的独立标签（原「预览」一签双义，
-/// 真机上用户无法区分 1× 与 4× 两个位图各是什么）。
+/// R-8（v0.3.17 真机终审）：放大预览的独立标签；v0.3.18（U-3）不再标注
+/// 倍数（用户只看布局，实际大小以任务栏为准），标签文案固定「预览」。
 const IDC_LBL_PREVIEW_BIG: i32 = 2070;
 
 /// 预览位图边长（逻辑像素；实际按 DPI 缩放）。
 const PREVIEW_PX: i32 = 48;
+/// v0.3.18（U-3）：放大预览画布边长（逻辑像素）——4×(192) 略大，收敛到
+/// 144（96dpi 下恰为 3×）；画布与源位图尺寸推得整数放大倍率，不写死。
+const PREVIEW_BIG_PX: i32 = 144;
 /// 分档色点边长（规范裁决 2：16×16 圆点）。
 const DOT_PX: i32 = 16;
 
@@ -278,10 +281,10 @@ const BELOW: [(i32, i32, i32, i32, i32); 25] = [
     (IDC_BG_RESET, 344, 306, 48, 24),
     (IDC_BG_RANGE, 400, 312, 84, 14),
     (IDC_COVER_HINT, 88, 338, 396, 14),
-    // v0.3.18（U-2）：「任务栏实际效果」小预览删除——任务栏即真实效果，
-    // 双预览冗余；只保留单一大预览（标签列 x=16 宽 ≤68，不与位图重叠）。
-    (IDC_LBL_PREVIEW_BIG, 16, 434, 68, 48),
-    (IDC_PREVIEW_BIG, 152, 362, PREVIEW_PX * 4, PREVIEW_PX * 4),
+    // v0.3.18（U-2/U-3）：小预览删除，大预览收敛为 144×144 并左移到
+    // x=88（原小预览位）；标签单行「预览」，与位图垂直居中（中心 434）。
+    (IDC_LBL_PREVIEW_BIG, 16, 424, 68, 20),
+    (IDC_PREVIEW_BIG, 88, 362, PREVIEW_BIG_PX, PREVIEW_BIG_PX),
     (IDC_SEC_REFRESH, 16, 566, 80, 18),
     (IDC_LBL_INTERVAL, 16, 592, 64, 20),
     (IDC_INTERVAL, 88, 588, 160, 220),
@@ -1529,12 +1532,8 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                 IDC_LBL_TEXT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("文本大小")),
                 IDC_LBL_BGCOVER => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("背景覆盖度")),
                 IDC_COVER_HINT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(COVER_HINT_TEXT)),
-                IDC_LBL_PREVIEW_BIG => (
-                    "STATIC",
-                    ws(0),
-                    WINDOW_EX_STYLE(0),
-                    Some("4× 放大\n（像素\n细节）"),
-                ),
+                // v0.3.18（U-3）：标签固定单行「预览」，不再标注倍数。
+                IDC_LBL_PREVIEW_BIG => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("预览")),
                 IDC_PREVIEW_BIG => ("STATIC", ws(SS_BITMAP), WINDOW_EX_STYLE(0), None),
                 IDC_SEC_REFRESH => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("刷新")),
                 IDC_SEC_LOW => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some("低电提醒")),
@@ -2204,16 +2203,34 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         bgra[i * 4 + 3] = 255;
     }
     unsafe {
-        // 放大预览（最近邻块放大，呈现像素级效果；v0.3.18 U-2：小预览已删）。
-        let big = px * 4;
+        // v0.3.18（U-3）：放大预览画布收敛为 144 逻辑像素（96dpi 下恰为 3×）。
+        // 放大倍率由画布与源位图尺寸推得（整数最近邻、居中贴入），不写死；
+        // 画布四周余量补棋盘格（与源图底色同规格的两档灰）。
+        let big = ctx.sc(PREVIEW_BIG_PX);
+        // 动态 K 与固定 ×9 在全部 DPI 档数学等价；取动态 K 为单一来源表达，量纲为物理像素。
+        let k = (big / px).max(1);
+        let scaled = k * px;
+        let off = (big - scaled) / 2;
+        let cell = (big / 12).max(1);
         let mut big_bgra = vec![0u8; (big * big * 4) as usize];
         for by in 0..big {
             for bx in 0..big {
-                let sy = by / 4;
-                let sx = bx / 4;
-                let s = ((sy * px + sx) * 4) as usize;
                 let d = ((by * big + bx) * 4) as usize;
-                big_bgra[d..d + 4].copy_from_slice(&bgra[s..s + 4]);
+                let (ix, iy) = (bx - off, by - off);
+                if ix >= 0 && iy >= 0 && ix < scaled && iy < scaled {
+                    let s = (((iy / k) * px + (ix / k)) * 4) as usize;
+                    big_bgra[d..d + 4].copy_from_slice(&bgra[s..s + 4]);
+                } else {
+                    let g = if ((bx / cell) + (by / cell)) % 2 == 0 {
+                        0xEEu8
+                    } else {
+                        0x99u8
+                    };
+                    big_bgra[d] = g;
+                    big_bgra[d + 1] = g;
+                    big_bgra[d + 2] = g;
+                    big_bgra[d + 3] = 255;
+                }
             }
         }
         let big_ctl = ctl(hwnd, IDC_PREVIEW_BIG);
