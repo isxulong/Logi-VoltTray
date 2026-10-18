@@ -18,8 +18,11 @@ import ctypes
 import sys
 import types
 
-if sys.platform != 'win32':
-    ctypes.WINFUNCTYPE = ctypes.CFUNCTYPE
+# 桩在所有平台强制生效（含 win32）：协议冻结门禁在 windows-latest CI 上
+# 运行本测试套件，真实 winreg / Win32 DLL 会让用例脱离受控环境
+# （真实注册表无 remove_path、真实父进程链返回 runner 的 pwsh.exe 等）。
+# 用例全部按桩环境编写（Linux 80/80 验证），桩必须全平台一致。
+ctypes.WINFUNCTYPE = ctypes.CFUNCTYPE
 
 CALLS = []          # [(dll_name, func_name, args), ...] 全部 Win32 调用记录
 HANDLERS = {}       # {func_name 或 (dll_name, func_name): callable} 自定义行为
@@ -81,8 +84,7 @@ def _fake_windll(name, use_last_error=False):
     return d
 
 
-if sys.platform != 'win32':
-    ctypes.WinDLL = _fake_windll
+ctypes.WinDLL = _fake_windll
 
 
 class FakeWinreg(types.ModuleType):
@@ -203,11 +205,8 @@ class FakeWinreg(types.ModuleType):
         return list(node['subkeys'])
 
 
-if sys.platform != 'win32':
-    WINREG = FakeWinreg()
-    sys.modules['winreg'] = WINREG
-else:
-    import winreg as WINREG  # pragma: no cover
+WINREG = FakeWinreg()
+sys.modules['winreg'] = WINREG
 
 # hid 后端：默认枚举不到任何设备
 if 'hid' not in sys.modules:
