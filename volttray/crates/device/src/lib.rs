@@ -78,6 +78,14 @@ impl PhysicalKey {
             _ => false,
         }
     }
+
+    /// 键字符串（WP-A 持久化记录键 / 虚拟条目合并键；不含 provenance——
+    /// 持久化 schema 不记来源，匹配一律按字符串相等，见 v3 A-1/A-1b）。
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::UnitId(s) | Self::Name(s) => s,
+        }
+    }
 }
 
 /// 一台受管设备。

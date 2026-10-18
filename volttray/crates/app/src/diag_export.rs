@@ -115,6 +115,10 @@ pub struct DiagExport {
     /// last_enum 降级原因（如快照锁中毒）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_enum_reason: Option<String>,
+    /// A-3 可观测性：Raw Input hDevice→通道映射失败累计次数
+    /// （v3 红队 P2-6：回看回路闭环——miss 集中于某类设备即触发
+    /// channel-map 增补评估；蓝牙/有线直连系统性 miss 属预期）。
+    pub channel_map_miss: u64,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,
     /// 导出程序版本（CARGO_PKG_VERSION）。
@@ -227,6 +231,7 @@ mod tests {
             log_tail: read_log_tail(log_path, LOG_TAIL_MAX_LINES),
             last_enum: None,
             last_enum_reason: None,
+            channel_map_miss: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
         }
@@ -355,6 +360,7 @@ mod tests {
             log_tail: read_log_tail(&log, LOG_TAIL_MAX_LINES),
             last_enum: Some(snap),
             last_enum_reason: None,
+            channel_map_miss: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
         }
@@ -396,6 +402,7 @@ mod tests {
             },
             last_enum: None,
             last_enum_reason: None,
+            channel_map_miss: 0,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }

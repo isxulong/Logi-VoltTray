@@ -1,0 +1,27 @@
+{"ts": 1759500000, "event": "run_start"}
+{"ts": 1759500600, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 90, "charging": false, "source": "poll"}
+{"ts": 1759507800, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 88, "charging": false, "source": "poll"}
+{"ts": 1759508000, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "event": "sleep_enter"}
+{"ts": 1759522400, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 85, "charging": false, "source": "wake-first-read"}
+{"ts": 1759526000, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 87, "charging": true, "source": "charging-fast"}
+{"ts": 1759529600, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 95, "charging": true, "source": "charging-fast"}
+{"ts": 1759531000, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 62, "charging": false, "source": "poll"}
+{"ts": 1759534600, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 60, "charging": false, "source": "poll"}
+{"ts": 1759531400, "event": "boundary", "devices": [{"physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "percent": 95, "charging": true}, {"physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "percent": 60, "charging": false}]}
+{"ts": 1759531400, "event": "run_stop"}
+{"ts": 1759617800, "event": "run_start"}
+{"ts": 1759621400, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 80, "charging": false, "source": "poll"}
+{"ts": 1759625000, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 78, "charging": false, "source": "poll"}
+{"ts": 1759625000, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "display_name": "MX Master 3S", "percent": 77, "charging": false, "source": "poll"}
+{"ts": 1759626000, "physical_key": "hid#vid_046d&pid_c52b&mi_02#8&1a2b3c4d&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", "event": "sleep_enter"}
+{"ts": 1759630000, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 58, "charging": false, "source": "poll"}
+{"ts": 1759637200, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 55, "charging": false, "source": "poll"}
+{"ts": 1759637400, "event": "run_stop"}
+{"ts": 1760900000, "event": "run_start"}
+{"ts": 1760900200, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 40, "charging": false, "source": "poll"}
+{"ts": 1760903800, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 38, "charging": false, "source": "poll"}
+这不是一行 JSON（坏行，skip-bad-lines 应跳过）
+{"ts": "not-a-number", "event": "run_stop"}
+{"ts": 1760907400, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 36, "charging": false, "source": "poll"}
+{"ts": 1760911000, "physical_key": "hid#vid_046d&pid_c52b&mi_01#7&9f8e7d6c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000031}", "display_name": "K860, 键盘", "percent": 34, "charging": false, "source": "poll"}
+{"ts": 1760914600, "event": "run_stop"}

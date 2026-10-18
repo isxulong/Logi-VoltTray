@@ -1,0 +1,24 @@
+{"ts": 1759500000, "event": "run_start"}
+{"ts": 1759500600, "physical_key": "kbd-1", "display_name": "K860", "percent": 90, "charging": false, "source": "poll"}
+{"ts": 1759500600, "physical_key": "mouse-2", "display_name": "G304", "percent": 55, "charging": false, "source": "poll"}
+{"ts": 1759501200, "physical_key": "pad-3", "display_name": "Powerplay", "percent": 70, "charging": true, "source": "charging-fast"}
+{"ts": 1759507200, "physical_key": "kbd-1", "display_name": "K860", "percent": 88, "charging": false, "source": "poll"}
+{"ts": 1759508000, "physical_key": "kbd-1", "event": "sleep_enter"}
+{"ts": 1759515200, "physical_key": "kbd-1", "display_name": "K860", "percent": 85, "charging": false, "source": "wake-first-read"}
+{"ts": 1759506600, "physical_key": "mouse-2", "display_name": "G304", "percent": 54, "charging": false, "source": "poll"}
+{"ts": 1759506500, "physical_key": "mouse-2", "display_name": "G304", "percent": 55, "charging": false, "source": "poll"}
+{"ts": 1759506400, "physical_key": "mouse-2", "display_name": "G304", "percent": 56, "charging": false, "source": "poll"}
+{"ts": 1759504800, "physical_key": "pad-3", "display_name": "Powerplay", "percent": 72, "charging": true, "source": "charging-fast"}
+这不是一行 JSON（坏行，skip-bad-lines 应跳过）
+{"ts": "not-a-number", "event": "run_stop"}
+{"ts": 1759510000, "event": "boundary", "devices": [{"physical_key": "kbd-1", "percent": 85, "charging": false}, {"physical_key": "mouse-2", "percent": 56, "charging": false}]}
+{"ts": 1759510100, "event": "run_stop"}
+{"ts": 1759600000, "event": "run_start"}
+{"ts": 1759600600, "physical_key": "kbd-1", "display_name": "K860", "percent": 80, "charging": false, "source": "poll"}
+{"ts": 1759600600, "physical_key": "kbd-1", "display_name": "K860", "percent": 79, "charging": false, "source": "poll"}
+{"ts": 1759604200, "physical_key": "pad-3", "display_name": "Powerplay", "percent": 75, "charging": false, "source": "poll"}
+{"ts": 1759608000, "physical_key": "pad-3", "event": "sleep_enter"}
+{"ts": 1759615200, "physical_key": "pad-3", "display_name": "Powerplay", "percent": 74, "charging": false, "source": "wake-first-read"}
+{"ts": 1759601000, "physical_key": "mouse-2", "display_name": "G304", "percent": 50, "charging": false, "source": "poll"}
+{"ts": 1759604600, "physical_key": "mouse-2", "display_name": "G304", "percent": 48, "charging": false, "source": "poll"}
+{"ts": 1759620000, "event": "run_stop"}

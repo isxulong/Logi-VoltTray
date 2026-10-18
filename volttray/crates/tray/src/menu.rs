@@ -16,10 +16,27 @@ pub struct MenuIds {
     pub autostart: MenuId,
     pub settings: MenuId,
     pub diag: MenuId,
+    /// WP-B：导出耗电统计（CSV + 可选 HTML 报告 / JSON）。
+    pub stats_export: MenuId,
     pub exit: MenuId,
 }
 
 fn device_row_text(dev: &DeviceSnapshot) -> String {
+    // WP-A（A-1b）：虚拟条目——重启后来自 last_known.json 的最后已知读数，
+    // 灰显 + 更新时刻注释；与真实条目「休眠中」文案区分，不冒充新读数。
+    if dev.is_virtual {
+        let status = match (dev.percent, dev.last_seen) {
+            (Some(p), Some(t)) => {
+                format!("{p}% 最后已知 · 更新于 {}", crate::timelocal::fmt_hhmm(t))
+            }
+            (Some(p), None) => format!("{p}% 最后已知"),
+            (None, Some(t)) => {
+                format!("最后已知 · 更新于 {} · 电量未知", crate::timelocal::fmt_hhmm(t))
+            }
+            (None, None) => "最后已知 · 电量未知".to_string(),
+        };
+        return format!("{} — {}", dev.name, status);
+    }
     // D-33：休眠是合法状态——显示最后已知电量并注明休眠，绝不显示「未读取/未知」。
     let status = if dev.state == "sleeping" {
         match dev.percent {
@@ -57,7 +74,10 @@ pub fn build_menu(
 
     for dev in devices {
         let checked = pinned.map_or(default_device == Some(dev.id.as_str()), |p| p == dev.id);
-        let item = CheckMenuItem::new(device_row_text(dev), !dev.gray, checked, None);
+        // WP-A（v3 A-2）：可展示数据即可点（含休眠灰行与虚拟最后已知行）；
+        // 点击语义不变（pin + refresh_ui，零查询）。无任何读数才禁用。
+        let item =
+            CheckMenuItem::new(device_row_text(dev), dev.has_displayable_data(), checked, None);
         device_rows.push((item.id().clone(), dev.id.clone()));
         let _ = menu.append(&item);
     }
@@ -76,6 +96,7 @@ pub fn build_menu(
     let autostart_item = CheckMenuItem::new("开机自启", true, autostart, None);
     let settings = MenuItem::new("设置…", true, None);
     let diag = MenuItem::new("诊断面板…", true, None);
+    let stats_export = MenuItem::new("导出耗电统计…", true, None);
     let exit = MenuItem::new("退出", true, None);
 
     let ids = MenuIds {
@@ -86,6 +107,7 @@ pub fn build_menu(
         autostart: autostart_item.id().clone(),
         settings: settings.id().clone(),
         diag: diag.id().clone(),
+        stats_export: stats_export.id().clone(),
         exit: exit.id().clone(),
     };
 
@@ -96,6 +118,7 @@ pub fn build_menu(
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&settings);
     let _ = menu.append(&diag);
+    let _ = menu.append(&stats_export);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&exit);
     (menu, ids)

@@ -48,6 +48,21 @@ impl BatterySource {
             Self::HidPowerDescriptor => "hid_power_descriptor",
         }
     }
+
+    /// `name()` 的逆映射（WP-A 持久化读回：last_known.json 的 source 字段
+    /// 还原为枚举）。未知名称返回 None——调用方按前向兼容处理（未来版本
+    /// 新增的 source 在旧程序上降级为 None，不拒绝整条记录）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "unified_battery" => Some(Self::UnifiedBattery),
+            "battery_status" => Some(Self::BatteryStatus),
+            "battery_voltage" => Some(Self::BatteryVoltage),
+            "hidpp1_register_0d" => Some(Self::Hidpp1Register0x0D),
+            "hidpp1_register_0x07" => Some(Self::Hidpp1Register0x07),
+            "hid_power_descriptor" => Some(Self::HidPowerDescriptor),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,6 +436,24 @@ fn classify_transport_error(err: &TransportError) -> (UnknownReason, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_name_round_trip() {
+        let all = [
+            BatterySource::UnifiedBattery,
+            BatterySource::BatteryStatus,
+            BatterySource::BatteryVoltage,
+            BatterySource::Hidpp1Register0x0D,
+            BatterySource::Hidpp1Register0x07,
+            BatterySource::HidPowerDescriptor,
+        ];
+        for s in all {
+            assert_eq!(BatterySource::from_name(s.name()), Some(s));
+        }
+        // 未知名称（未来版本新增 / 手改文件）→ None，不 panic。
+        assert_eq!(BatterySource::from_name("future_source"), None);
+        assert_eq!(BatterySource::from_name(""), None);
+    }
 
     #[test]
     fn unified_mapping_matches_reference() {

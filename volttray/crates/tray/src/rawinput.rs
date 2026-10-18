@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE,
-    RAWINPUTHEADER, RIDEV_INPUTSINK, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEMOUSE,
+    RAWINPUTHEADER, RIDEV_INPUTSINK, RIDI_DEVICENAME, RID_HEADER, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
@@ -156,5 +156,55 @@ pub fn is_logitech_mouse_input(lparam: LPARAM) -> bool {
             .trim_end_matches('\0')
             .to_uppercase();
         s.contains(LOGI_VID)
+    }
+}
+
+
+/// WP-A（v3 A-3 通道归因）：取触发本消息的 Raw Input 设备接口路径
+/// （RIDI_DEVICENAME，两段式调用）。任一环节失败返回 None——调用方
+/// 回退全量装填并记 channel_map_miss，不影响唤醒功能本身。
+#[cfg(windows)]
+pub fn device_path(lparam: LPARAM) -> Option<String> {
+    unsafe {
+        let mut hsize: u32 = 0;
+        if GetRawInputData(
+            HRAWINPUT(lparam.0 as *mut core::ffi::c_void),
+            RID_HEADER,
+            None,
+            &mut hsize,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        ) != 0
+        {
+            return None;
+        }
+        let mut hbuf = vec![0u8; hsize as usize];
+        if GetRawInputData(
+            HRAWINPUT(lparam.0 as *mut core::ffi::c_void),
+            RID_HEADER,
+            Some(hbuf.as_mut_ptr() as *mut core::ffi::c_void),
+            &mut hsize,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        ) != hsize
+        {
+            return None;
+        }
+        let header = &*(hbuf.as_ptr() as *const RAWINPUTHEADER);
+        let mut nsize: u32 = 0;
+        GetRawInputDeviceInfoW(Some(header.hDevice), RIDI_DEVICENAME, None, &mut nsize);
+        if nsize == 0 {
+            return None;
+        }
+        let mut nbuf = vec![0u16; nsize as usize];
+        let got = GetRawInputDeviceInfoW(
+            Some(header.hDevice),
+            RIDI_DEVICENAME,
+            Some(nbuf.as_mut_ptr() as *mut core::ffi::c_void),
+            &mut nsize,
+        );
+        if got == 0 || got == u32::MAX {
+            return None;
+        }
+        let end = nbuf.iter().position(|&c| c == 0).unwrap_or(nbuf.len());
+        Some(String::from_utf16_lossy(&nbuf[..end]))
     }
 }

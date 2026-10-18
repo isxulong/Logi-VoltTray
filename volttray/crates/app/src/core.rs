@@ -4,12 +4,13 @@
 
 use crate::config::Config;
 use crate::debounce::{Alert, LowBatteryTracker};
-use std::collections::HashMap;
+use crate::persist::{LastKnownStore, PersistedDevice};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use volttray_device::battery::BatteryReading;
+use volttray_device::battery::{BatteryReading, BatterySource};
 use volttray_device::state::{mark_online, DeviceState};
-use volttray_device::Device;
+use volttray_device::{Device, LinkKind, PhysicalKey};
 
 /// 灰显派生窗口（PRD M2：90s 无成功响应）。
 pub const GRAY_AFTER: Duration = Duration::from_secs(90);
@@ -22,17 +23,18 @@ pub const SLEEP_AFTER_TIMEOUTS: u32 = 2;
 /// 新的唤醒信号、且距上次探测 ≥ 该间隔，避免唤醒信号风暴变成高频查询。
 pub const WAKE_PROBE_COOLDOWN: Duration = Duration::from_secs(5);
 /// 灰显阈值锚定倍数（F5 主修复 (a)，v0.3.16 线）：灰显阈值 =
-/// `max(GRAY_AFTER, GRAY_MIN_POLLS × 当前轮询档)`。纯墙钟 90s 派生在
+/// `max(GRAY_AFTER, GRAY_MIN_POLLS × 本设备轮询档)`（WP-C 起按设备
+/// 档位锚定，见 `AppCore::gray_threshold_for`）。纯墙钟 90s 派生在
 /// 轮询档 >90s（档位 300~7200s，D-66）时必然误灰——两次连续轮询失败
 /// 才有「无响应」证据，阈值至少覆盖两个完整轮询周期。仅作兜底：鼠标
-/// 活跃期的新鲜读数主要由临近灰显豁免（NEAR_GRAY_LEEWAY）保证。
+/// 活跃期的新鲜读数主要由临近到期豁免（NEAR_GRAY_LEEWAY）保证。
 pub const GRAY_MIN_POLLS: u32 = 2;
-/// 临近灰显豁免提前量（F5 主修复 (b)，v0.3.16 线）：在线设备
-/// `now - last_success ≥ GRAY_AFTER - 本窗口` 时，探测轮对其放行一次
-/// 查询。v0.3.15 P1-1 的探测轮只查休眠设备，在线设备的 last_success
-/// 会被冻结到下一次整轮（≥ 轮询档），90s 墙钟派生必然误灰、误报离线；
-/// 豁免让鼠标活跃期每 ~90s 有一次查询兜底（探测轮节奏 ~30s，见
-/// reconnect.rs wake_action 的枚举门控）。
+/// 临近到期豁免提前量（F5 主修复 (b)，v0.3.16 线；WP-C 起锚从「90s
+/// 墙钟」迁到「本设备自己的 next_due」）：在线、非充电设备的
+/// `next_due - now ≤ 本窗口` 时，探测轮对其提前放行一次查询——探测轮
+/// 与随后的到期唤醒合并成一次查询，last_success 按本设备档位刷新。
+/// 充电档（15s）不吃提前放行：30s 提前量会破坏 AC-C1 的 15s±2s 节拍
+/// （同 D-72 原豁免 ≥60s 窗口永不触及 15s 档的取舍）。
 pub const NEAR_GRAY_LEEWAY: Duration = Duration::from_secs(30);
 
 /// 轮询决策（D-33「休眠期零主动查询」的唯一裁决点：
@@ -57,6 +59,15 @@ pub enum UpsertOutcome {
         /// 旧端点 id（别名化对象）。
         old_id: String,
         /// 新端点 id（在册条目现在的 id）。
+        new_id: String,
+    },
+    /// A-1b 注册归并：新注册设备按 physical_key 字符串合并了一个虚拟
+    /// 条目（持久化注入）。条目已重绑到真实端点、virtual 标记已清除，
+    /// 持久化最后已知电量保留到首个实时读数接管。
+    MergedVirtual {
+        /// 虚拟条目 id（`virtual#{key}`，调用方清理引用）。
+        old_id: String,
+        /// 真实端点 id（条目现在的 id）。
         new_id: String,
     },
 }
@@ -84,6 +95,17 @@ pub struct DeviceEntry {
     wake_armed: bool,
     /// 最近一次唤醒探测的时刻（冷却窗口判定）。
     last_wake_probe: Option<Instant>,
+    /// A-1b 虚拟条目标记：由持久化记录启动注入、非真实注册设备。
+    /// 零查询、不参与调度（各处 is_virtual 守卫保证）。
+    pub is_virtual: bool,
+    /// 持久化记录的 last_seen（epoch 秒；虚拟条目时间标注用，
+    /// 注册归并后清除）。
+    pub persisted_last_seen: Option<u64>,
+    /// WP-C（v3 C-1）：本设备下一次查询到期点（按设备计时轮询）。
+    /// None = 不排程——休眠（D-33 零主动查询）、虚拟条目、或已被
+    /// 注销（gone）等重枚举；`is_due` 对「在线但从未排程」兜底为
+    /// 立即到期（新注册首读 / 状态残留自愈）。
+    pub next_due: Option<Instant>,
 }
 
 impl DeviceEntry {
@@ -95,12 +117,30 @@ impl DeviceEntry {
             timeout_streak: 0,
             wake_armed: false,
             last_wake_probe: None,
+            is_virtual: false,
+            persisted_last_seen: None,
+            next_due: None,
+        }
+    }
+
+    /// WP-C（v3 C-1）：本设备当前轮询档——Charging 15s /
+    /// Normal 配置档；休眠与虚拟条目不排程（None）。Disconnected
+    /// 归 Normal 档（重枚举前的兜底节奏，实际槽位已随通道移除）。
+    pub fn tier_interval(&self, cfg: &Config) -> Option<Duration> {
+        if self.is_virtual || self.device.state == DeviceState::Sleeping {
+            return None;
+        }
+        if self.device.battery.is_some_and(|b| b.charging) {
+            Some(POLL_CHARGING)
+        } else {
+            Some(Duration::from_secs(cfg.poll_interval_secs))
         }
     }
 
     /// 派生灰显态（超过阈值无成功；从未成功过的在线设备不灰）。
-    /// 阈值由调用方经 `AppCore::gray_threshold()` 给出（F5 主修复 (a)：
-    /// 锚定轮询档，不再是固定 90s）。
+    /// 阈值由调用方经 `AppCore::gray_threshold_for()` 按本设备档位
+    /// 给出（F5 主修复 (a)：锚定轮询档，不再是固定 90s；WP-C 起按
+    /// 设备各自档位）。
     pub fn is_gray(&self, now: Instant, threshold: Duration) -> bool {
         match self.last_success {
             Some(t) => now.duration_since(t) >= threshold,
@@ -130,6 +170,21 @@ pub struct DeviceSnapshot {
     /// 不外发，GUI 侧仅用它做 rebind 后的 pin 重绑匹配）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical_key: Option<String>,
+    /// A-1b 虚拟条目标记（持久化注入、非真实注册设备）。
+    pub is_virtual: bool,
+    /// 持久化记录的最后已知时刻（epoch 秒；虚拟条目时间标注用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<u64>,
+}
+
+impl DeviceSnapshot {
+    /// A-2 菜单行使能判定（v3）：有实时或持久化最后已知电量即可点
+    /// ——真实条目 ∪ 虚拟条目统一判定，「条目存在」不再以注册成功
+    /// 为前提。离线 gray 行同样可点（点击仅钉选 + refresh_ui，
+    /// 零查询）。
+    pub fn has_displayable_data(&self) -> bool {
+        self.percent.is_some()
+    }
 }
 
 /// 给 UI 的整体快照。
@@ -149,6 +204,10 @@ pub struct AppCore {
     /// 阈值热改即时重估产生的待派发告警（v0.3.14 红蓝共识 B1 修复）：
     /// `is_low_battery` 的重估告警不再丢弃，暂存于此由 GUI 侧取走派发。
     pending_alerts: Vec<(String, Alert)>,
+    /// 回退键冲突集合（v3 R5-I-01）：≥2 个真实条目共享同一 Name
+    /// 回退键即冲突——冲突键不入持久化、不生成虚拟条目、不展示
+    /// 持久化最后已知。由 `refresh_key_conflicts` 维护。
+    conflicted_keys: HashSet<String>,
     snap_seq: u64,
 }
 
@@ -159,6 +218,7 @@ impl AppCore {
             entries: Vec::new(),
             lowbats: HashMap::new(),
             pending_alerts: Vec::new(),
+            conflicted_keys: HashSet::new(),
             snap_seq: 0,
         }
     }
@@ -174,16 +234,21 @@ impl AppCore {
         }
     }
 
-    /// 注册 / 更新设备（T6：新增物理身份 rebind-on-match）。
+    /// 注册 / 更新设备（T6：物理身份 rebind-on-match；A-1b：虚拟条目归并）。
     ///
     /// 判定顺序：
     /// 1. id 精确匹配 → 原位更新（保留电量 / 状态；新读数丢失 proven 身份时
     ///    保留旧身份，避免身份在端点间反复横跳）。
-    /// 2. 物理身份匹配（双方均 proven unitId 且相等）→ **重绑**：把在册条目
+    /// 2. A-1b 虚拟条目归并：在册虚拟条目的 physical_key 字符串与新设备
+    ///    相等（持久化 schema 不记 provenance，合并一律按字符串相等）→
+    ///    条目重绑到真实端点、virtual 标记清除、状态迁 Online；持久化
+    ///    最后已知电量保留到首个实时读数接管（注册即「?」是 A-1b 要
+    ///    消灭的场景）。
+    /// 3. 物理身份匹配（双方均 proven unitId 且相等）→ **重绑**：把在册条目
     ///    的端点 id 改为新枚举端点，迁移其全部主机侧状态（低电追踪器键、
     ///    超时连击、唤醒臂、灰显计时、待派发告警的 id 引用），不新增条目。
     ///    调用方负责把旧端点标记为别名槽位（跳过轮询 / 不进菜单 / 不 toast）。
-    /// 3. 都不匹配（含身份不明的 Name 降级——保守规则：宁可分开绝不误并）
+    /// 4. 都不匹配（含身份不明的 Name 降级——保守规则：宁可分开绝不误并）
     ///    → 新增条目。
     pub fn upsert_device(&mut self, device: Device) -> UpsertOutcome {
         if let Some(e) = self.entries.iter_mut().find(|e| e.device.id == device.id) {
@@ -204,6 +269,30 @@ impl AppCore {
                 e.device.physical_key = k;
             }
             return UpsertOutcome::Updated;
+        }
+        // A-1b 虚拟条目归并（判定顺序第 2 条，见上）。
+        if let Some(pos) = self.entries.iter().position(|e| {
+            e.is_virtual && e.device.physical_key.as_str() == device.physical_key.as_str()
+        }) {
+            let old_id = self.entries[pos].device.id.clone();
+            let new_id = device.id.clone();
+            let new_index = device.device_index;
+            let new_link = device.link;
+            // 持久化最后已知电量：实时读数接管前保留展示（新注册设备
+            // 一般不带读数）。
+            let kept_battery = self.entries[pos].device.battery;
+            // 复用同一迁移路径（低电追踪器键 / 待派发告警引用）。
+            self.rebind_device_id(&old_id, &new_id, new_index, new_link);
+            let e = &mut self.entries[pos];
+            e.is_virtual = false;
+            e.persisted_last_seen = None;
+            e.device.name = device.name;
+            e.device.physical_key = device.physical_key;
+            e.device.is_hidpp1 = device.is_hidpp1;
+            e.device.battery = device.battery.or(kept_battery);
+            // 设备已醒来并完成注册握手（Sleeping → Online 合法迁移）。
+            e.device.state = mark_online(e.device.state);
+            return UpsertOutcome::MergedVirtual { old_id, new_id };
         }
         if device.physical_key.is_proven() {
             if let Some(pos) = self
@@ -267,6 +356,138 @@ impl AppCore {
         &self.entries
     }
 
+    /// A-1b 启动注入：把一条持久化记录播种为虚拟条目。返回是否播种。
+    ///
+    /// 不播种（返回 false）的情形：同键已有条目（真实或虚拟——真实
+    /// 条目的实时链路优先，虚拟不重复播种）；键在冲突集合内
+    /// （R5-I-01：冲突设备不生成虚拟条目）。
+    ///
+    /// 虚拟条目语义：id 取 `virtual#{key}`（不会与真实端点 id 冲突）；
+    /// 状态直接赋 Sleeping（Connected→Sleeping 在迁移表中是非法迁移，
+    /// 虚拟条目不走路径迁移、纯展示语义）；physical_key 一律取
+    /// Name(key)（持久化不记 provenance，归并按字符串相等）；电量即
+    /// 持久化最后已知；last_success 保持 None。零查询、不参与调度——
+    /// `poll_decision` / 唤醒探测 / 唤醒装填对其一律 Skip（各处
+    /// is_virtual 守卫），`next_due` 恒 None 由调用方（IO 循环不为
+    /// 虚拟 id 排程）保证。
+    pub fn seed_virtual(&mut self, rec: &PersistedDevice) -> bool {
+        if rec.physical_key.is_empty()
+            || self.conflicted_keys.contains(&rec.physical_key)
+            || self
+                .entries
+                .iter()
+                .any(|e| e.device.physical_key.as_str() == rec.physical_key)
+        {
+            return false;
+        }
+        let mut device = Device::new(
+            format!("virtual#{}", rec.physical_key),
+            &rec.display_name,
+            LinkKind::Unknown,
+            0,
+            false,
+        );
+        device.physical_key = PhysicalKey::Name(rec.physical_key.clone());
+        device.battery = Some(BatteryReading {
+            percent: rec.percent,
+            charging: rec.charging,
+            // source 字符串无法还原时回退占位（仅影响诊断展示，不影响
+            // 电量数值与归并）。
+            source: BatterySource::from_name(&rec.source)
+                .unwrap_or(BatterySource::UnifiedBattery),
+        });
+        device.state = DeviceState::Sleeping;
+        let mut entry = DeviceEntry::new(device);
+        entry.is_virtual = true;
+        entry.persisted_last_seen = Some(rec.last_seen);
+        self.entries.push(entry);
+        true
+    }
+
+    /// 重算回退键冲突集合（v3 R5-I-01 键冲突条款）：≥2 个**真实**
+    /// 条目共享同一 Name 回退键（同名同型号、unitId 均取不到）即
+    /// 冲突。虚拟条目不计数（虚拟 + 真实同键是待归并，不是冲突）；
+    /// proven unitId 不参与（同 unitId 双条目已被 rebind 路径合并）。
+    ///
+    /// 返回本次新进入冲突的键——调用方据此：记日志一次 + 持久化
+    /// `set_conflicted`（停写该键并弃用存量记录）+ 清同键虚拟条目。
+    /// 设备拔出后集合收缩（冲突解除、恢复可写），收缩不产生返回项。
+    pub fn refresh_key_conflicts(&mut self) -> Vec<String> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for e in &self.entries {
+            if !e.is_virtual {
+                if let PhysicalKey::Name(name) = &e.device.physical_key {
+                    *counts.entry(name.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        let next: HashSet<String> = counts
+            .into_iter()
+            .filter(|(_, n)| *n >= 2)
+            .map(|(k, _)| k.to_string())
+            .collect();
+        let mut newly: Vec<String> = next.difference(&self.conflicted_keys).cloned().collect();
+        newly.sort();
+        self.conflicted_keys = next;
+        newly
+    }
+
+    /// 当前回退键冲突集合（持久化同步 / 诊断用）。
+    pub fn conflicted_keys(&self) -> &HashSet<String> {
+        &self.conflicted_keys
+    }
+
+    /// 清除指定键的虚拟条目（持久化记录被 LRU/字节上限淘汰、或冲突
+    /// 弃用时同步清除——A-1b「清除」段）。只动虚拟条目，真实条目不
+    /// 受影响（冲突设备的实时显示不受持久化弃用影响）。返回被清除
+    /// 的条目 id。
+    pub fn remove_virtual_by_keys(&mut self, keys: &[String]) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.entries.retain(|e| {
+            let drop = e.is_virtual
+                && keys.iter().any(|k| k == e.device.physical_key.as_str());
+            if drop {
+                removed.push(e.device.id.clone());
+            }
+            !drop
+        });
+        for id in &removed {
+            self.lowbats.remove(id);
+        }
+        removed
+    }
+
+    /// 持久化采集钩子（A-1 变化驱动的唯一收敛点）：成功读数后在
+    /// `record_success` 之外由 IO 循环调用。虚拟条目不产生持久化
+    /// 写入（虚拟条目没有真实读数，其数据本就来自持久化）；冲突键
+    /// 由 store 内部拦截。返回是否新标 dirty。
+    pub fn persist_note_success(
+        &self,
+        store: &mut LastKnownStore,
+        id: &str,
+        wall_secs: u64,
+        now: Instant,
+    ) -> bool {
+        let Some(e) = self.entries.iter().find(|e| e.device.id == id) else {
+            return false;
+        };
+        if e.is_virtual {
+            return false;
+        }
+        let Some(b) = e.device.battery else {
+            return false;
+        };
+        store.note_reading(
+            e.device.physical_key.as_str(),
+            &e.device.name,
+            b.percent,
+            b.charging,
+            b.source.name(),
+            wall_secs,
+            now,
+        )
+    }
+
     /// 记录一次成功电量读取；返回去抖后应发的低电告警（若有）。
     ///
     /// D-33：成功即恢复——超时连击清零、唤醒臂解除，状态经 `mark_online`
@@ -278,6 +499,7 @@ impl AppCore {
         reading: BatteryReading,
         now: Instant,
     ) -> Option<Alert> {
+        let cfg = self.config();
         let entry = self.entries.iter_mut().find(|e| e.device.id == id)?;
         entry.last_success = Some(now);
         entry.gray_alerted = false;
@@ -286,7 +508,10 @@ impl AppCore {
         entry.last_wake_probe = None;
         entry.device.state = mark_online(entry.device.state);
         entry.device.battery = Some(reading);
-        let cfg = self.config();
+        // WP-C（v3 C-1/C-3）：充/拔切换随本次读数立即重排本设备
+        // 到期点——充电 15s（AC-C1）/ 非充电配置档（AC-C2：拔线感知
+        // 延迟 ≤ 一个充电档 15s，无需拔线事件监听）。
+        entry.next_due = entry.tier_interval(&cfg).map(|iv| now + iv);
         // v0.3.14（蓝队 B2 必修）：进程内该设备的**首次**成功读数（重启 /
         // 开机自启后的注册探测）立即按当前阈值即判（evaluate_now），不再走
         // 2 连击去抖——旧逻辑下重启后低电提醒态要等第 2 次读数（默认轮询
@@ -355,31 +580,51 @@ impl AppCore {
     /// 记录一次查询超时（D-33）：连续 `SLEEP_AFTER_TIMEOUTS` 次超时 →
     /// Online → Sleeping，此后 `poll_decision` 一律 Skip（零主动查询），
     /// 直到被动唤醒信号到达。休眠中的再次超时（唤醒探测失败）保持休眠。
-    pub fn record_timeout(&mut self, id: &str) -> TimeoutOutcome {
+    /// WP-C：进休眠 / 探测失败 → next_due 置 None（等唤醒信号重排）；
+    /// 未达阈值仍在计数 → 按本设备档位重排下一次到期。
+    pub fn record_timeout(&mut self, id: &str, now: Instant) -> TimeoutOutcome {
+        let cfg = self.config();
         let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) else {
             return TimeoutOutcome::Counting(0);
         };
         entry.timeout_streak = entry.timeout_streak.saturating_add(1);
         match entry.device.state {
-            DeviceState::Sleeping => TimeoutOutcome::AlreadySleeping,
+            DeviceState::Sleeping => {
+                entry.next_due = None;
+                TimeoutOutcome::AlreadySleeping
+            }
             DeviceState::Online if entry.timeout_streak >= SLEEP_AFTER_TIMEOUTS => {
                 entry.device.set_state(DeviceState::Sleeping);
                 entry.wake_armed = false;
                 entry.last_wake_probe = None;
+                entry.next_due = None;
                 TimeoutOutcome::EnteredSleep
             }
             // Connected / Disconnected 下只计数、不改态
             //（Disconnected 由 gone 路径管理，GrayedOut 不落库）。
-            _ => TimeoutOutcome::Counting(entry.timeout_streak),
+            _ => {
+                entry.next_due = entry.tier_interval(&cfg).map(|iv| now + iv);
+                TimeoutOutcome::Counting(entry.timeout_streak)
+            }
         }
     }
 
     /// 被动唤醒信号（D-33）：系统层观测到鼠标活动（Raw Input）→ 给休眠
     /// 设备装填一次唤醒探测资格。在线设备忽略（正常轮询节奏不变）。
-    pub fn note_wake_signal(&mut self, id: &str) {
+    /// A-1b：虚拟条目不装填（无真实端点可探测）。
+    /// WP-C（v3 C-1，冷却 per-entry 不变 I-12）：装填同时把本设备
+    /// next_due 提到「尽快」——冷却窗口内排在冷却结束点（探测节奏仍
+    /// 受 WAKE_PROBE_COOLDOWN 约束），否则立即到期。
+    pub fn note_wake_signal(&mut self, id: &str, now: Instant) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
-            if entry.device.state == DeviceState::Sleeping {
+            if entry.device.state == DeviceState::Sleeping && !entry.is_virtual {
                 entry.wake_armed = true;
+                entry.next_due = Some(match entry.last_wake_probe {
+                    Some(t) if now.duration_since(t) < WAKE_PROBE_COOLDOWN => {
+                        t + WAKE_PROBE_COOLDOWN
+                    }
+                    _ => now,
+                });
             }
         }
     }
@@ -387,64 +632,74 @@ impl AppCore {
     /// v0.3.15（P1-1）：唤醒探测轮内的槽位准入判定——仅「已注册且当前
     /// 休眠」的设备允许被探测。在线/灰显设备在探测轮一律跳过（唤醒信号
     /// ≠ 该查在线设备），与 `poll_decision` 组合保证：探测轮里非候选
-    /// 设备一次 HID++ 查询都不发。
+    /// 设备一次 HID++ 查询都不发。A-1b：虚拟条目一律非候选。
     pub fn wake_probe_candidate(&self, id: &str) -> bool {
         self.entries
             .iter()
-            .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping)
+            .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping && !e.is_virtual)
     }
 
-    /// 临近灰显豁免（F5 主修复 (b)，v0.3.16 线）：在线设备距「90s 无成功」
-    /// 不足 NEAR_GRAY_LEEWAY 时返回 true，探测轮据此对其放行一次查询——
-    /// 让长轮询档下被冻结的 last_success 在鼠标活跃期每 ~90s 刷新一次，
-    /// 90s 墙钟派生不再必然误灰。豁免锚在 GRAY_AFTER（90s 常量）而非
-    /// 锚定后的阈值：锚定阈值下整轮会周期性刷新 last_success，elapsed
-    /// 永远到不了阈值窗口，豁免将永不触发（那样真离线首报会被推迟到
-    /// ≥ GRAY_MIN_POLLS × 档位）。
-    /// 与 D-33 唤醒探测互斥（F5 实现期检查项，蓝方互检第 3 条）：本判定
-    /// 仅对 Online 生效，`wake_probe_candidate` 仅对 Sleeping 生效，
-    /// 同一设备同一轮不会被两条路径同时放行。
-    pub fn near_gray_exemption(&self, id: &str, now: Instant) -> bool {
+    /// 临近到期豁免（WP-C，v3 C-1/C-4：D-72 临近灰显豁免与 per-device
+    /// due 的统一形态——一套机制，不再两套并存）：在线、非充电设备的
+    /// 下一次到期距今 ≤ NEAR_GRAY_LEEWAY 时返回 true，探测轮据此对其
+    /// 提前放行一次查询——把最多 30s 后本该做的查询提前并轮，last_success
+    /// 按本设备档位持续刷新，F5 断言（正常使用中在线设备不因档位冻结
+    /// 被误判灰显）随之迁移到按设备计时口径：锚不再是 90s 墙钟，而是
+    /// 本设备自己的 next_due。
+    /// 充电档排除（AC-C1：30s 提前量会破坏 15s±2s 节拍）；休眠设备
+    /// 走 D-33 唤醒路径（`wake_probe_candidate`），与本判定按状态互斥。
+    pub fn near_due_exemption(&self, id: &str, now: Instant) -> bool {
         self.entries.iter().any(|e| {
             e.device.id == id
                 && e.device.state == DeviceState::Online
-                && e.last_success.is_some_and(|t| {
-                    now.duration_since(t) >= GRAY_AFTER.saturating_sub(NEAR_GRAY_LEEWAY)
+                && !e.is_virtual
+                && !e.device.battery.is_some_and(|b| b.charging)
+                && e.next_due.is_some_and(|d| {
+                    d > now && d.saturating_duration_since(now) <= NEAR_GRAY_LEEWAY
                 })
         })
     }
 
-    /// 探测轮槽位准入的合并裁决点（F5 主修复 (b) 与 D-33）：
-    /// 休眠候选（唤醒探测）或临近灰显豁免命中者放行，其余在线设备跳过。
+    /// 探测轮槽位准入的合并裁决点（WP-C 与 D-33）：
+    /// 休眠候选（唤醒探测）或临近到期豁免命中者放行，其余在线设备跳过。
     pub fn probe_round_allows(&self, id: &str, now: Instant) -> bool {
-        self.wake_probe_candidate(id) || self.near_gray_exemption(id, now)
+        self.wake_probe_candidate(id) || self.near_due_exemption(id, now)
     }
 
-    /// 当前处于休眠的设备 id 列表（IO 线程收到唤醒信号后批量装填用）。
+    /// 当前处于休眠的**真实**设备 id 列表（IO 线程收到唤醒信号后批量
+    /// 装填用）。A-1b：虚拟条目（Sleeping 展示态）不在其列——装填
+    /// 虚拟条目意味着向不存在的端点发查询，违反零查询红线。
     pub fn sleeping_ids(&self) -> Vec<String> {
         self.entries
             .iter()
-            .filter(|e| e.device.state == DeviceState::Sleeping)
+            .filter(|e| e.device.state == DeviceState::Sleeping && !e.is_virtual)
             .map(|e| e.device.id.clone())
             .collect()
     }
 
     /// 一次唤醒探测开始（D-33）：消耗唤醒资格并进入冷却——本次探测
     /// 无论成败，都要等下一个唤醒信号 + 冷却窗口过后才会再探测。
+    /// WP-C：探测在途期间摘除排程（结果会经 record_success /
+    /// record_timeout 重新排程）。
     pub fn begin_wake_probe(&mut self, id: &str, now: Instant) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
             entry.wake_armed = false;
             entry.last_wake_probe = Some(now);
+            entry.next_due = None;
         }
     }
 
     /// 本轮是否向该设备发查询（D-33 零主动查询裁决点）：
     /// 非休眠一律 Probe；休眠设备仅当「唤醒资格已装填且已过冷却」才 Probe
     /// 一次，其余一律 Skip——休眠期间绝不发出主动查询。
+    /// A-1b：虚拟条目一律 Skip（无真实端点，零查询红线）。
     pub fn poll_decision(&self, id: &str, now: Instant) -> PollDecision {
         let Some(entry) = self.entries.iter().find(|e| e.device.id == id) else {
             return PollDecision::Probe;
         };
+        if entry.is_virtual {
+            return PollDecision::Skip;
+        }
         if entry.device.state != DeviceState::Sleeping {
             return PollDecision::Probe;
         }
@@ -459,23 +714,75 @@ impl AppCore {
     }
 
     /// 记录一次失败（gone=true 表示设备消失）。
+    /// WP-C：gone 落 Disconnected 的同时摘除排程——槽位已随通道注销，
+    /// 等重枚举重新注册后再由首读排程。
     pub fn record_failure(&mut self, id: &str, gone: bool) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) {
             if gone && entry.device.state != DeviceState::Disconnected {
                 entry.timeout_streak = 0;
                 entry.wake_armed = false;
                 entry.last_wake_probe = None;
+                entry.next_due = None;
                 let to = DeviceState::Disconnected;
                 entry.device.set_state(to);
             }
         }
     }
 
+    /// WP-C（v3 C-1）：本设备此刻是否到期应查。休眠 / 虚拟条目恒 false
+    /// （D-33 零查询红线的调度侧保险，与 `poll_decision` 双重防护）；
+    /// 在线 / 已断开但从未排程的条目兜底为立即到期（新注册首读、
+    /// 状态残留自愈——任意查询结果都会重新排程）。
+    pub fn is_due(&self, id: &str, now: Instant) -> bool {
+        self.entries.iter().any(|e| {
+            e.device.id == id
+                && !e.is_virtual
+                && e.device.state != DeviceState::Sleeping
+                && e.next_due.is_none_or(|d| now >= d)
+        })
+    }
+
+    /// WP-C（v3 C-1）：是否存在「到期应查」的在线（非休眠、非虚拟）
+    /// 设备——tray 侧「整轮 vs 仅探测轮」的裁决输入（任一在线设备
+    /// 到期即强制整轮，探测轮不饿死各设备自己的节奏）。
+    pub fn any_due(&self, now: Instant) -> bool {
+        self.entries.iter().any(|e| {
+            !e.is_virtual
+                && e.device.state != DeviceState::Sleeping
+                && e.next_due.is_none_or(|d| now >= d)
+        })
+    }
+
+    /// WP-C（v3 C-1 修订）：全部在册真实设备里最近的到期点——睡眠
+    /// 预算的设备侧输入（旧 full_poll_due 的「下次必查时刻」角色由
+    /// 本最小值完全吸收，不再单独维护）。无排程设备 → None。
+    pub fn next_poll_due(&self) -> Option<Instant> {
+        self.entries
+            .iter()
+            .filter(|e| !e.is_virtual)
+            .filter_map(|e| e.next_due)
+            .min()
+    }
+
+    /// WP-C：一次查询已发出、结果为「非超时且非 gone 的失败」（错误帧 /
+    /// 映射缺失 / 特性缺失等硬失败）时的重排钩子——按本设备当前档位
+    /// 推后下次到期，防止到期点滞留形成对故障设备的紧循环查询。
+    /// （成功走 `record_success`、超时走 `record_timeout`，各自排程。）
+    pub fn reschedule(&mut self, id: &str, now: Instant) {
+        let cfg = self.config();
+        if let Some(e) = self.entries.iter_mut().find(|e| e.device.id == id) {
+            if e.device.state != DeviceState::Sleeping {
+                e.next_due = e.tier_interval(&cfg).map(|iv| now + iv);
+            }
+        }
+    }
+
     /// 检查是否有设备新进入灰显（用于"电量显示已过期"通知）；返回新变灰的设备名。
     pub fn newly_gray(&mut self, now: Instant) -> Vec<String> {
-        let threshold = self.gray_threshold();
+        let cfg = self.config();
         let mut out = Vec::new();
         for e in &mut self.entries {
+            let threshold = gray_threshold_of(e, &cfg);
             if e.device.state == DeviceState::Online && e.is_gray(now, threshold) && !e.gray_alerted
             {
                 e.gray_alerted = true;
@@ -494,11 +801,11 @@ impl AppCore {
     /// 灰显的语义是「读数过期」而非「设备离线」，保留展示资格、灰显
     /// 显示最后一次已知电量，不再因派生灰回退「?」。
     pub fn default_display_index(&self, now: Instant) -> Option<usize> {
-        let threshold = self.gray_threshold();
+        let cfg = self.config();
         let eligible = |e: &DeviceEntry| {
             e.device.state == DeviceState::Sleeping
                 || e.device.state == DeviceState::Online
-                || !e.is_gray(now, threshold)
+                || !e.is_gray(now, gray_threshold_of(e, &cfg))
         };
         let pick_min = |pred: &dyn Fn(&DeviceEntry) -> bool| -> Option<usize> {
             self.entries
@@ -517,33 +824,21 @@ impl AppCore {
         .or_else(|| pick_min(&|e| e.device.battery.is_some() && eligible(e)))
     }
 
-    /// 下一次轮询间隔：充电中 15s，否则按配置。
-    pub fn poll_interval(&self) -> Duration {
-        let any_charging = self
-            .entries
-            .iter()
-            .any(|e| e.device.battery.is_some_and(|b| b.charging));
-        if any_charging {
-            POLL_CHARGING
-        } else {
-            Duration::from_secs(self.config().poll_interval_secs)
-        }
-    }
-
-    /// 灰显阈值（F5 主修复 (a)，v0.3.16 线）：`max(GRAY_AFTER,
-    /// GRAY_MIN_POLLS × 当前轮询档)`。兜底件——保证「两次连续轮询失败
-    /// 才有灰显证据」；活跃期的新鲜读数由临近灰显豁免
-    /// （`near_gray_exemption`）保证，真离线检测仍走既有路径
-    /// （DeviceGone 即时注销 / 超时×2→Sleeping / 硬失败×3 注销）。
-    pub fn gray_threshold(&self) -> Duration {
-        GRAY_AFTER.max(self.poll_interval() * GRAY_MIN_POLLS)
+    /// 灰显阈值（F5 主修复 (a)，v0.3.16 线；WP-C 起按设备档位）：
+    /// `max(GRAY_AFTER, GRAY_MIN_POLLS × 本设备轮询档)`——充电档 15s
+    /// → 90s；Normal 档（默认 1800s）→ 3600s。兜底件——保证「两次连续
+    /// 轮询失败才有灰显证据」；活跃期的新鲜读数由临近到期豁免
+    /// （`near_due_exemption`）与本设备自身排程保证，真离线检测仍走
+    /// 既有路径（DeviceGone 即时注销 / 超时×2→Sleeping / 硬失败×3 注销）。
+    pub fn gray_threshold_for(&self, e: &DeviceEntry) -> Duration {
+        gray_threshold_of(e, &self.config())
     }
 
     /// 生成快照。
     pub fn snapshot(&mut self, now: Instant) -> Snapshot {
         self.snap_seq += 1;
         let default_device = self.default_display_index(now);
-        let threshold = self.gray_threshold();
+        let cfg = self.config();
         Snapshot {
             seq: self.snap_seq,
             devices: self
@@ -556,17 +851,30 @@ impl AppCore {
                     charging: e.device.battery.is_some_and(|b| b.charging),
                     link: e.device.link.name().to_string(),
                     state: e.device.state.name().to_string(),
-                    gray: e.display_gray(now, threshold),
+                    gray: e.display_gray(now, gray_threshold_of(e, &cfg)),
                     source: e.device.battery.map(|b| b.source.name().to_string()),
                     physical_key: match &e.device.physical_key {
                         volttray_device::PhysicalKey::UnitId(u) => Some(u.clone()),
                         volttray_device::PhysicalKey::Name(_) => None,
                     },
+                    is_virtual: e.is_virtual,
+                    last_seen: e.persisted_last_seen,
                 })
                 .collect(),
             default_device,
         }
     }
+}
+
+/// 灰显阈值的按设备计算（WP-C，v3 C-4）：`max(GRAY_AFTER,
+/// GRAY_MIN_POLLS × 本设备轮询档)`。休眠 / 虚拟条目按 Normal 档兜底
+/// （其灰显由状态派生，阈值基本不参与）。借用约束友好：只依赖
+/// entry 与 cfg，可在 `entries` 可变迭代中使用。
+fn gray_threshold_of(e: &DeviceEntry, cfg: &Config) -> Duration {
+    let iv = e
+        .tier_interval(cfg)
+        .unwrap_or_else(|| Duration::from_secs(cfg.poll_interval_secs));
+    GRAY_AFTER.max(iv * GRAY_MIN_POLLS)
 }
 
 /// GUI 边界的 panic 护栏（PRD：catch_unwind）。
@@ -625,9 +933,9 @@ mod tests {
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(5, false), t0);
-        let later = t0 + core.gray_threshold() + Duration::from_secs(1);
+        let later = t0 + core.gray_threshold_for(&core.entries()[0]) + Duration::from_secs(1);
         // 已派生灰（阈值已过）但仍在默认展示位：图标灰显 5%，不是「?」。
-        assert!(core.entries()[0].is_gray(later, core.gray_threshold()));
+        assert!(core.entries()[0].is_gray(later, core.gray_threshold_for(&core.entries()[0])));
         assert_eq!(core.default_display_index(later), Some(0));
         // 快照同样灰显但保留展示位。
         let snap = core.snapshot(later);
@@ -645,7 +953,7 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(5, false), t0);
         core.record_failure("a", true); // gone → Disconnected
-        let later = t0 + core.gray_threshold() + Duration::from_secs(1);
+        let later = t0 + core.gray_threshold_for(&core.entries()[0]) + Duration::from_secs(1);
         assert_eq!(core.default_display_index(later), None);
     }
 
@@ -661,9 +969,10 @@ mod tests {
         assert!(!core.wake_probe_candidate("a"));
         assert!(!core.wake_probe_candidate("ghost"));
         // b 连续超时达阈值 → 进入休眠 → 成为唯一候选。
-        let _ = core.record_timeout("b");
+        let now = Instant::now();
+        let _ = core.record_timeout("b", now);
         assert!(!core.wake_probe_candidate("b"), "未达休眠阈值前仍在线");
-        let _ = core.record_timeout("b");
+        let _ = core.record_timeout("b", now);
         assert!(core.wake_probe_candidate("b"));
         assert!(!core.wake_probe_candidate("a"), "在线设备不得成为候选");
     }
@@ -675,7 +984,7 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(80, false), t0);
         // F5 主修复 (a)：默认档 1800s 下阈值锚定为 3600s，91s 不再触发。
-        let threshold = core.gray_threshold();
+        let threshold = core.gray_threshold_for(&core.entries()[0]);
         assert_eq!(
             threshold,
             GRAY_AFTER.max(Duration::from_secs(1800) * GRAY_MIN_POLLS)
@@ -690,23 +999,31 @@ mod tests {
         assert!(core.newly_gray(later).is_empty());
     }
 
-    /// F5 主修复 (a) 阈值锚定：充电档 15s → max(90, 30)=90s；300s 档 →
-    /// 600s；默认 1800s 档 → 3600s。阈值永不小于两个完整轮询周期。
+    /// F5 主修复 (a) 阈值锚定（WP-C 迁移为按设备档位）：充电档 15s →
+    /// max(90, 30)=90s；300s 档 → 600s；默认 1800s 档 → 3600s。
+    /// 阈值永不小于两个完整轮询周期。
     #[test]
-    fn gray_threshold_anchors_to_poll_interval() {
+    fn gray_threshold_anchors_to_device_tier() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config {
             poll_interval_secs: 300,
             ..Config::default()
         })));
-        assert_eq!(core.gray_threshold(), Duration::from_secs(600));
         core.upsert_device(dev("a", 1));
+        // Normal 档 300s（无读数 / 非充电同档）→ 600s。
+        assert_eq!(
+            core.gray_threshold_for(&core.entries()[0]),
+            Duration::from_secs(600)
+        );
         core.record_success("a", reading(30, true), Instant::now()); // 充电档 15s
-        assert_eq!(core.gray_threshold(), GRAY_AFTER);
+        assert_eq!(core.gray_threshold_for(&core.entries()[0]), GRAY_AFTER);
         core.swap_config(Config::default()); // 1800s 档（充电中仍按充电档）
-        assert_eq!(core.gray_threshold(), GRAY_AFTER);
+        assert_eq!(core.gray_threshold_for(&core.entries()[0]), GRAY_AFTER);
         let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
         core2.upsert_device(dev("b", 2));
-        assert_eq!(core2.gray_threshold(), Duration::from_secs(3600));
+        assert_eq!(
+            core2.gray_threshold_for(&core2.entries()[0]),
+            Duration::from_secs(3600)
+        );
     }
 
     /// F5 验证断言 A6 之①：poll_interval=300、在线、推进 91s 无轮询 →
@@ -722,7 +1039,7 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(94, false), t0);
         let later = t0 + Duration::from_secs(91);
-        assert!(!core.entries()[0].is_gray(later, core.gray_threshold()));
+        assert!(!core.entries()[0].is_gray(later, core.gray_threshold_for(&core.entries()[0])));
         assert!(core.newly_gray(later).is_empty(), "91s 不得触发灰显通知");
         assert_eq!(core.default_display_index(later), Some(0));
         let snap = core.snapshot(later);
@@ -730,39 +1047,40 @@ mod tests {
         assert_eq!(snap.default_device, Some(0));
     }
 
-    /// F5 验证断言 A6 之②（主修复 (b)）：临近灰显豁免命中 → 探测轮放行。
-    /// 90s-30s=60s 起豁免生效；未到窗口、未注册 id、休眠设备（走 D-33
-    /// 唤醒路径）各有边界。豁免与唤醒探测按状态互斥，不会同轮双查。
+    /// F5 验证断言 A6 之②（WP-C 迁移）：临近到期豁免命中 → 探测轮放行。
+    /// 豁免窗口 = 设备自身 next_due 前 30s（默认档 1800s，则 due-30s 起
+    /// 豁免生效）；未到窗口、未注册 id、休眠设备（走 D-33 唤醒路径）各
+    /// 有边界。豁免与唤醒探测按状态互斥，不会同轮双查。
     #[test]
-    fn a6_near_gray_exemption_admits_probe_round() {
+    fn a6_near_due_exemption_admits_probe_round() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.upsert_device(dev("b", 2));
         core.record_success("a", reading(80, false), t0);
         core.record_success("b", reading(60, false), t0);
-        // 窗口前（59s）：两台在线设备均不放行。
-        let before = t0 + Duration::from_secs(59);
+        // 窗口前（距 due 31s）：两台在线设备均不放行。
+        let before = t0 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS - 31);
         assert!(!core.probe_round_allows("a", before));
         assert!(!core.probe_round_allows("b", before));
         assert!(
             !core.probe_round_allows("ghost", before),
             "未注册 id 不放行"
         );
-        // 窗口内（61s）：豁免命中，探测轮放行一次查询。
-        let near = t0 + Duration::from_secs(61);
-        assert!(core.probe_round_allows("a", near), "临近灰显豁免应放行");
+        // 窗口内（距 due 29s）：豁免命中，探测轮放行一次查询。
+        let near = t0 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS - 29);
+        assert!(core.probe_round_allows("a", near), "临近到期豁免应放行");
         assert!(core.probe_round_allows("b", near));
-        // 豁免命中后本轮查到了（豁免的意义）：last_success 刷新，下一轮
-        // 窗口重新计时——活跃期读数间隔被收敛到 ~90s 量级（A3）。
+        // 豁免命中后本轮查到了（豁免的意义）：next_due 按当前档重排，
+        // 下一轮窗口重新计时——活跃期读数间隔被收敛到档位上限量级（A3）。
         core.record_success("a", reading(80, false), near);
         assert!(!core.probe_round_allows("a", near + Duration::from_secs(1)));
         // 互斥：b 连续超时进休眠后走 D-33 唤醒路径，豁免对其不生效
         // （准入由 wake_probe_candidate 承担），两路径不会同时放行。
-        let _ = core.record_timeout("b");
-        let _ = core.record_timeout("b");
+        let _ = core.record_timeout("b", near);
+        let _ = core.record_timeout("b", near);
         assert!(core.wake_probe_candidate("b"));
-        assert!(!core.near_gray_exemption("b", near), "休眠设备不吃在线豁免");
+        assert!(!core.near_due_exemption("b", near), "休眠设备不吃在线豁免");
         assert!(
             core.probe_round_allows("b", near),
             "休眠候选仍由唤醒路径放行"
@@ -770,7 +1088,7 @@ mod tests {
         assert!(!core.wake_probe_candidate("a"), "在线设备不是唤醒候选");
     }
 
-    /// F5 风险回归面②（多设备同接收器）：豁免只放行临近灰显的设备，
+    /// F5 风险回归面②（多设备同接收器）：豁免只放行临近到期的设备，
     /// 不误伤其他设备的节奏；真离线设备按既有路径 超时×2→Sleeping，
     /// 休眠后展示资格保留、灰显最后已知电量——真离线检测链不削弱（A5
     /// 的代码侧可覆盖部分）。
@@ -781,17 +1099,18 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.upsert_device(dev("b", 2));
         core.record_success("a", reading(50, false), t0);
-        // b 的读数比 a 晚 40s：61s 时 a 进豁免窗口、b 尚未进。
+        // b 的读数比 a 晚 40s：a 距 due 29s 时进豁免窗口，b 距其 due
+        // 还有 69s，尚未进窗口——豁免按设备各自计时，不连坐。
         core.record_success("b", reading(30, false), t0 + Duration::from_secs(40));
-        let near = t0 + Duration::from_secs(61);
+        let near = t0 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS - 29);
         assert!(core.probe_round_allows("a", near));
         assert!(
             !core.probe_round_allows("b", near),
             "豁免按设备计时，不连坐"
         );
         // b 真离线：连续两次超时 → Sleeping（既有路径原样）。
-        assert_eq!(core.record_timeout("b"), TimeoutOutcome::Counting(1));
-        assert_eq!(core.record_timeout("b"), TimeoutOutcome::EnteredSleep);
+        assert_eq!(core.record_timeout("b", near), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout("b", near), TimeoutOutcome::EnteredSleep);
         // 休眠后：展示资格保留（D-33）、灰显最后已知电量；默认展示按
         // 「eligible 中取电量最低」仍选中 b（30% < a 的 50%）——休眠
         // 同权意味着低电休眠设备继续占据默认展示位，不回退「?」。
@@ -801,18 +1120,29 @@ mod tests {
         assert_eq!(core.default_display_index(near), Some(1));
     }
 
+    /// WP-C：next_due 档位切换——未轮询设备立即到期（自愈）；常规读数
+    /// 排到默认档 1800s；充电读数排到充电档 15s。
     #[test]
-    fn poll_interval_switches_when_charging() {
+    fn next_due_switches_when_charging() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
-        // 默认档跟随 D-66：DEFAULT_POLL_SECS = 1800s（引用常量防再过时）。
+        // 未轮询（next_due=None）的非休眠真实设备立即到期：自愈口径，
+        // 不因调度字段缺失而永远不查。
+        assert!(core.is_due("a", now));
+        core.record_success("a", reading(30, false), now);
         assert_eq!(
-            core.poll_interval(),
-            Duration::from_secs(crate::config::DEFAULT_POLL_SECS)
+            core.entries()[0].next_due,
+            Some(now + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "常规读数排到默认档（D-66 DEFAULT_POLL_SECS = 1800s）"
         );
+        assert!(!core.is_due("a", now));
         core.record_success("a", reading(30, true), now);
-        assert_eq!(core.poll_interval(), POLL_CHARGING);
+        assert_eq!(
+            core.entries()[0].next_due,
+            Some(now + POLL_CHARGING),
+            "充电读数排到充电档 15s"
+        );
     }
 
     #[test]
@@ -993,18 +1323,18 @@ mod tests {
         core.upsert_device(dev(id, 1));
         core.record_success(id, reading(66, false), now);
         // 连续 SLEEP_AFTER_TIMEOUTS 次查询超时 → 进入休眠。
-        assert_eq!(core.record_timeout(id), TimeoutOutcome::Counting(1));
-        assert_eq!(core.record_timeout(id), TimeoutOutcome::EnteredSleep);
+        assert_eq!(core.record_timeout(id, now), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout(id, now), TimeoutOutcome::EnteredSleep);
         (core, now)
     }
 
     /// 连续查询超时 → Online → Sleeping；再次超时保持休眠（不 panic）。
     #[test]
     fn consecutive_timeouts_enter_sleep() {
-        let (mut core, _now) = sleeping_core("a");
+        let (mut core, now) = sleeping_core("a");
         let e = &core.entries()[0];
         assert_eq!(e.device.state, DeviceState::Sleeping);
-        assert_eq!(core.record_timeout("a"), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::AlreadySleeping);
         assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
     }
 
@@ -1030,13 +1360,13 @@ mod tests {
         // 无信号：Skip。
         assert_eq!(core.poll_decision("a", now), PollDecision::Skip);
         // 被动事件（系统观测到鼠标活动）→ 一次探测资格。
-        core.note_wake_signal("a");
+        core.note_wake_signal("a", now);
         assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
         // 探测开始：资格消耗 + 冷却开始。
         core.begin_wake_probe("a", now);
         assert_eq!(core.poll_decision("a", now), PollDecision::Skip);
         // 冷却窗口内即使再来信号也不立即探测（防信号风暴 = 变相高频查询）。
-        core.note_wake_signal("a");
+        core.note_wake_signal("a", now);
         let within = now + WAKE_PROBE_COOLDOWN - Duration::from_secs(1);
         assert_eq!(core.poll_decision("a", within), PollDecision::Skip);
         // 冷却过后、且持有新信号资格 → 再探测一次。
@@ -1052,7 +1382,7 @@ mod tests {
     #[test]
     fn wake_probe_success_restores_online() {
         let (mut core, now) = sleeping_core("a");
-        core.note_wake_signal("a");
+        core.note_wake_signal("a", now);
         assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
         core.begin_wake_probe("a", now);
         core.record_success("a", reading(70, false), now);
@@ -1066,9 +1396,9 @@ mod tests {
     #[test]
     fn wake_probe_timeout_stays_sleeping() {
         let (mut core, now) = sleeping_core("a");
-        core.note_wake_signal("a");
+        core.note_wake_signal("a", now);
         core.begin_wake_probe("a", now);
-        assert_eq!(core.record_timeout("a"), TimeoutOutcome::AlreadySleeping);
+        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::AlreadySleeping);
         assert_eq!(core.entries()[0].device.state, DeviceState::Sleeping);
         let later = now + Duration::from_secs(3600);
         assert_eq!(core.poll_decision("a", later), PollDecision::Skip);
@@ -1133,12 +1463,12 @@ mod tests {
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(50, false), now);
-        assert_eq!(core.record_timeout("a"), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::Counting(1));
         assert_eq!(core.entries()[0].device.state, DeviceState::Online);
         assert_eq!(core.poll_decision("a", now), PollDecision::Probe);
         // 成功后连击清零。
         core.record_success("a", reading(51, false), now);
-        assert_eq!(core.record_timeout("a"), TimeoutOutcome::Counting(1));
+        assert_eq!(core.record_timeout("a", now), TimeoutOutcome::Counting(1));
     }
 
     // ---- T6：物理身份 rebind / 保守合并 / 降级 ----
@@ -1159,7 +1489,7 @@ mod tests {
         core.upsert_device(dev_with_unit("C52B|usb#1", 1, "39414243"));
         core.record_success("C52B|usb#1", reading(10, false), now);
         assert_eq!(
-            core.record_timeout("C52B|usb#1"),
+            core.record_timeout("C52B|usb#1", now),
             TimeoutOutcome::Counting(1)
         );
         assert!(core.is_low_battery("C52B|usb#1"), "低电追踪应已激活");
@@ -1303,5 +1633,380 @@ mod tests {
         assert!(core.lowbats.contains_key("b"));
         assert!(!core.lowbats.contains_key("a"));
         assert!(!core.rebind_device_id("ghost", "c", 1, LinkKind::Bolt));
+    }
+
+    // ---------- WP-A：虚拟条目（A-1b）/ 键冲突条款（R5-I-01）/ 持久化钩子（A-1） ----------
+
+    fn persisted(key: &str, name: &str, percent: u8) -> PersistedDevice {
+        PersistedDevice {
+            physical_key: key.into(),
+            display_name: name.into(),
+            percent,
+            charging: false,
+            last_seen: 1_700_000_000,
+            source: "unified_battery".into(),
+        }
+    }
+
+    /// 指定显示名构造真实设备（Name 回退键 = 消毒名；键冲突条款测试用）。
+    fn dev_named(id: &str, name: &str, index: u8) -> Device {
+        let mut d = Device::new(id.into(), name, LinkKind::Bolt, index, false);
+        d.set_state(DeviceState::Online);
+        d
+    }
+
+    /// A-1b 创建段：虚拟条目播种后渲染为「灰色最后已知 + 时间标注」，
+    /// 进入菜单与图标候选；零查询守卫全部生效（D-33 红线）。
+    #[test]
+    fn virtual_seed_renders_gray_last_known_and_never_queried() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        assert!(core.seed_virtual(&persisted("AAAA0001", "MX Master 3", 55)));
+
+        let snap = core.snapshot(now);
+        assert_eq!(snap.devices.len(), 1);
+        let row = &snap.devices[0];
+        assert_eq!(row.id, "virtual#AAAA0001");
+        assert!(row.is_virtual);
+        assert_eq!(row.percent, Some(55));
+        assert_eq!(row.last_seen, Some(1_700_000_000));
+        assert_eq!(row.state, "sleeping");
+        assert!(row.gray, "虚拟条目呈灰色最后已知");
+        // A-2：自带持久化数据 → 可点（enabled 判定）。
+        assert!(row.has_displayable_data());
+        // 图标候选：唯一条目即默认展示设备（不是「?」）。
+        assert_eq!(snap.default_device, Some(0));
+
+        // 零查询守卫：轮询裁决 Skip、不进休眠装填名单、非唤醒探测候选、
+        // 唤醒信号不装填、探测轮不放行。
+        let vid = "virtual#AAAA0001";
+        assert_eq!(core.poll_decision(vid, now), PollDecision::Skip);
+        assert!(core.sleeping_ids().is_empty());
+        assert!(!core.wake_probe_candidate(vid));
+        assert!(!core.probe_round_allows(vid, now));
+        core.note_wake_signal(vid, now);
+        assert_eq!(core.poll_decision(vid, now), PollDecision::Skip);
+    }
+
+    /// A-1b 播种拒绝：同键已有条目（真实或虚拟）不重复播种。
+    #[test]
+    fn virtual_seed_skips_existing_entry_same_key() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        // 同键虚拟条目已存在 → 拒绝。
+        assert!(core.seed_virtual(&persisted("K1", "Mouse K1", 50)));
+        assert!(!core.seed_virtual(&persisted("K1", "Mouse K1", 51)));
+        assert_eq!(core.entries().len(), 1);
+        // 同键真实条目已存在 → 拒绝（实时链路优先）。
+        core.upsert_device(dev_with_unit("ep1", 1, "U1"));
+        assert!(!core.seed_virtual(&persisted("U1", "Mouse U1", 60)));
+        assert_eq!(core.entries().len(), 2);
+    }
+
+    /// A-1b 归并段：真实设备注册按 physical_key 字符串合并虚拟条目
+    /// —— proven unitId 与 Name 回退键两种来源都合并；合并后持久化
+    /// 最后已知电量保留到首个实时读数接管。
+    #[test]
+    fn upsert_merges_virtual_entry_by_key_string() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        // proven unitId 键归并。
+        assert!(core.seed_virtual(&persisted("AAAA0001", "MX Master 3", 55)));
+        let outcome = core.upsert_device(dev_with_unit("ep9", 3, "AAAA0001"));
+        assert_eq!(
+            outcome,
+            UpsertOutcome::MergedVirtual {
+                old_id: "virtual#AAAA0001".into(),
+                new_id: "ep9".into()
+            }
+        );
+        assert_eq!(core.entries().len(), 1, "归并不新增条目");
+        let e = &core.entries()[0];
+        assert_eq!(e.device.id, "ep9");
+        assert_eq!(e.device.device_index, 3);
+        assert!(!e.is_virtual);
+        assert_eq!(e.persisted_last_seen, None);
+        assert_eq!(e.device.state, DeviceState::Online);
+        assert_eq!(
+            e.device.battery.map(|b| b.percent),
+            Some(55),
+            "实时读数接管前保留持久化最后已知"
+        );
+        // 首个实时读数接管显示。
+        core.record_success("ep9", reading(80, false), now);
+        assert_eq!(core.entries()[0].device.battery.map(|b| b.percent), Some(80));
+
+        // Name 回退键归并（同名字符串、无 provenance）。
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        assert!(core2.seed_virtual(&persisted("Mouse X", "Mouse X", 40)));
+        let outcome2 = core2.upsert_device(dev_named("epX", "Mouse X", 2));
+        assert!(matches!(outcome2, UpsertOutcome::MergedVirtual { .. }));
+        assert_eq!(core2.entries().len(), 1);
+        assert!(!core2.entries()[0].is_virtual);
+    }
+
+    /// R5-I-01 键冲突条款：≥2 个真实条目共享同一 Name 回退键 → 冲突；
+    /// 冲突设备不入持久化、不生成虚拟条目；虚拟条目不计入冲突数
+    /// （虚拟 + 真实同键 = 待归并）；设备拔出后冲突解除。
+    #[test]
+    fn key_conflict_detection_and_three_package_behavior() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        let mut store = LastKnownStore::new(std::env::temp_dir().join("vt-core-conflict-test.json"));
+
+        // 虚拟 + 真实同键：待归并，不是冲突。
+        assert!(core.seed_virtual(&persisted("Mouse Duo", "Mouse Duo", 70)));
+        core.upsert_device(dev_named("epA", "Mouse Duo", 1)); // 归并虚拟条目
+        assert!(core.refresh_key_conflicts().is_empty());
+
+        // 第二台同名真实设备注册（unitId 均取不到 → 同 Name 回退键）。
+        core.upsert_device(dev_named("epB", "Mouse Duo", 2));
+        assert_eq!(core.refresh_key_conflicts(), vec!["Mouse Duo".to_string()]);
+        // 幂等：未变化时不重复报告（日志只记一次的语义基础）。
+        assert!(core.refresh_key_conflicts().is_empty());
+
+        // ① 不入持久化：store 同步冲突集合后，成功读数不落记录。
+        store.set_conflicted(core.conflicted_keys().clone());
+        core.record_success("epA", reading(30, false), now);
+        core.record_success("epB", reading(31, false), now);
+        assert!(!core.persist_note_success(&mut store, "epA", 1_700_000_100, now));
+        assert!(!core.persist_note_success(&mut store, "epB", 1_700_000_100, now));
+        assert!(store.records().is_empty());
+
+        // ② 不生成虚拟条目。
+        assert!(!core.seed_virtual(&persisted("Mouse Duo", "Mouse Duo", 65)));
+
+        // ③ 实时读数正常显示（持久化弃用不影响实时链路）。
+        let snap = core.snapshot(now);
+        assert_eq!(snap.devices.len(), 2);
+        assert!(snap.devices.iter().all(|d| !d.is_virtual));
+        assert!(snap.devices.iter().all(|d| d.percent.is_some()));
+
+        // 设备拔出 → 冲突解除 → 恢复可写。
+        core.remove_device("epB");
+        assert!(core.refresh_key_conflicts().is_empty());
+        store.set_conflicted(core.conflicted_keys().clone());
+        assert!(core.persist_note_success(&mut store, "epA", 1_700_000_200, now));
+    }
+
+    /// R5-I-01 红队复核建议：检测到冲突时同键存量虚拟条目被清除
+    /// （不展示持久化最后已知）；真实条目不被动。
+    #[test]
+    fn conflict_detection_removes_existing_virtual_entry() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        // 一台设备时期正常持久化 → 重启后播种虚拟条目。
+        assert!(core.seed_virtual(&persisted("Mouse Duo", "Mouse Duo", 70)));
+        // 两台同名真实设备同时出现（归并一台 + 新增一台）→ 冲突。
+        core.upsert_device(dev_named("epA", "Mouse Duo", 1));
+        core.upsert_device(dev_named("epB", "Mouse Duo", 2));
+        assert_eq!(core.entries().len(), 2, "虚拟已归并一台");
+        // 另一种时序：虚拟尚未归并即检出冲突（两台先注册、播种在后
+        // 被冲突拦截已覆盖；此处验「虚拟在册 + 冲突形成」的清除路径）。
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        assert!(core2.seed_virtual(&persisted("Mouse Duo", "Mouse Duo", 70)));
+        // 手工构造「虚拟在册 + 两真实同键」：先注册两台同名真实设备
+        // （播种在前、冲突在后——真实设备归并走键相等，先归并一台，
+        // 第二台新增后冲突形成；虚拟已不在册）。为覆盖「虚拟仍在册时
+        // 冲突形成」路径，直接用 remove_virtual_by_keys 验证清除语义：
+        let removed = core2.remove_virtual_by_keys(&["Mouse Duo".to_string()]);
+        assert_eq!(removed, vec!["virtual#Mouse Duo".to_string()]);
+        assert!(core2.entries().is_empty());
+    }
+
+    /// A-1 持久化钩子：真实设备成功读数收敛入库；虚拟条目永不产生
+    /// 持久化写入。
+    #[test]
+    fn persist_hook_writes_real_readings_only() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        let mut store = LastKnownStore::new(std::env::temp_dir().join("vt-core-hook-test.json"));
+
+        core.upsert_device(dev_with_unit("ep1", 1, "AAAA0001"));
+        core.record_success("ep1", reading(55, false), now);
+        assert!(core.persist_note_success(&mut store, "ep1", 1_700_000_000, now));
+        let recs = store.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].physical_key, "AAAA0001");
+        assert_eq!(recs[0].percent, 55);
+
+        // 同值再读：last_seen 刷新但不重复标 dirty（变化驱动）。
+        core.record_success("ep1", reading(55, false), now);
+        assert!(!core.persist_note_success(&mut store, "ep1", 1_700_000_030, now));
+
+        // 虚拟条目：钩子直接拒绝。
+        assert!(core.seed_virtual(&persisted("K9", "Mouse K9", 66)));
+        assert!(!core.persist_note_success(&mut store, "virtual#K9", 1_700_000_040, now));
+        assert_eq!(store.records().len(), 1);
+    }
+
+    /// A-1b 清除段：LRU/字节上限淘汰或用户移除时，虚拟条目随持久化
+    /// 记录一并清除；真实条目不受影响。
+    #[test]
+    fn remove_virtual_by_keys_clears_only_virtual() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        assert!(core.seed_virtual(&persisted("Mouse K1", "Mouse K1", 50)));
+        assert!(core.seed_virtual(&persisted("K2", "Mouse K2", 60)));
+        core.upsert_device(dev_named("epR", "Mouse K1", 1)); // 归并 Mouse K1
+        core.record_success("epR", reading(77, false), now);
+
+        // K2 被淘汰：清虚拟条目；Mouse K1 已归并为真实条目——即便其键
+        // 列入清除名单也不被动（is_virtual 守卫）。
+        let removed =
+            core.remove_virtual_by_keys(&["K2".to_string(), "Mouse K1".to_string()]);
+        assert_eq!(removed, vec!["virtual#K2".to_string()]);
+        assert_eq!(core.entries().len(), 1);
+        assert_eq!(core.entries()[0].device.id, "epR");
+        assert!(!core.entries()[0].is_virtual);
+    }
+
+    // —— WP-C：按设备计时轮询（v3 C-1 / AC-C1 / AC-C2 / I-06）——
+
+    /// AC-C1：充电档 15s 节拍——充电读数后 next_due = now+15s；+13s 未
+    /// 到期、+15s 到期（±2s 容差由调度侧节拍保证，核心侧断言到期点本身
+    /// 精确落在 15s）。充电设备被排除在临近到期豁免之外：due 前 10s
+    /// 已在 30s 豁免窗内也不放行——30s 提前量会破坏 15s±2s 节拍。
+    #[test]
+    fn wp_c_charging_tier_15s_cadence() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(60, true), t0);
+        assert_eq!(core.entries()[0].next_due, Some(t0 + POLL_CHARGING));
+        assert!(!core.is_due("a", t0 + Duration::from_secs(13)), "+13s 未到期");
+        assert!(core.is_due("a", t0 + POLL_CHARGING), "+15s 到期");
+        // 节拍保持：每到都读到充电 → 下一个到期点恒为「本次读数 +15s」。
+        let t1 = t0 + POLL_CHARGING;
+        core.record_success("a", reading(61, true), t1);
+        assert_eq!(core.entries()[0].next_due, Some(t1 + POLL_CHARGING));
+        // 充电设备不吃临近到期豁免（due 前 10s 在 30s 窗内也不放行）。
+        let near = t1 + Duration::from_secs(5);
+        assert!(!core.near_due_exemption("a", near), "充电档排除在豁免外");
+        assert!(!core.probe_round_allows("a", near));
+    }
+
+    /// AC-C2：拔线 ≤15s 感知——无事件监听，靠充电档 15s 节拍：拔线后
+    /// 第一次充电档读数（距上次充电读数 ≤15s）读到 not-charging，
+    /// next_due 立即跳到常规档 1800s。
+    #[test]
+    fn wp_c_unplug_perceived_within_15s() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(70, true), t0);
+        // 拔线发生在 t0 之后任意时刻；下一次充电档读数最迟 t0+15s 发出。
+        let read_at = t0 + POLL_CHARGING;
+        assert!(core.is_due("a", read_at), "充电档保证 ≤15s 内有读数");
+        core.record_success("a", reading(70, false), read_at);
+        assert_eq!(
+            core.entries()[0].next_due,
+            Some(read_at + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "读到拔线即切常规档"
+        );
+    }
+
+    /// I-06：per-device 互不影响——a 充电 15s 节拍不抬高 b 的常规档
+    /// 节奏；b 的到期点不随 a 的读数移动。睡眠预算的设备侧输入
+    /// next_poll_due = 全设备最近到期点（此处即 a 的 15s 到期点）。
+    #[test]
+    fn wp_c_per_device_independence() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, true), t0); // 充电档
+        core.record_success("b", reading(40, false), t0); // 常规档
+        assert_eq!(core.next_poll_due(), Some(t0 + POLL_CHARGING));
+        let t1 = t0 + POLL_CHARGING;
+        assert!(core.is_due("a", t1));
+        assert!(!core.is_due("b", t1), "a 的充电节拍不抬高 b");
+        // any_due：任一在线设备到期即 true（整轮 vs 仅探测轮裁决输入）；
+        // a 未到期、b 未到期时两台都不应触发整轮。
+        assert!(core.any_due(t1), "a 到期 → 有设备应查");
+        let t_half = t0 + Duration::from_secs(7);
+        assert!(!core.any_due(t_half), "两台均未到期 → 不强制整轮");
+        core.record_success("a", reading(51, true), t1);
+        assert_eq!(
+            core.entries()[1].next_due,
+            Some(t0 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "b 的到期点不受 a 读数影响"
+        );
+    }
+
+    /// v3 C-1 睡眠预算输入：休眠设备 next_due=None（不占预算）；
+    /// 唤醒信号把本设备到期点提到「尽快」（冷却窗口内排在冷却结束点，
+    /// per-entry 冷却语义 I-12 不变）；探测在途摘除排程。
+    #[test]
+    fn wp_c_sleep_budget_inputs() {
+        let (mut core, now) = sleeping_core("a");
+        assert_eq!(core.entries()[0].next_due, None, "休眠不占睡眠预算");
+        assert_eq!(core.next_poll_due(), None, "无排程设备 → None");
+        // 唤醒信号：无冷却负担 → 立即到期。
+        core.note_wake_signal("a", now);
+        assert_eq!(core.entries()[0].next_due, Some(now));
+        // 探测在途：摘除排程（结果会重新排程）。
+        core.begin_wake_probe("a", now);
+        assert_eq!(core.entries()[0].next_due, None);
+        // 探测超时保持休眠；冷却窗口内再来信号 → 排在冷却结束点。
+        let _ = core.record_timeout("a", now);
+        let within = now + Duration::from_secs(1);
+        core.note_wake_signal("a", within);
+        assert_eq!(
+            core.entries()[0].next_due,
+            Some(now + WAKE_PROBE_COOLDOWN),
+            "冷却 per-entry：冷却内的信号排到冷却结束点"
+        );
+    }
+
+    /// WP-C 重排钩子：非超时非 gone 的硬失败按本设备当前档位推后
+    /// next_due，防止到期点滞留形成紧循环；休眠设备不动（D-33）。
+    #[test]
+    fn wp_c_hard_failure_reschedules() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), t0);
+        let t1 = t0 + Duration::from_secs(5);
+        core.reschedule("a", t1);
+        assert_eq!(
+            core.entries()[0].next_due,
+            Some(t1 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "硬失败按当前档位重排"
+        );
+        // 休眠设备：重排钩子跳过（排程归 D-33 唤醒路径管理）。
+        let (mut core2, now2) = sleeping_core("b");
+        core2.reschedule("b", now2);
+        assert_eq!(core2.entries()[0].next_due, None);
+    }
+
+    /// 多设备同接收器回归（WP-C 后）：两台同接收器设备各自排程、
+    /// 互不占预算；一台休眠后 next_poll_due 由另一台接管；快照与
+    /// 默认展示不受影响。
+    #[test]
+    fn wp_c_multi_device_same_receiver_regression() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), t0);
+        core.record_success("b", reading(30, false), t0 + Duration::from_secs(60));
+        assert_eq!(
+            core.next_poll_due(),
+            Some(t0 + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "最近到期点 = a 的常规档到期点"
+        );
+        // a 超时×2 进休眠 → 不占预算，next_poll_due 由 b 接管。
+        let t1 = t0 + Duration::from_secs(120);
+        let _ = core.record_timeout("a", t1);
+        let _ = core.record_timeout("a", t1);
+        assert_eq!(
+            core.next_poll_due(),
+            Some(t0 + Duration::from_secs(60) + Duration::from_secs(crate::config::DEFAULT_POLL_SECS)),
+            "a 休眠后预算由 b 的到期点接管"
+        );
+        // 快照与默认展示回归：两台都在册，b 低电占默认展示位。
+        let snap = core.snapshot(t1);
+        assert_eq!(snap.devices.len(), 2);
+        assert_eq!(snap.default_device, Some(1));
+        assert!(snap.devices[1].percent.is_some());
     }
 }

@@ -1,0 +1,11 @@
+{"ts": 1700000000, "event": "run_start"}
+{"ts": 1700002000, "physical_key": "dev-A", "display_name": "Mouse A", "percent": 90, "charging": false, "source": "poll"}
+{"ts": 1700009000, "physical_key": "dev-A", "display_name": "Mouse A", "percent": 88, "charging": false, "source": "poll"}
+{"ts": 1700008900, "physical_key": "dev-A", "display_name": "Mouse A", "percent": 89, "charging": false, "source": "poll"}
+{"ts": 1700010000, "event": "run_stop"}
+{"ts": 1701000000, "event": "run_start"}
+{"ts": 1701002000, "physical_key": "dev-B", "display_name": "Mouse B", "percent": 70, "charging": false, "source": "poll"}
+{"ts": 1701009000, "physical_key": "dev-B", "display_name": "Mouse B", "percent": 68, "charging": false, "source": "poll"}
+{"ts": 1701008900, "physical_key": "dev-B", "display_name": "Mouse B", "percent": 69, "charging": false, "source": "poll"}
+{"ts": 1701008800, "physical_key": "dev-B", "display_name": "Mouse B", "percent": 70, "charging": false, "source": "poll"}
+{"ts": 1701010000, "event": "run_stop"}

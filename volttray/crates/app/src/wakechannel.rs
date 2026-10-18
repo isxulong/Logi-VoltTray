@@ -1,0 +1,157 @@
+//! 唤醒信号通道归因（v3 A-3）：Raw Input 设备路径 → HID 通道匹配。
+//!
+//! Raw Input 的 `hDevice` 经 `GetRawInputDeviceInfoW(RIDI_DEVICENAME)`
+//! 得到设备路径；同一接收器（Unifying/Bolt/Lightspeed）后的鼠标路径
+//! 与接收器 HID 通道路径共享 VID/PID 与父实例前缀，据此把唤醒信号
+//! 归因到通道，只给该通道上的休眠设备装填探测资格。
+//!
+//! 匹配规则（保守）：VID/PID 对 + 实例段前两个 `&` 分量全部相等才
+//! 算同通道；**唯一匹配才返回**——0 个或 ≥2 个候选命中一律 None
+//! （调用方回退全量装填 + miss 计数，「漏唤醒的损失大于多探测一次」）。
+//!
+//! 适用边界（v3 A-3 写明）：本机制面向接收器多通道场景治本；蓝牙 /
+//! 有线直连（BTHHID / 直连 HID）的设备路径系统性匹配不上接收器
+//! 通道，恒定 miss → 回退全量装填，对该批用户不劣化也不改善。
+
+/// 从 Windows 设备路径提取通道指纹（VID/PID 对 + 实例段前两个分量）。
+///
+/// 路径形如
+/// `\\?\HID#VID_046D&PID_C52B&MI_01&Col02#8&1a2b3c4d&0&0001#{guid}`：
+/// `#` 分段后第 2 段含 VID/PID（可能带 MI/Col 后缀），第 3 段是
+/// 实例 id（`&` 分隔，前两个分量标识父设备/拓扑位置）。任一部分
+/// 缺失即 None（不可归因）。
+fn channel_fingerprint(path: &str) -> Option<(String, String)> {
+    let upper = path.to_uppercase();
+    let mut segs = upper.split('#');
+    segs.next()?; // \\?\HID
+    let ids = segs.next()?;
+    let instance = segs.next()?;
+    // VID_xxxx 与 PID_xxxx 必须同时存在（允许 MI_/Col 等后缀分量）。
+    let mut vid = None;
+    let mut pid = None;
+    for part in ids.split('&') {
+        if let Some(v) = part.strip_prefix("VID_") {
+            vid = Some(v);
+        } else if let Some(p) = part.strip_prefix("PID_") {
+            pid = Some(p);
+        }
+    }
+    let (vid, pid) = (vid?, pid?);
+    // 实例段前两个 `&` 分量（不足两个则整段——单分量实例仍可用，
+    // 唯一性判定兜底）。
+    let mut iparts = instance.split('&');
+    let i0 = iparts.next()?;
+    if i0.is_empty() {
+        return None;
+    }
+    let inst = match iparts.next() {
+        Some(i1) if !i1.is_empty() => format!("{i0}&{i1}"),
+        _ => i0.to_string(),
+    };
+    Some((format!("VID_{vid}&PID_{pid}"), inst))
+}
+
+/// 把 Raw Input 设备路径归因到候选 HID 通道。
+///
+/// `candidates` 为 `(通道标识, 通道 HID 设备路径)` 列表——通道标识由
+/// 调用方定义（槽位下标 / 通道号），返回值即该标识在列表中的下标。
+/// 唯一指纹匹配返回 `Some(下标)`；零匹配或多匹配（歧义）返回 None。
+pub fn channel_for_raw_path(raw_path: &str, candidates: &[(String, String)]) -> Option<usize> {
+    let fp = channel_fingerprint(raw_path)?;
+    let mut hit = None;
+    for (i, (_, hid_path)) in candidates.iter().enumerate() {
+        if channel_fingerprint(hid_path).as_ref() == Some(&fp) {
+            if hit.is_some() {
+                return None; // 歧义：多个候选同指纹，不可归因
+            }
+            hit = Some(i);
+        }
+    }
+    hit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unifying 接收器 HID 通道（电量查询走的接口）。
+    const UNIFYING_CHAN: &str =
+        r"\\?\HID#VID_046D&PID_C52B#7&2f3a1b2c&0&0000#{4d1e55b2-f16e-11cf-88cb-001111000030}";
+    /// Bolt 接收器 HID 通道。
+    const BOLT_CHAN: &str =
+        r"\\?\HID#VID_046D&PID_C548#6&9abc0011&0&0000#{4d1e55b2-f16e-11cf-88cb-001111000030}";
+
+    #[test]
+    fn unifying_mouse_raw_path_maps_to_its_receiver() {
+        // 同一接收器后的鼠标 Raw Input 路径：同 VID/PID、实例段共享
+        // 父前缀「7&2f3a1b2c」，带 MI/Col 后缀。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01&Col02#7&2f3a1b2c&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("bolt".to_string(), BOLT_CHAN.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(channel_for_raw_path(raw, &candidates), Some(1));
+    }
+
+    #[test]
+    fn bolt_mouse_raw_path_maps_to_bolt_channel() {
+        let raw = r"\\?\HID#VID_046D&PID_C548&MI_02&Col01#6&9abc0011&0&0002#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![("bolt".to_string(), BOLT_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path(raw, &candidates), Some(0));
+    }
+
+    #[test]
+    fn different_receiver_instance_does_not_match() {
+        // 两台同型号接收器：VID/PID 相同但实例前缀不同 → 不误判。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path(raw, &candidates), None);
+    }
+
+    #[test]
+    fn bluetooth_path_systematically_misses() {
+        // BTHHID 路径（v3 写明的降级场景）：VID/PID 存在但实例段
+        // 与接收器通道无共享前缀 → None（调用方回退全量装填）。
+        let raw = r"\\?\BTHHID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID_b01a#9&1c2d3e4f&0&0000#{4d1e55b2-f16e-11cf-88cb-001111000030}";
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path(raw, &candidates), None);
+    }
+
+    #[test]
+    fn ambiguous_candidates_yield_none() {
+        // 两个候选同指纹（同一路径枚举出多个接口）→ 歧义不可归因。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&2f3a1b2c&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("a".to_string(), UNIFYING_CHAN.to_string()),
+            ("b".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(channel_for_raw_path(raw, &candidates), None);
+    }
+
+    #[test]
+    fn malformed_paths_yield_none() {
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path("", &candidates), None);
+        assert_eq!(channel_for_raw_path("no-hash-at-all", &candidates), None);
+        assert_eq!(
+            channel_for_raw_path(r"\\?\HID#NO_VID_HERE#7&1&0#{g}", &candidates),
+            None
+        );
+        // 候选路径不可解析 → 不参与匹配。
+        let bad = vec![("x".to_string(), "garbage".to_string())];
+        assert_eq!(
+            channel_for_raw_path(
+                r"\\?\HID#VID_046D&PID_C52B&MI_01#7&2f3a1b2c&0&0001#{g}",
+                &bad
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_case_insensitive() {
+        let lower = r"\\?\hid#vid_046d&pid_c52b&mi_01#7&2f3a1b2c&0&0001#{g}";
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path(lower, &candidates), Some(0));
+    }
+}

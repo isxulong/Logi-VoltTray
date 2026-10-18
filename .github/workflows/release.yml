@@ -1,0 +1,46 @@
+name: release
+
+# 发版流水线：tag 触发（v*），windows-latest 构建 release 版 exe，
+# 计算 sha256 并上传到对应 GitHub Release（可复用长期方案，v0.3.16 引入）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+
+      # 工具链锁定 1.90.0（与 rust-toolchain.toml / ci.yml 一致，见 docs/decisions.md D-01）
+      - uses: dtolnay/rust-toolchain@1.90.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: volttray
+
+      - name: build release exe
+        run: cargo build --release --locked -p volttray-tray
+
+      - name: sha256 checksum
+        shell: bash
+        run: |
+          cd target/release
+          sha256sum volttray-tray.exe | tee volttray-tray.exe.sha256.txt
+
+      - name: upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            volttray/target/release/volttray-tray.exe
+            volttray/target/release/volttray-tray.exe.sha256.txt

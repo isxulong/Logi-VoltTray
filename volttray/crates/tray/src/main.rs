@@ -28,12 +28,21 @@ mod logrotate;
 mod menu;
 #[cfg(windows)]
 mod rawinput;
+// WP-A（A-1b）：虚拟条目「最后更新于」时间注释的本地时格式化。
+mod timelocal;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod single;
 #[cfg(windows)]
+mod statsexport;
+#[cfg(windows)]
 mod toast;
+
+// WP-B：statsexport 子模块需要 crate 根可见的 IoCmd 与泛化 Save-As
+//（实现本体在 imp 内，此处再导出；statsexport 与 imp 互相引用）。
+#[cfg(windows)]
+pub(crate) use imp::{pick_save_path_with_filter, IoCmd};
 
 /// v0.3.8（D-64/B-2）：启动时图标渲染回退出厂默认的原因；首次打开设置
 /// 窗口时提示一次后取走（None = 未发生回退或已提示过）。
@@ -53,6 +62,11 @@ mod imp {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::SystemInformation::GetLocalTime;
+    // WP-A：持久化与通道归因（v3 A-1/A-3）。
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
+    use volttray_app::wakechannel::channel_for_raw_path;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Controls::Dialogs::{
         CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
@@ -116,14 +130,19 @@ mod imp {
     enum GuiMsg {
         Snapshot(Box<Snapshot>),
         Alert,
+        /// WP-B：统计导出完成（IO 线程已完成写盘；GUI 弹结果提示）。
+        StatsExportDone(String),
     }
 
-    enum IoCmd {
+    pub(crate) enum IoCmd {
         RefreshNow,
         /// 被动唤醒信号（D-33）：系统层观测到罗技鼠标活动（Raw Input）。
         /// 有注册槽位时仅装填唤醒探测资格；0 注册槽位时（v0.3.11 F5）
         /// 触发一次强制重枚举（设备已被用户物理唤醒，主机侧补读）。
-        WakeSignal,
+        WakeSignal(Option<String>),
+        /// WP-B：耗电统计导出请求（GUI → IO 线程；渲染/写盘在 IO 线程
+        /// 后台执行、不阻塞 UI，v3 P2-③ 口径；只读本机文件，零设备查询）。
+        ExportStats(crate::statsexport::StatsExportRequest),
         Shutdown,
     }
 
@@ -210,6 +229,38 @@ mod imp {
         slots: Vec<SlotState>,
     }
 
+    /// WP-A：墙钟 unix 秒（持久化 last_seen 用；取不到返回 0，不 panic）。
+    fn wall_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// WP-B：本地时区偏移（分钟；UTC+8 = 480）——CSV/HTML 时间戳渲染用。
+    /// GetLocalTime vs GetSystemTime 的分钟差（系统已把夏令时折算进本地
+    /// 时间）；纯算术实现（days-from-civil，与 app 层 civil_from_days 互
+    /// 逆），不引入额外 Win32 依赖。SYSTEMTIME 两 API 均无失败路径。
+    fn local_offset_minutes() -> i32 {
+        fn st_minutes(st: &windows::Win32::Foundation::SYSTEMTIME) -> i64 {
+            let y = st.wYear as i64 - if st.wMonth <= 2 { 1 } else { 0 };
+            let era = if y >= 0 { y } else { y - 399 } / 400;
+            let yoe = y - era * 400;
+            let mp = (st.wMonth as i64 + 9) % 12;
+            let doy = (153 * mp + 2) / 5 + st.wDay as i64 - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            let days = era * 146097 + doe - 719468;
+            days * 1440 + st.wHour as i64 * 60 + st.wMinute as i64
+        }
+        let (local, utc) = unsafe {
+            (
+                GetLocalTime(),
+                windows::Win32::System::SystemInformation::GetSystemTime(),
+            )
+        };
+        (st_minutes(&local) - st_minutes(&utc)) as i32
+    }
+
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -280,6 +331,7 @@ mod imp {
         shared: &SharedChannel,
         info: &ChannelInfo,
         slot: u8,
+        stats: &mut volttray_app::stats::StatsStore,
     ) -> Result<(SlotState, Option<(String, String)>), SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
@@ -398,10 +450,43 @@ mod imp {
                     }
                     rebound = Some((old_id, new_id));
                 }
+                UpsertOutcome::MergedVirtual { old_id, new_id } => {
+                    // WP-A（A-1b）：真实设备注册合并同名虚拟条目——最后已知
+                    // 读数已在 core 内并入，虚拟行从菜单消失（AC-A1b）。
+                    bootlog::note(&format!(
+                        "slot scan: merged virtual entry {old_id} into real {new_id} \
+                         (physical key match; last-known carried over)"
+                    ));
+                }
                 UpsertOutcome::Inserted | UpsertOutcome::Updated => {}
             }
             // rebind 后在册条目 id 已是本槽位 id，按本 id 记录读数即可。
+            // WP-B：扫描路径成功读数同口径落统计事件（变化驱动过滤在
+            // store 内）。设备刚应答 = 已醒；重注册场景（休眠中槽位重扫
+            // 注册）pre-read 为 Sleeping 则记 wake-first-read。
+            let was_sleeping = c
+                .entries()
+                .iter()
+                .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping);
+            let (pct, chg) = (reading.percent, reading.charging);
             c.record_success(&id, reading, now);
+            let pk = c
+                .entries()
+                .iter()
+                .find(|e| e.device.id == id)
+                .map(|e| e.device.physical_key.as_str().to_string())
+                .unwrap_or_default();
+            if !pk.is_empty() {
+                stats.note_reading(
+                    &pk,
+                    &name,
+                    pct,
+                    chg,
+                    volttray_app::stats::read_source(was_sleeping, chg),
+                    wall_secs() as i64,
+                    now,
+                );
+            }
         }
         if let Ok(mut o) = observer.lock() {
             o.push(DiagEvent::new(
@@ -542,6 +627,10 @@ mod imp {
         cmd: mpsc::Receiver<IoCmd>,
         cfg_path: PathBuf,
         enum_snap: Arc<Mutex<Option<EnumSnapshot>>>,
+        channel_map_miss: Arc<AtomicU64>,
+        // WP-B（I-02）：Shutdown 落盘完成的回执——GUI 菜单退出 /
+        // WM_ENDSESSION 承接窗口据此等待 run_stop + 双 store flush 完成。
+        shutdown_ack: mpsc::Sender<()>,
     ) {
         let mut channels: Vec<ChannelState> = Vec::new();
         let mut watcher = ConfigWatcher::new(cfg_path);
@@ -550,6 +639,54 @@ mod imp {
         // v0.3.9（D-65）：重枚举/重连状态机——无设备态退避重试、立即刷新
         // 强制重枚举、句柄失效自愈的唯一裁决点（纯逻辑，app 层单测覆盖）。
         let mut reconnect = Reconnect::new();
+        // WP-A（v3 A-1/A-1b）：last_known.json 持久化——启动加载（损坏
+        // 回退 .bak 由 store 内部处理），随后把最后已知读数播种为虚拟条目
+        // （重启即可灰显最后已知电量，零查询、next_due 恒 None）。
+        let (mut store, load_outcome) =
+            LastKnownStore::load(persist::default_path(), FlushTuning::default());
+        match load_outcome {
+            LoadOutcome::Empty => {
+                bootlog::note("last_known.json: no usable store (fresh start)")
+            }
+            LoadOutcome::Loaded(n) => {
+                bootlog::note(&format!("last_known.json: loaded {n} record(s)"))
+            }
+            LoadOutcome::Recovered => bootlog::note(
+                "last_known.json: primary corrupted/unreadable; renamed to .bak, empty fallback",
+            ),
+        }
+        if let Ok(mut c) = core.lock() {
+            let mut seeded = 0usize;
+            for rec in store.records() {
+                if c.seed_virtual(&rec) {
+                    seeded += 1;
+                }
+            }
+            if seeded > 0 {
+                bootlog::note(&format!(
+                    "last_known.json: seeded {seeded} virtual entries (last-known display)"
+                ));
+            }
+        }
+        // WP-B（v3 B-1）：stats.jsonl 落盘协调器——与 last_known 同
+        // FlushTuning 容错（tmp→rename 原子写、半截行截断修复）。启动即落
+        // run_start 生命周期事件（每次运行 2 行之一，缓冲待节流落盘）。
+        let (mut stats_store, stats_load) = volttray_app::stats::StatsStore::load(
+            &volttray_app::stats::default_dir(),
+            FlushTuning::default(),
+        );
+        match stats_load {
+            volttray_app::stats::StatsLoadOutcome::Empty => {
+                bootlog::note("stats.jsonl: fresh start")
+            }
+            volttray_app::stats::StatsLoadOutcome::Ready => {
+                bootlog::note("stats.jsonl: existing store ready")
+            }
+            volttray_app::stats::StatsLoadOutcome::Repaired(n) => bootlog::note(
+                &format!("stats.jsonl: truncated {n} trailing byte(s) (crash mid-write repair)"),
+            ),
+        }
+        stats_store.note_run_start(wall_secs() as i64, Instant::now());
         // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
         // 一次的例行枚举在集合未变时不重复全量落盘（单会话日志体积上限）。
         let mut last_enum_sig: Option<String> = None;
@@ -558,19 +695,49 @@ mod imp {
         // 没有这行汇总则「0 槽位 + 死缓存句柄」期间完全无观测）。
         let mut rescan_round: u32 = 0;
         // v0.3.15（P1-1）：唤醒信号只触发「仅探测」轮——标记下一轮
-        // （probe_only_next）与整轮轮询到期点（full_poll_due）。探测轮
-        // 不刷新到期点；持续鼠标活动下到期点一过即降级回整轮，探测轮
-        // 不会饿死正常轮询节奏。
+        // （probe_only_next）。WP-C（v3 C-1）：整轮 vs 仅探测轮的裁决
+        // 从墙钟到期点（full_poll_due）迁移为「是否有在线设备到期应查」
+        // （AppCore::any_due，per-device next_due 口径）——探测轮不刷新
+        // 任何设备的到期点；任一在线设备到期即降级回整轮，探测轮不会
+        // 饿死各设备自己的轮询节奏。
         let mut probe_only_next = false;
-        let mut full_poll_due = Instant::now();
         'outer: loop {
-            if matches!(cmd.try_recv(), Ok(IoCmd::Shutdown)) {
-                return;
+            // WP-B：循环顶部的 try_recv 原本只识别 Shutdown——非 Shutdown
+            // 命令在此被消费即丢弃（RefreshNow/WakeSignal 丢弃无害：轮次
+            // 即刻开始，语义不变）；ExportStats 丢弃 = 导出静默丢失，必须
+            // 在此同样派发执行。
+            match cmd.try_recv() {
+                Ok(IoCmd::Shutdown) => {
+                    // WP-B：run_stop 生命周期事件 + 强制落盘（每次运行 2 行之一）。
+                    stats_store.note_run_stop(wall_secs() as i64, Instant::now());
+                    if let Err(e) = stats_store.shutdown_flush(Instant::now(), wall_secs() as i64) {
+                        bootlog::note(&format!("stats.jsonl shutdown flush failed: {e}"));
+                    }
+                    // WP-A（v3 A-1）：退出兜底 fsync，崩溃损失 ≤60s / 掉电 ≤5min。
+                    if let Err(e) = store.shutdown_flush(Instant::now()) {
+                        bootlog::note(&format!("last_known.json shutdown flush failed: {e}"));
+                    }
+                    // WP-B（I-02）：回执落盘完成（菜单退出 / WM_ENDSESSION 等待方）。
+                    let _ = shutdown_ack.send(());
+                    return;
+                }
+                Ok(IoCmd::ExportStats(req)) => {
+                    let msg = run_stats_export(&mut stats_store, &req);
+                    gui.send(GuiMsg::StatsExportDone(msg));
+                }
+                // RefreshNow / WakeSignal：维持旧语义（轮次即刻开始，丢弃）。
+                _ => {}
             }
 
-            // v0.3.15（P1-1）：本轮是否为「仅探测」轮——仅当整轮轮询尚未
-            // 到期时成立；到期后强制整轮，保证在线设备轮询周期语义不变。
-            let probe_only = std::mem::take(&mut probe_only_next) && Instant::now() < full_poll_due;
+            // v0.3.15（P1-1）：本轮是否为「仅探测」轮——仅当无在线设备
+            // 到期时成立；任一在线设备到期即强制整轮，保证 per-device
+            // 轮询节奏语义不变（WP-C：full_poll_due 墙钟裁决已退役，
+            // 其角色由 AppCore::any_due / next_poll_due 吸收）。
+            let probe_only = std::mem::take(&mut probe_only_next)
+                && match core.lock() {
+                    Ok(c) => !c.any_due(Instant::now()),
+                    Err(_) => false,
+                };
             // 仅探测轮：枚举前已在册的槽位集合——本轮只探测「枚举新注册」
             // 与「仍处休眠」的槽位，已在册在线设备跳过（见轮询循环）。
             let pre_enum_ids: HashSet<String> = if probe_only {
@@ -722,8 +889,20 @@ mod imp {
                                         &state.shared,
                                         &state.info,
                                         slot,
+                                        &mut stats_store,
                                     ) {
                                         Ok((s, rebound)) => {
+                                            // WP-A：扫槽成功读数写入持久化
+                                            // （change-driven dirty，节流在
+                                            // store 内；虚拟/冲突键内部拒绝）。
+                                            if let Ok(c) = core.lock() {
+                                                let _ = c.persist_note_success(
+                                                    &mut store,
+                                                    &s.id,
+                                                    wall_secs(),
+                                                    Instant::now(),
+                                                );
+                                            }
                                             state.slots.push(s);
                                             if let Some((old_id, _)) = rebound {
                                                 pending_aliases.push(old_id);
@@ -826,7 +1005,7 @@ mod imp {
                             let mut slots = Vec::new();
                             for slot in SCAN_SLOTS {
                                 if let Ok((s, rebound)) =
-                                    try_slot(&core, &observer, &shared, &info, slot)
+                                    try_slot(&core, &observer, &shared, &info, slot, &mut stats_store)
                                 {
                                     slots.push(s);
                                     if let Some((old_id, _)) = rebound {
@@ -1071,15 +1250,24 @@ mod imp {
                             i += 1;
                             continue;
                         }
+                        // 休眠判定提前（WP-C 到期门与唤醒探测都要用）。
+                        let sleeping = core.entries().iter().any(|e| {
+                            e.device.id == s.id && e.device.state == DeviceState::Sleeping
+                        });
+                        // WP-C（v3 C-1）：整轮按设备到期过滤——未到期的
+                        // 在线设备本轮不查（每台设备自己的 next_due 决定
+                        // 自己的查询节奏）；休眠设备不受本门约束，交由
+                        // poll_decision 裁决唤醒资格 / 冷却。
+                        if !probe_only && !sleeping && !core.is_due(&s.id, now) {
+                            i += 1;
+                            continue;
+                        }
                         // 休眠且无唤醒资格：本轮绝不向该设备发任何 HID++ 查询。
                         if core.poll_decision(&s.id, now) == PollDecision::Skip {
                             i += 1;
                             continue;
                         }
                         // 唤醒探测开始：消耗唤醒资格并进入冷却（D-33）。
-                        let sleeping = core.entries().iter().any(|e| {
-                            e.device.id == s.id && e.device.state == DeviceState::Sleeping
-                        });
                         if sleeping {
                             core.begin_wake_probe(&s.id, now);
                         }
@@ -1100,6 +1288,39 @@ mod imp {
                             Ok(r) => {
                                 s.hard_failures = 0;
                                 outcomes.push(SlotOutcome::Success);
+                                // WP-A：轮询成功读数写入持久化（同上节流）。
+                                let _ =
+                                    core.persist_note_success(&mut store, &s.id, wall_secs(), now);
+                                // WP-B：成功读数落统计事件（变化驱动过滤在
+                                // store 内；pre-read 休眠 → wake-first-read
+                                // 必记——休眠段终点锚点）。physical_key 缺失
+                                // 时跳过（身份不明键不参与归因，与持久化同
+                                // 口径）。
+                                {
+                                    let (pct, chg) = (r.percent, r.charging);
+                                    let (pk, dn) = core
+                                        .entries()
+                                        .iter()
+                                        .find(|e| e.device.id == s.id)
+                                        .map(|e| {
+                                            (
+                                                e.device.physical_key.as_str().to_string(),
+                                                e.device.name.clone(),
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    if !pk.is_empty() {
+                                        stats_store.note_reading(
+                                            &pk,
+                                            &dn,
+                                            pct,
+                                            chg,
+                                            volttray_app::stats::read_source(sleeping, chg),
+                                            wall_secs() as i64,
+                                            now,
+                                        );
+                                    }
+                                }
                                 if let Some(a) = core.record_success(&s.id, r, now) {
                                     let name = core
                                         .entries()
@@ -1122,7 +1343,27 @@ mod imp {
                                         "battery query failed id={} reason=query_timeout (sleep path)",
                                         s.id
                                     ));
-                                    if core.record_timeout(&s.id) == TimeoutOutcome::EnteredSleep {
+                                    if core.record_timeout(&s.id, now) == TimeoutOutcome::EnteredSleep {
+                                        // WP-B：sleep_enter 事件（分段归因
+                                        // 唯一起点；判定本就发生、仅多落一
+                                        // 行日志，零新增设备查询——P0-1）。
+                                        {
+                                            let pk = core
+                                                .entries()
+                                                .iter()
+                                                .find(|e| e.device.id == s.id)
+                                                .map(|e| {
+                                                    e.device.physical_key.as_str().to_string()
+                                                })
+                                                .unwrap_or_default();
+                                            if !pk.is_empty() {
+                                                stats_store.note_sleep_enter(
+                                                    &pk,
+                                                    wall_secs() as i64,
+                                                    now,
+                                                );
+                                            }
+                                        }
                                         if let Ok(mut o) = observer.lock() {
                                             o.push(DiagEvent::new(
                                                 Layer::App,
@@ -1186,6 +1427,11 @@ mod imp {
                                         // 别名晋级（循环外统一裁决）。
                                         pending_removed_slots.push(gone_slot);
                                     } else {
+                                        // WP-C（v3 C-1）：硬失败未达注销
+                                        // 阈值——按本设备当前档位重排到期
+                                        // 点，防止到期滞留形成对故障设备
+                                        // 的紧循环查询。
+                                        core.reschedule(&s.id, now);
                                         i += 1;
                                     }
                                 }
@@ -1307,21 +1553,84 @@ mod imp {
             // 分片睡眠内还会按 ~5s 节奏补查（见下），保证 TOML 手改秒级生效。
             handle_config_reload(&mut watcher, &core, &observer, &mut last_reload_warnings);
 
+            // WP-A（v3 R5 I-01 键冲突条款）：每轮同步冲突集——冲突键停写
+            // 并移除既有持久化记录与对应虚拟条目（不展示）；LRU 逐出同步
+            // 删除虚拟条目。落盘由 store 节流（change-driven + 60s 兜底）。
+            if let Ok(mut c) = core.lock() {
+                let newly = c.refresh_key_conflicts();
+                if !newly.is_empty() {
+                    bootlog::note(&format!(
+                        "key conflict: fallback key shared by HID++1 devices [{}]; \
+                         excluded from persistence & display",
+                        newly.join(", ")
+                    ));
+                }
+                let dropped = store.set_conflicted(c.conflicted_keys().clone());
+                if !dropped.is_empty() {
+                    c.remove_virtual_by_keys(&dropped);
+                }
+                // WP-B（v3 R5 I-01 同口径）：冲突键同步停写统计事件。
+                stats_store.set_conflicted(c.conflicted_keys().clone());
+            }
+            match store.flush_if_due(Instant::now()) {
+                Ok(out) => {
+                    if !out.evicted.is_empty() {
+                        if let Ok(mut c) = core.lock() {
+                            c.remove_virtual_by_keys(&out.evicted);
+                        }
+                    }
+                }
+                Err(e) => bootlog::note(&format!("last_known.json flush failed: {e}")),
+            }
+            // WP-B：stats.jsonl 节流落盘（change-driven + 60s 兜底同
+            // FlushTuning）+ 轮转守卫提示（v3：「统计历史即将轮转，建议先
+            // 导出」——水位预提示：current 预计越过 9MB 水位而未触顶时
+            // 提前一拍发出，此时旧归档仍完好、用户可一键导出；质检 F2
+            // 修复前为先覆盖旧归档后弹提示，时序与 v3 口径倒置）。
+            if let Err(e) = stats_store.flush_if_due(Instant::now(), wall_secs() as i64) {
+                bootlog::note(&format!("stats.jsonl flush failed: {e}"));
+            }
+            if stats_store.take_rotation_notice() {
+                bootlog::note("stats.jsonl approaching rotation watermark; prompting user to export");
+                let (title, body) = (
+                    "LogiVoltTray 耗电统计".to_string(),
+                    "统计历史即将轮转，建议先导出".to_string(),
+                );
+                if notify_enabled {
+                    match toast::notify(&title, &body, silent) {
+                        Ok(()) => bootlog::note("toast dispatched: stats rotation notice"),
+                        Err(e) => bootlog::note(
+                            &format!("stats rotation toast failed: {e}"),
+                        ),
+                    }
+                } else {
+                    bootlog::note("toast suppressed (notifications disabled): stats rotation");
+                }
+                gui.send(GuiMsg::Alert);
+            }
+
             // 分片睡眠，响应立即刷新 / 唤醒信号 / 退出。
             // D-65：睡眠预算由重连状态机裁决——正常态用轮询周期；无设备态
             // 按退避节奏提前醒来重枚举；有强制重枚举请求时立即醒。
-            let poll = match core.lock() {
-                Ok(c) => c.poll_interval(),
-                Err(_) => Duration::from_secs(60),
+            // WP-C（v3 C-1）：重连状态机的下次唤醒点仍以配置档为输入
+            //（per-device 节奏只影响设备侧到期点，不改枚举/重连退避）。
+            let (poll, device_due) = match core.lock() {
+                Ok(c) => (
+                    Duration::from_secs(c.config().poll_interval_secs),
+                    c.next_poll_due(),
+                ),
+                Err(_) => (Duration::from_secs(60), None),
             };
             let interval = reconnect.next_wake(Instant::now(), !channels.is_empty(), poll);
-            // v0.3.15（P1-1）：整轮轮询到期点只在整轮后刷新——探测轮
-            // 不改变正常轮询节奏；持续鼠标活动下到期点一过，下一轮
-            // 自动降级回整轮（见循环顶部 probe_only 裁决）。
-            if !probe_only {
-                full_poll_due = Instant::now() + interval;
-            }
-            let deadline = (Instant::now() + interval).min(full_poll_due);
+            // WP-C（v3 C-1 修订）：睡眠预算 = min(全部在册真实设备的最近
+            // 到期点, 重连状态机下次唤醒点)——旧 full_poll_due 的「下次
+            // 必查时刻」角色由 AppCore::next_poll_due（per-device
+            // next_due 最小值，含唤醒信号装填的「尽快」到期点）完全
+            // 吸收，不再单独维护；无排程设备时退化为重连唤醒点。
+            let deadline = match device_due {
+                Some(d) => (Instant::now() + interval).min(d),
+                None => Instant::now() + interval,
+            };
             // v0.3.14：watcher 原本一轮 io round 才 poll 一次——默认轮询
             // 周期 1800s 意味着手改 TOML 最长 ~30 分钟才生效（用户体感
             // 「改配置不生效」的另一半根因）。mtime stat 是主机侧零射频
@@ -1347,7 +1656,7 @@ mod imp {
                     }
                     // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
                     // 恢复延迟取决于用户动鼠标的那一刻，而不是轮询周期。
-                    Ok(IoCmd::WakeSignal) => {
+                    Ok(IoCmd::WakeSignal(raw_path)) => {
                         // v0.3.11（F5）：0 注册槽位时（重启后鼠标休眠、槽位
                         // 空，未注册设备收不到唤醒探测资格）——唤醒信号 =
                         // Raw Input 已观测到罗技鼠标活动，设备已被用户物理
@@ -1367,10 +1676,60 @@ mod imp {
                         // 资格——有设备被装填、或恰好到了枚举门控点，才跑
                         // 一轮「仅探测」；无事可做的唤醒信号不再触发整轮
                         // 重查（裁决纯逻辑 wake_action 在 app 层单测覆盖）。
+                        // WP-A（v3 A-3 通道归因）：Raw Input hDevice → 设备
+                        // 接口路径 → HID 通道指纹唯一匹配，只装填该通道上的
+                        // 休眠设备；无路径 / 失配 / 多配 → 回退全量装填并
+                        // 记 channel_map_miss（进诊断导出）。BT/有线系统性
+                        // 失配为 v3 明示的已知降级。
                         let armed_any = if let Ok(mut c) = core.lock() {
-                            let ids = c.sleeping_ids();
+                            let all_ids = c.sleeping_ids();
+                            let ids: Vec<String> = match raw_path.as_deref() {
+                                Some(rp) => {
+                                    let mut candidates: Vec<(String, String)> = Vec::new();
+                                    for ch in &channels {
+                                        for p in [&ch.info.short_path, &ch.info.long_path]
+                                            .into_iter()
+                                            .flatten()
+                                        {
+                                            candidates.push((
+                                                ch.key.clone(),
+                                                p.to_string_lossy().into_owned(),
+                                            ));
+                                        }
+                                    }
+                                    match channel_for_raw_path(rp, &candidates) {
+                                        Some(ci) => {
+                                            let key = candidates[ci].0.clone();
+                                            let on_chan: HashSet<&str> = channels
+                                                .iter()
+                                                .filter(|ch| ch.key == key)
+                                                .flat_map(|ch| {
+                                                    ch.slots.iter().map(|s| s.id.as_str())
+                                                })
+                                                .collect();
+                                            all_ids
+                                                .into_iter()
+                                                .filter(|id| on_chan.contains(id.as_str()))
+                                                .collect()
+                                        }
+                                        None => {
+                                            channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                                            bootlog::note(
+                                                "wake channel attribution miss; fallback arm-all",
+                                            );
+                                            all_ids
+                                        }
+                                    }
+                                }
+                                None => {
+                                    channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                                    all_ids
+                                }
+                            };
                             for id in &ids {
-                                c.note_wake_signal(id);
+                                // WP-C：装填同时把该设备到期点提到「尽快」
+                                //（冷却窗口内排在冷却结束点，I-12 不变）。
+                                c.note_wake_signal(id, Instant::now());
                             }
                             !ids.is_empty()
                         } else {
@@ -1386,7 +1745,32 @@ mod imp {
                             WakeAction::StayAsleep => {}
                         }
                     }
-                    Ok(IoCmd::Shutdown) => return,
+                    // WP-B：统计导出——IO 线程后台执行（v3 P2-③ 不阻塞
+                    // UI；只读本机 stats 文件 + 渲染写盘，零设备查询，
+                    // 电池红线不违）。完成后经 GuiSink 通知 GUI 弹结果。
+                    Ok(IoCmd::ExportStats(req)) => {
+                        let msg = run_stats_export(&mut stats_store, &req);
+                        gui.send(GuiMsg::StatsExportDone(msg));
+                    }
+                    Ok(IoCmd::Shutdown) => {
+                        // WP-B：run_stop 生命周期事件 + 强制落盘。
+                        stats_store.note_run_stop(wall_secs() as i64, Instant::now());
+                        if let Err(e) =
+                            stats_store.shutdown_flush(Instant::now(), wall_secs() as i64)
+                        {
+                            bootlog::note(
+                                &format!("stats.jsonl shutdown flush failed: {e}"),
+                            );
+                        }
+                        if let Err(e) = store.shutdown_flush(Instant::now()) {
+                            bootlog::note(
+                                &format!("last_known.json shutdown flush failed: {e}"),
+                            );
+                        }
+                        // WP-B（I-02）：回执落盘完成。
+                        let _ = shutdown_ack.send(());
+                        return;
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         if last_cfg_check.elapsed() >= Duration::from_secs(5) {
                             last_cfg_check = Instant::now();
@@ -1402,6 +1786,94 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// WP-B 统计导出（IO 线程后台执行，v3 P2-③）：导出前先强制 flush
+    ///（缓冲事件不落空，v3「导出前先 flush」）→ 读双文件（current +
+    /// archive）→ 分段归因 →（可选）FNV-1a 哈希序匿名化 → 渲染。
+    /// CSV 主产物直写用户在 Save-As 确认的路径；JSON / HTML 主干跟随
+    /// CSV 最终确认文件名（v3 L111），tmp→rename 落盘、失败清 tmp 且
+    /// 不影响已写出的 CSV。只读本机文件 + 渲染写盘，零设备查询（红线）。
+    /// 返回给用户的结果文案（成功列文件、失败给原因、部分成功如实分列）。
+    fn run_stats_export(
+        store: &mut volttray_app::stats::StatsStore,
+        req: &crate::statsexport::StatsExportRequest,
+    ) -> String {
+        use volttray_app::attribution as attr;
+        if let Err(e) = store.shutdown_flush(Instant::now(), wall_secs() as i64) {
+            bootlog::note(&format!("stats export: pre-export flush failed: {e}"));
+        }
+        let events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
+        let segments = attr::build_segments(&events);
+        let anon = if req.anonymize {
+            Some(attr::anonymize_map(&attr::event_keys(&events)))
+        } else {
+            None
+        };
+        let offset = local_offset_minutes();
+        let mut done: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        match std::fs::write(
+            &req.csv_path,
+            attr::render_csv(&segments, anon.as_ref(), offset),
+        ) {
+            Ok(()) => done.push(req.csv_path.display().to_string()),
+            Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
+        }
+        let stem = req.csv_path.with_extension("");
+        if req.json {
+            let p = stem.with_extension("json");
+            let content =
+                attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
+            match write_tmp_rename(&p, &content) {
+                Ok(()) => done.push(p.display().to_string()),
+                Err(e) => failed.push(format!("{}: {e}", p.display())),
+            }
+        }
+        if req.html {
+            let p = stem.with_extension("html");
+            let data = attr::build_report_data(
+                &events,
+                &segments,
+                anon.as_ref(),
+                offset,
+                wall_secs() as i64,
+            );
+            let content = attr::render_html(&data);
+            match write_tmp_rename(&p, &content) {
+                Ok(()) => done.push(p.display().to_string()),
+                Err(e) => failed.push(format!("{}: {e}", p.display())),
+            }
+        }
+        if failed.is_empty() {
+            format!("导出完成：\n{}", done.join("\n"))
+        } else if done.is_empty() {
+            format!("导出失败：\n{}", failed.join("\n"))
+        } else {
+            format!(
+                "部分完成：\n已导出：{}\n失败：{}",
+                done.join("；"),
+                failed.join("；")
+            )
+        }
+    }
+
+    /// tmp→rename 落盘（WP-B JSON/HTML 副产物）：写中途失败不留半截目标
+    /// 文件；失败清 tmp。Windows 下 rename 不覆盖既有文件，先删后改
+    ///（目标已存在 = 用户在 Save-As 覆盖确认过同主干文件）。
+    fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
+        let mut tmp_os = path.as_os_str().to_owned();
+        tmp_os.push(".tmp");
+        let tmp = PathBuf::from(tmp_os);
+        let result = (|| {
+            std::fs::write(&tmp, content)?;
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// 配置热重载处理（P1-2：所有权在 app 层）。从 io 循环体抽出，
@@ -1588,6 +2060,12 @@ mod imp {
 
         let (gui_tx, gui_rx) = mpsc::channel::<GuiMsg>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
+        // WP-A：通道归因失配计数（诊断导出可见，v3 红队 P2-6）。
+        let channel_map_miss = Arc::new(AtomicU64::new(0));
+        // WP-B（I-02）：Shutdown 落盘回执通道——io_loop 在 run_stop +
+        // 双 store flush 完成后回执；ack 接收端交给 WM_ENDSESSION 承接
+        // 窗口（GUI 菜单退出经同一 hook 等待）。
+        let (ack_tx, ack_rx) = mpsc::channel::<()>();
         {
             let core = core.clone();
             let observer = observer.clone();
@@ -1601,9 +2079,28 @@ mod imp {
                 tx: gui_tx,
                 tid: unsafe { GetCurrentThreadId() },
             };
-            std::thread::spawn(move || io_loop(core, observer, gui_sink, cmd_rx, path, enum_snap));
+            let channel_map_miss_io = channel_map_miss.clone();
+            std::thread::spawn(move || {
+                io_loop(
+                    core,
+                    observer,
+                    gui_sink,
+                    cmd_rx,
+                    path,
+                    enum_snap,
+                    channel_map_miss_io,
+                    ack_tx,
+                )
+            });
         }
         bootlog::stage("io-thread-spawned");
+
+        // WP-B（I-02，R5 终裁 P1）：常驻隐藏顶层窗口承接 WM_QUERYENDSESSION
+        // / WM_ENDSESSION——Raw Input 窗口为 HWND_MESSAGE message-only，
+        // 按 Win32 语义不接收广播消息，关机 flush 此前静默失效。窗口须在
+        // GUI 线程创建（本线程消息泵负责分发其窗口消息）。安装失败仅降级
+        //（关机路径退回与旧版一致），不阻断启动。
+        crate::statsexport::install_endsession_window(cmd_tx.clone(), ack_rx);
 
         // 4. 图标缓存（v0.3.15 P1-2：懒渲染 + 小容量 LRU，不再启动全量
         //    预渲染；v0.3.0：形状/背景/字色/字体 + 低电提亮档，M9/M11）+ 托盘。
@@ -1757,7 +2254,7 @@ mod imp {
                         && last_wake_sent.is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
                     {
                         last_wake_sent = Some(Instant::now());
-                        let _ = cmd_tx.send(IoCmd::WakeSignal);
+                        let _ = cmd_tx.send(IoCmd::WakeSignal(rawinput::device_path(msg.lParam)));
                     }
                 }
                 let _ = TranslateMessage(&msg);
@@ -1778,6 +2275,7 @@ mod imp {
                         &core,
                         &observer,
                         &enum_snap,
+                        &channel_map_miss,
                         &config_arc,
                         &cfg_path,
                         &exe,
@@ -1823,6 +2321,7 @@ mod imp {
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
         enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
+        channel_map_miss: &Arc<AtomicU64>,
         cfg_arc: &Arc<RwLock<Config>>,
         cfg_path: &Path,
         exe: &Path,
@@ -1847,6 +2346,20 @@ mod imp {
                     snap_changed = true;
                 }
                 GuiMsg::Alert => {} // toast 已在 IO 线程发出；此处仅占位便于扩展。
+                GuiMsg::StatsExportDone(text) => {
+                    // WP-B：导出结果提示（IO 线程已完成写盘；模态结果框，
+                    // 成功列文件 / 失败给原因 / 部分成功如实分列）。
+                    let title = wide("LogiVoltTray 耗电统计导出");
+                    let body = wide(&text);
+                    unsafe {
+                        MessageBoxW(
+                            None,
+                            PCWSTR(body.as_ptr()),
+                            PCWSTR(title.as_ptr()),
+                            MB_OK | MB_ICONINFORMATION,
+                        );
+                    }
+                }
             }
         }
 
@@ -2080,7 +2593,10 @@ mod imp {
                     .unwrap_or_else(|| "50".to_string());
                 crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, &preview);
             } else if e.id == ids.diag {
-                export_diag(observer, enum_snap);
+                export_diag(observer, enum_snap, channel_map_miss);
+            } else if e.id == ids.stats_export {
+                // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
+                crate::statsexport::begin_export(&cmd_tx);
             } else if e.id == ids.blink {
                 state.blink_enabled = !state.blink_enabled;
                 if let Ok(mut guard) = cfg_arc.write() {
@@ -2119,6 +2635,15 @@ mod imp {
                 refresh_ui(tray, state, cache, ids);
             } else if e.id == ids.exit {
                 let _ = cmd_tx.send(IoCmd::Shutdown);
+                // WP-B（I-02 同口径）：等 IO 线程 run_stop + 双 store
+                // flush 落盘完成（≤2s）再退——此前 PostQuitMessage 后主
+                // 进程立即退出，IO 线程的落盘存在被截断的竞态窗口。
+                // 与 WM_ENDSESSION 承接窗口共用同一 ack 通道。
+                if let Ok(guard) = crate::statsexport::ENDSESSION_HOOK.lock() {
+                    if let Some((_, rx)) = guard.as_ref() {
+                        let _ = rx.recv_timeout(Duration::from_secs(2));
+                    }
+                }
                 unsafe { PostQuitMessage(0) };
             } else if let Some((_, dev_id)) = ids.device_rows.iter().find(|(mid, _)| *mid == e.id) {
                 state.pinned = Some(dev_id.clone());
@@ -2281,16 +2806,29 @@ mod imp {
     }
 
     /// v0.3.15：「另存为」对话框选导出路径（GetSaveFileNameW）。
+    fn pick_save_path(default_name: &str) -> Option<PathBuf> {
+        pick_save_path_with_filter(
+            default_name,
+            "JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0",
+            "json",
+        )
+    }
+
+    /// 「另存为」对话框（过滤器/默认扩展名可配；WP-B CSV 导出复用）。
     /// 返回 None = 用户取消或对话框出错——两种都不写任何文件、不弹错误
     /// （对话框出错留 bootlog 便于诊断）。OFN_NOCHANGEDIR 保证对话框
     /// 不污染进程工作目录（IO 线程的相对路径语义不受影响）。
-    fn pick_save_path(default_name: &str) -> Option<PathBuf> {
+    pub(crate) fn pick_save_path_with_filter(
+        default_name: &str,
+        filter: &str,
+        def_ext: &str,
+    ) -> Option<PathBuf> {
         let mut file_buf: Vec<u16> = vec![0u16; 260];
         let default_wide = wide(default_name);
         let copy_len = default_wide.len().min(file_buf.len());
         file_buf[..copy_len].copy_from_slice(&default_wide[..copy_len]);
-        let filter = wide("JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0");
-        let def_ext = wide("json");
+        let filter = wide(filter);
+        let def_ext = wide(def_ext);
         // windows 0.62 的 OPENFILENAMEW（x86_64 变体）不实现 Default——
         // 含裸指针字段，需 zeroed 后逐字段赋值。
         let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
@@ -2346,7 +2884,11 @@ mod imp {
     /// 由用户经「另存为」对话框自选，取消则不写文件、不弹错误）。
     /// **导出永远成功**：任何子项失败（日志缺失/锁中毒/枚举未发生）
     /// 降级为空 + reason，绝不整体报错（v0.3.2 的 os error 3 教训）。
-    fn export_diag(observer: &Arc<Mutex<Observer>>, enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>) {
+    fn export_diag(
+        observer: &Arc<Mutex<Observer>>,
+        enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
+        channel_map_miss: &Arc<AtomicU64>,
+    ) {
         // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
         let (devices, devices_reason) = match observer.lock() {
             Ok(o) => (o.export_value(true), None),
@@ -2376,6 +2918,7 @@ mod imp {
             log_tail,
             last_enum,
             last_enum_reason,
+            channel_map_miss: channel_map_miss.load(Ordering::Relaxed),
             exported_at,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
