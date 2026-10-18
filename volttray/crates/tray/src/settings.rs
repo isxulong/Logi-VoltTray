@@ -43,15 +43,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::icon::{cache_from_config, font_rgb, IconColor};
+use crate::icon::{cache_from_config, IconColor};
 use volttray_app::autostart;
 use volttray_app::config::{
-    colorref_to_rgb, contrast_ok, contrast_ratio, font_tier_for_percent, normalize_font_tiers,
-    rgb_to_colorref, Config, IconBackground, IconFontColor, IconShape, RgbColor, CONTRAST_FLOOR,
-    DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS, FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS,
-    FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN,
-    ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN,
-    POLL_TIERS_SECS,
+    colorref_to_rgb, font_tier_for_percent, normalize_font_tiers, rgb_to_colorref, Config,
+    IconBackground, IconFontColor, IconShape, RgbColor, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS,
+    FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN,
+    ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN,
+    LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -158,7 +157,7 @@ const IDC_RESET_ALL: i32 = 2011;
 const IDC_BLINK: i32 = 2012;
 const IDC_SLIDER: i32 = 2013;
 const IDC_THRESH_VAL: i32 = 2014;
-const IDC_STATUS: i32 = 2015;
+// v0.3.18（U-6）：IDC_STATUS(2015) 随对比度警告条一并删除。
 const IDC_INTERVAL: i32 = 2016;
 /// 背景色「选色…」按钮（色轮入口）。
 const IDC_BG_PICK: i32 = 2017;
@@ -224,8 +223,10 @@ const DOT_PX: i32 = 16;
 const L_CLIENT_W: i32 = 500;
 /// 分档卡片逻辑高（3 行 + 提示行；规范 96 的微调：避免 8pt 提示贴边）。
 const L_CARD_H: i32 = 104;
-/// 展开态客户区逻辑高（v0.3.17 R-9：提示行 32→44，+12）。
-const L_EXPANDED_H: i32 = 842;
+/// 展开态客户区逻辑高（v0.3.17 R-9：提示行 32→44，+12；
+/// v0.3.18 U-6：对比度警告状态行删除，842→816 = 「恢复全部默认」
+/// 按钮底边 796 + 20 下边距）。
+const L_EXPANDED_H: i32 = 816;
 /// 收起分档卡后回收的逻辑高度（卡片 104 + 间距 8）。
 const TIER_DELTA: i32 = L_CARD_H + 8;
 /// 收起态客户区逻辑高。
@@ -242,9 +243,6 @@ const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个�
 /// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断；
 /// v0.3.17 R-9 追加保活扫描说明后升为三行）。
 const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关。";
-/// 最长状态文案（宽度实测样本）。
-const MSG_CONTRAST_SAMPLE: &str = "⚠ 字色与背景对比度 12.3 低于 3.0，可能不易读（不阻断使用）";
-
 /// 分档说明示例（v0.3.6 规范偏差修正：按当前档数/阈值实时拼写，替代静态常量）。
 /// 例：thresholds = [20, 50] →「阈值 1–99 严格递增；电量 ≤ 数值归入对应档（20/50 → 0–20 / 21–50 / 51–100）」。
 fn tier_hint_dynamic(thresholds: &[u8]) -> String {
@@ -297,7 +295,6 @@ const BELOW: [(i32, i32, i32, i32, i32); 25] = [
     (IDC_RESET_LOW, 344, 728, 48, 24),
     (IDC_LOW_RANGE, 400, 734, 84, 14),
     (IDC_RESET_ALL, 16, 768, 120, 28),
-    // IDC_STATUS 单列（宽度按实测覆盖）。
 ];
 
 /// 色彩 token（规范裁决 6：浅/深两套；存储为 COLORREF 0x00BBGGRR，
@@ -796,8 +793,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 IDC_LBL_TIER_COUNT | IDC_LBL_TIER_TH | IDC_LBL_TIER_COLOR | IDC_TIER_ERR
             ) || (IDC_TIER_TH0..IDC_TIER_DOT0).contains(&id)
                 || (IDC_TIER_DOT0..IDC_TIER_DOT0 + 5).contains(&id);
-            // 状态行与卡内错误提示承载告警 → error 色；提示行 secondary；其余正文 text。
-            let color = if id == IDC_STATUS || id == IDC_TIER_ERR {
+            // 卡内错误提示承载告警 → error 色；提示行 secondary；其余正文 text。
+            // （v0.3.18 U-6：对比度警告状态行已删除。）
+            let color = if id == IDC_TIER_ERR {
                 ctx.theme.error
             } else if hint {
                 ctx.theme.secondary
@@ -1180,11 +1178,9 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
     let f_hint = ctx.font(&ctx.f_hint);
 
     // 裁决 3：以最长提示语实测宽度反推客户区宽，杜绝截断。
+    // （v0.3.18 U-6：对比度警告文案样本随警告条一并删除。）
     let tier_hint_w = text_width(hwnd, f_hint, TIER_HINT_SAMPLE);
-    let status_w = text_width(hwnd, f_hint, MSG_CONTRAST_SAMPLE);
-    let cw = L_CLIENT_W
-        .max(tier_hint_w + 24 + 32) // 卡片内提示（x=28，内宽 = cw-56）
-        .max(status_w + 32);
+    let cw = L_CLIENT_W.max(tier_hint_w + 24 + 32); // 卡片内提示（x=28，内宽 = cw-56）
     ctx.cw.set(cw);
 
     // 窗口图标（#2：大/小图标 + 类图标，任务栏/Alt-Tab 显示）。
@@ -1606,22 +1602,6 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
             font,
         );
     }
-    // 状态行（宽 = cw-32；实测保证最长文案不截断）。
-    create_ctl(
-        hwnd,
-        "STATIC",
-        None,
-        ws(0),
-        WINDOW_EX_STYLE(0),
-        sc(16),
-        sc(792),
-        sc(cw - 32),
-        sc(30),
-        IDC_STATUS,
-        hinst,
-        f_hint,
-    );
-
     // —— 组合框内容 ——
     let shape = GetDlgItem(Some(hwnd), IDC_SHAPE).unwrap_or_default();
     for s in ["圆角（默认）", "直角方块", "透明（无背景）"] {
@@ -1799,15 +1779,6 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
             true,
         );
     }
-    // 状态行。
-    let _ = MoveWindow(
-        ctl(hwnd, IDC_STATUS),
-        ctx.sc(16),
-        ctx.sc(792 + dy),
-        ctx.sc(ctx.cw.get() - 32),
-        ctx.sc(30),
-        true,
-    );
     // 分档卡可见性。
     for id in TIER_CHILDREN {
         let _ = ShowWindow(ctl(hwnd, id), if expanded { SW_SHOW } else { SW_HIDE });
@@ -2151,15 +2122,11 @@ unsafe fn draw_owner_button(ctx: &Ctx, dis: &DRAWITEMSTRUCT) {
     let _ = DeleteObject(HGDIOBJ(br.0));
 }
 
-/// 校验外观对比度（<3.0 仅警告不阻断）并刷新预览（v0.3.18 U-2：小预览已删，仅保留放大预览）。
+/// 刷新预览与分档提示（v0.3.18：U-2 小预览已删，仅保留放大预览，走 U-5
+/// 单一渲染源；U-6 对比度警告条已删）。
 fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     let cfg = ctx.cfg.borrow();
     let tiered = cfg.icon_font_tiers_enabled;
-    let tiers: Option<&[RgbColor]> = if tiered {
-        Some(cfg.icon_font_tier_colors.as_slice())
-    } else {
-        None
-    };
     let percent: Option<u8> = if ctx.preview_text == "满" {
         Some(100)
     } else {
@@ -2172,14 +2139,6 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     } else {
         IconColor::Default
     };
-    let rgb = font_rgb(
-        level,
-        ctx.dark_theme,
-        cfg.icon_shape,
-        cfg.icon_background,
-        cfg.icon_font_color,
-        tiers,
-    );
     // v0.3.18（U-5，单一渲染源）：预览位图直接取自真实托盘图标的渲染
     // 结果——按当前草稿配置临时构建 IconCache，走与任务栏完全相同的
     // IconCache::render_frame 路径、同一位图尺寸（tray_size），不再维护
@@ -2257,43 +2216,13 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         }
     }
 
-    // 对比度提示（仅警告）。分档模式取当前档颜色（无数字回退最高档）。
-    let font_c = if tiered {
-        let t = match percent {
-            Some(p) => font_tier_for_percent(&cfg.icon_font_tier_thresholds, p),
-            None => cfg.icon_font_tier_colors.len().saturating_sub(1),
-        };
-        cfg.icon_font_tier_colors
-            .get(t)
-            .map(|c| (c.r, c.g, c.b))
-            .unwrap_or(rgb)
-    } else {
-        match cfg.icon_font_color {
-            IconFontColor::Fixed(c) => (c.r, c.g, c.b),
-            IconFontColor::Auto => rgb,
-        }
-    };
-    let bg_c = match cfg.icon_shape {
-        IconShape::Transparent => {
-            if ctx.dark_theme {
-                (0x20, 0x20, 0x20)
-            } else {
-                (0xF0, 0xF0, 0xF0)
-            }
-        }
-        _ => cfg.icon_background.rgb(),
-    };
-    let ratio = contrast_ratio(font_c, bg_c);
-    let msg = if contrast_ok(font_c, bg_c) {
-        String::new()
-    } else {
-        format!("⚠ 字色与背景对比度 {ratio:.1} 低于 {CONTRAST_FLOOR}，可能不易读（不阻断使用）")
-    };
+    // v0.3.18（U-6）：对比度警告条删除——任务栏即真实效果，透明背景下
+    // 软件无从判断任务栏真实颜色，警告既不可靠也与「恢复全部默认」按钮
+    // 视觉重叠；用户可直接看任务栏判断可读性。
     // v0.3.6：分档说明示例随当前档数/阈值实时拼写（替代静态常量）。
     let tier_hint = tier_hint_dynamic(&cfg.icon_font_tier_thresholds);
     drop(cfg);
     set_text(ctx, IDC_TIER_HINT, &tier_hint);
-    set_text(ctx, IDC_STATUS, &msg);
 }
 
 /// 程序化同步全部控件 ↔ 工作配置（抑制自身事件）。
