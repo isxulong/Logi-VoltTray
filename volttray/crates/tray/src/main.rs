@@ -88,10 +88,10 @@ mod imp {
     };
     use volttray_app::{
         identity_confirmed, pick_promotion, repin, wake_action, Alert, AliasSlot, AppCore,
-        ChannelLiveness, Config, ConfigWatcher, EnumTransition, Observer, PollDecision, Reconnect,
-        SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak, Snapshot, TimeoutOutcome,
-        UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD,
-        WAKE_PROBE_INVALIDATE_THRESHOLD,
+        ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition, Observer,
+        PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
+        Snapshot, TimeoutOutcome, UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD,
+        SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{
         probe_battery, probe_battery_with_policy, UnknownDiagPolicy, UnknownReason,
@@ -226,6 +226,14 @@ mod imp {
         /// outcomes 恒空、liveness 永不裁决——扫槽路径上的句柄死亡观测点；
         /// 连续全败且含 I/O 类才强制重开，纯超时（深睡）不触发。
         scan_streak: SlotScanStreak,
+        /// R-1（v0.3.17）：0xFF 接收器槽电量探测 error_response 的 run 内
+        /// 负缓存——本通道句柄存活期内失败过一次即不再重复探测（结构性
+        /// 噪声，非设备异常）；force 枚举句柄重开时清零。
+        ff_battery_probe_failed: bool,
+        /// R-2（v0.3.17）：死槽扫描冷却——连续 K 轮握手纯超时不应答的
+        /// 槽位降频为每 K 轮扫 1 次；force 枚举清零（手动刷新/动鼠标
+        /// 立即穿透）。
+        dead_slots: DeadSlotScan,
         slots: Vec<SlotState>,
     }
 
@@ -318,6 +326,15 @@ mod imp {
     }
 
     /// 对单个通道扫描一个槽位：握手 → 电量探测；拿到电量才注册。
+    /// 单次扫槽的边效应记录（R-1/R-2，v0.3.17）：见 try_slot `edge` 参数。
+    #[derive(Default)]
+    struct SlotScanEdge {
+        /// 本轮该槽位 0xFF 电量探测返回 error_response（结构性失败）。
+        ff_battery_probe_failed: bool,
+        /// 本轮该槽位握手阶段纯超时不应答。
+        handshake_no_response: bool,
+    }
+
     /// 返回注册成功的槽位；Err 携带失败类别（v0.3.11 F1：供通道级
     /// 「扫槽连败」裁决区分「设备深睡不应答」与「句柄可疑」，F2）。
     ///
@@ -325,12 +342,17 @@ mod imp {
     /// 必然醒着；仅这一次，不进周期轮询——电池红线）。upsert 命中同一
     /// 物理身份时发生 rebind：返回值第二元携带 (old_id, new_id)，调用方
     /// 负责把 old_id 对应的槽位标记为别名（借用约束，见枚举循环）。
+    ///
+    /// R-1/R-2（v0.3.17）：`edge` 带出 try_slot 内部才能观测的两类事实——
+    /// 0xFF 电量探测 error_response（写通道级负缓存）与握手纯超时不应答
+    /// （喂死槽冷却裁决）；借用约束下经 &mut 带出，不改返回类型。
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
         shared: &SharedChannel,
         info: &ChannelInfo,
         slot: u8,
+        edge: &mut SlotScanEdge,
         stats: &mut volttray_app::stats::StatsStore,
     ) -> Result<(SlotState, Option<(String, String)>), SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
@@ -340,6 +362,10 @@ mod imp {
             Handshake::Hidpp2(table) => (table, false),
             Handshake::Hidpp1 => (FeatureTable::new(), true),
             Handshake::NoResponse(cause) => {
+                // R-2（v0.3.17）：握手纯超时不应答喂死槽冷却裁决（仅
+                // Timeout 一类；Io/Protocol 在冷却语义里算「槽位活着」，
+                // I/O 证据保持热度留给 SlotScanStreak 裁决句柄死亡）。
+                edge.handshake_no_response = matches!(cause, NoResponseCause::Timeout);
                 // v0.3.11（F1）：slot scan 日志区分超时与 I/O 类失败——
                 // 死句柄与深睡设备在日志中可分辨（此前同判 no response）。
                 match cause {
@@ -357,6 +383,25 @@ mod imp {
                 });
             }
         };
+        // R-1（v0.3.17）：0xFF 接收器槽电量探测的 run 内负缓存——本通道
+        // 句柄存活期内 error_response 已出现过一次即直接跳过探测（每轮
+        // 枚举必现的结构性噪声，省一次注定失败的查询事务与日志）。握手
+        // 保留（槽位发现仍依赖它，仅 1 次短事务）；仅缓存 ErrorResponse
+        // 一类结构性失败，超时不缓存——HID++1 直连设备可能深睡后应答，
+        // 缓存超时会把它永久挡在注册门外。force 枚举句柄重开时清零。
+        if slot == 0xFF && edge.ff_battery_probe_failed {
+            if is_hidpp1 {
+                // HID++1 直连设备握手成功：缓存的结构性失败对其不适用
+                //（终审 R-1：握手保留 1 帧用于发现 HID++1 直连设备）——
+                // 清缓存照常探测注册，否则该设备本 run 内永不注册（AF-6）。
+                edge.ff_battery_probe_failed = false;
+            } else {
+                bootlog::note(&format!(
+                    "slot scan: {id} battery probe skipped (0xFF failure cached this run)"
+                ));
+                return Err(SlotScanFailure::Other);
+            }
+        }
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
         // F5 次修 P2：#255（0xFF 接收器直连槽）的 error_response 是握手
         // 误分类后的结构性噪声（每轮枚举必现，非设备异常），按策略压掉
@@ -387,6 +432,11 @@ mod imp {
                         ""
                     }
                 ));
+                // R-1（v0.3.17）：仅 error_response（结构性失败）进负缓存；
+                // 超时/设备离开不缓存（可能是真设备暂不应答）。
+                if slot == 0xFF && reason == UnknownReason::ErrorResponse {
+                    edge.ff_battery_probe_failed = true;
+                }
                 // v0.3.11（F1/F2）：探测阶段 I/O 类失败同样是句柄可疑证据。
                 return Err(match reason {
                     UnknownReason::QueryTimeout => SlotScanFailure::Timeout,
@@ -851,6 +901,12 @@ mod imp {
                                             // v0.3.11（F2/F3）：扫槽连败同步清零；
                                             // 本轮汇总日志标记重开过句柄。
                                             state.scan_streak = SlotScanStreak::new();
+                                            // R-1/R-2（v0.3.17）：句柄重开 = 新的
+                                            // 一轮观测，0xFF 负缓存与死槽冷却同步
+                                            // 清零（force 枚举 = 手动刷新/动鼠标
+                                            // 立即穿透降频）。
+                                            state.ff_battery_probe_failed = false;
+                                            state.dead_slots.clear();
                                             reopened_this_round = true;
                                             for s in &mut state.slots {
                                                 s.hard_failures = 0;
@@ -881,15 +937,42 @@ mod imp {
                                     if state.slots.iter().any(|s| s.index == slot) {
                                         continue;
                                     }
+                                    // R-2（v0.3.17）：死槽冷却——连续 K 轮握手
+                                    // 纯超时不应答的槽位每 K 轮才扫 1 次（降
+                                    // 功耗/降噪）；被跳过的槽位不计入本轮
+                                    // scanned，也不喂 SlotScanStreak（未观测
+                                    // 不得裁决）；force 枚举已清零，立即穿透。
+                                    if !state.dead_slots.should_scan(slot) {
+                                        // 跳过轮同样按「无应答」推进连击——
+                                        // 否则 streak 冻结在 K+1、冷却槽永不
+                                        // 复扫（BF-1）；推进后 streak 逢 K 的
+                                        // 整数倍放行 1 次，「每 K 轮扫 1 次」
+                                        // 与自动发现 ≤5 分钟的披露才成立。
+                                        state.dead_slots.note_handshake(slot, true);
+                                        continue;
+                                    }
                                     scanned += 1;
-                                    match try_slot(
+                                    let mut edge = SlotScanEdge {
+                                        ff_battery_probe_failed: state.ff_battery_probe_failed,
+                                        ..SlotScanEdge::default()
+                                    };
+                                    let outcome = try_slot(
                                         &core,
                                         &observer,
                                         &state.shared,
                                         &state.info,
                                         slot,
+                                        &mut edge,
                                         &mut stats_store,
-                                    ) {
+                                    );
+                                    // R-1/R-2：边效应回写通道状态（edge 携
+                                    // 最终值——HID++1 握手成功时 try_slot
+                                    // 内已清缓存，故整体赋值而非 |=）。
+                                    state.ff_battery_probe_failed = edge.ff_battery_probe_failed;
+                                    state
+                                        .dead_slots
+                                        .note_handshake(slot, edge.handshake_no_response);
+                                    match outcome {
                                         Ok((s, rebound)) => {
                                             // WP-A：扫槽成功读数写入持久化
                                             // （change-driven dirty，节流在
@@ -1002,15 +1085,28 @@ mod imp {
                             });
                             let shared = SharedChannel(Arc::new(Mutex::new(ch)));
                             let mut slots = Vec::new();
+                            // R-1/R-2（v0.3.17）：新通道首轮全量扫描，边效应
+                            // 逐槽累积后直接写入新通道状态（首轮无冷却——
+                            // dead_slots 从零计起）。
+                            let mut ff_battery_probe_failed = false;
+                            let mut dead_slots = DeadSlotScan::new();
                             for slot in SCAN_SLOTS {
-                                if let Ok((s, rebound)) = try_slot(
+                                let mut edge = SlotScanEdge {
+                                    ff_battery_probe_failed,
+                                    ..SlotScanEdge::default()
+                                };
+                                let outcome = try_slot(
                                     &core,
                                     &observer,
                                     &shared,
                                     &info,
                                     slot,
+                                    &mut edge,
                                     &mut stats_store,
-                                ) {
+                                );
+                                ff_battery_probe_failed = edge.ff_battery_probe_failed;
+                                dead_slots.note_handshake(slot, edge.handshake_no_response);
+                                if let Ok((s, rebound)) = outcome {
                                     slots.push(s);
                                     if let Some((old_id, _)) = rebound {
                                         pending_aliases.push(old_id);
@@ -1023,6 +1119,8 @@ mod imp {
                                 shared,
                                 liveness: ChannelLiveness::new(),
                                 scan_streak: SlotScanStreak::new(),
+                                ff_battery_probe_failed,
+                                dead_slots,
                                 slots,
                             });
                         }

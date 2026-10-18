@@ -51,9 +51,10 @@ pub use persist::{
 };
 pub use physkey::{identity_confirmed, pick_promotion, repin, AliasSlot};
 pub use reconnect::{
-    wake_action, ChannelLiveness, EnumTransition, Reconnect, SlotOutcome, SlotScanFailure,
-    SlotScanStreak, WakeAction, ENUM_BACKOFF_STEPS, HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL,
-    SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
+    wake_action, ChannelLiveness, DeadSlotScan, EnumTransition, Reconnect, SlotOutcome,
+    SlotScanFailure, SlotScanStreak, WakeAction, DEAD_SLOT_COOLDOWN_ROUNDS, ENUM_BACKOFF_STEPS,
+    HANDLE_INVALIDATE_THRESHOLD, REENUM_INTERVAL, SLOT_SCAN_REOPEN_THRESHOLD,
+    WAKE_PROBE_INVALIDATE_THRESHOLD,
 };
 pub use stats::{
     default_dir as default_stats_dir, default_path as default_stats_path, load_events,

@@ -230,6 +230,72 @@ impl SlotScanStreak {
     }
 }
 
+/// 死槽冷却轮数（v0.3.17，R-2）：槽位连续 K 轮「握手纯超时不应答」
+/// 后进入冷却，之后每 K 轮放行 1 次扫描。
+pub const DEAD_SLOT_COOLDOWN_ROUNDS: u32 = 10;
+
+/// 槽位级「死槽扫描降频」裁决（v0.3.17，R-2）——复用 [`SlotScanStreak`]
+/// 的「纯计数、Instant 无关、按通道持有」模式，解决空槽位/深睡槽位
+/// 每轮枚举都被全量重扫的功耗与日志噪声问题：
+///
+/// - **只累计「握手纯超时不应答」**：设备深睡 / 槽位空闲的特征。握手
+///   成功、I/O 类或协议类失败一律清零——I/O 类证据必须保持热度留给
+///   [`SlotScanStreak`] 裁决句柄死亡，不参与本冷却；
+/// - **降频语义**：连续不应答轮数 < [`DEAD_SLOT_COOLDOWN_ROUNDS`] 时
+///   每轮照扫；达到后每 K 轮放行 1 次（streak 为 K 的整数倍时扫描）。
+///   稳态下新配对设备的自动发现延迟由 ≤30s 放宽到 ≤K 轮（约 5 分钟），
+///   手动刷新 / 动鼠标经 force 枚举 [`Self::clear`] 立即穿透；
+/// - **跳过轮必须推进连击**（BF-1）：生产接线在 `should_scan` 返回
+///   false 的跳过轮同样调用 `note_handshake(slot, true)`——否则
+///   streak 冻结、冷却槽永不复扫。本结构的放行节奏以该接线为前提，
+///   下方测试①的序列（跳过轮推进连击）与生产一一对应；
+/// - **与句柄同寿命**：实例存于 ChannelState，force 枚举句柄重开时
+///   清零（新一轮全量补扫）。
+///
+/// 每个通道一个实例（IO 线程按 ChannelState 持有），Instant 无关、纯计数。
+#[derive(Debug, Clone, Default)]
+pub struct DeadSlotScan {
+    /// 槽位号 → 连续「握手纯超时不应答」轮数。
+    streaks: std::collections::HashMap<u8, u32>,
+}
+
+impl DeadSlotScan {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 本轮是否应扫描该槽位：无记录 / 未达 K 轮 → 扫描；达 K 轮后
+    /// 每 K 轮放行 1 次（streak 为 K 的整数倍时扫描）。
+    pub fn should_scan(&self, slot: u8) -> bool {
+        match self.streaks.get(&slot) {
+            None => true,
+            Some(&s) => s < DEAD_SLOT_COOLDOWN_ROUNDS || s % DEAD_SLOT_COOLDOWN_ROUNDS == 0,
+        }
+    }
+
+    /// 登记一轮该槽位的握手结果。`no_response_timeout` = 握手阶段纯
+    /// 超时不应答；其余一切结果（握手成功 / I/O 类 / 协议类）都视为
+    /// 「槽位活着」清零重计。
+    pub fn note_handshake(&mut self, slot: u8, no_response_timeout: bool) {
+        if no_response_timeout {
+            let s = self.streaks.entry(slot).or_insert(0);
+            *s = s.saturating_add(1);
+        } else {
+            self.streaks.remove(&slot);
+        }
+    }
+
+    /// 全部清零（force 枚举句柄重开后调用）：立即恢复全量扫描。
+    pub fn clear(&mut self) {
+        self.streaks.clear();
+    }
+
+    /// 当前连续不应答轮数（日志/测试观测用）。
+    pub fn streak(&self, slot: u8) -> u32 {
+        self.streaks.get(&slot).copied().unwrap_or(0)
+    }
+}
+
 /// 重枚举/重连状态机（IO 线程持有，Instant 注入可测）。
 #[derive(Debug, Clone)]
 pub struct Reconnect {
@@ -841,5 +907,61 @@ mod tests {
         // 混合失败含 I/O → 计数；第 3 轮触发。
         assert!(!s.note_round(2, &[SF::Io, SF::Timeout]));
         assert!(s.note_round(2, &[SF::Timeout, SF::Io]));
+    }
+
+    use super::{DeadSlotScan, DEAD_SLOT_COOLDOWN_ROUNDS};
+
+    /// R-2 用例 1（冷却生效）：连续 K 轮纯超时不应答后进入冷却，
+    /// 之后每 K 轮才放行 1 次扫描。
+    /// 本用例序列与生产接线一一对应（BF-1）：tray 扫槽循环在
+    /// `should_scan` 为 false 的跳过轮同样调用 `note_handshake(true)`
+    /// 推进连击——若接线不推进，本测试所锁定的放行节奏在生产中不成立。
+    #[test]
+    fn dead_slot_enters_cooldown_after_k_timeouts() {
+        let mut d = DeadSlotScan::new();
+        for _ in 0..DEAD_SLOT_COOLDOWN_ROUNDS {
+            assert!(d.should_scan(3), "冷却前每轮都扫");
+            d.note_handshake(3, true);
+        }
+        // streak 首次到达 K：K 的整数倍，放行最后一次。
+        assert!(d.should_scan(3));
+        d.note_handshake(3, true);
+        // 之后 K-1 轮全部跳过。
+        for _ in 1..DEAD_SLOT_COOLDOWN_ROUNDS {
+            assert!(!d.should_scan(3), "冷却期内跳过");
+            d.note_handshake(3, true);
+        }
+        // 再次到达 K 的整数倍：放行 1 次。
+        assert!(d.should_scan(3), "每 K 轮放行 1 次");
+    }
+
+    /// R-2 用例 2（应答/非超时清零）：握手成功或 I/O 类失败都视为
+    /// 「槽位活着」——冷却计数清零（I/O 证据由 SlotScanStreak 裁决，
+    /// 不参与死槽冷却）。
+    #[test]
+    fn dead_slot_response_or_io_resets_cooldown() {
+        let mut d = DeadSlotScan::new();
+        for _ in 0..DEAD_SLOT_COOLDOWN_ROUNDS + 5 {
+            d.note_handshake(5, true);
+        }
+        assert!(!d.should_scan(5));
+        // 一次非「纯超时不应答」结果 → 清零，下一轮恢复全量扫描。
+        d.note_handshake(5, false);
+        assert_eq!(d.streak(5), 0);
+        assert!(d.should_scan(5));
+    }
+
+    /// R-2 用例 3（force 清零穿透）：强制枚举句柄重开后 clear——
+    /// 全部槽位立即恢复扫描（手动刷新/动鼠标立即穿透冷却）。
+    #[test]
+    fn dead_slot_clear_penetrates_cooldown() {
+        let mut d = DeadSlotScan::new();
+        for _ in 0..DEAD_SLOT_COOLDOWN_ROUNDS + 5 {
+            d.note_handshake(6, true);
+        }
+        assert!(!d.should_scan(6));
+        d.clear();
+        assert!(d.should_scan(6), "force 后立即穿透冷却");
+        assert_eq!(d.streak(6), 0);
     }
 }
