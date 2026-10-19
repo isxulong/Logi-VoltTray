@@ -2435,6 +2435,66 @@ mod imp {
         // 共享配置同时喂 AppCore 与设置窗口（GUI ↔ TOML 双向一致，M9/M10）。
         let core = Arc::new(Mutex::new(AppCore::new(config_arc.clone())));
 
+        // v0.3.19（U-7/C-1）：启动自愈对账——旧版勾选自启后换新版（exe
+        // 文件名带版本号）时，注册表 Run 值仍指向旧路径、设置界面却显示
+        // 「已开」。启动时按「配置 × 注册表」四格矩阵收口：配置开＋值缺失
+        // →重建；配置开＋路径陈旧→重写为当前 exe（保留用户附加参数）；
+        // 配置关＋值残留→清理；稳态→不动。必须在 GuiState 初始化前执行，
+        // 使界面镜像自修复后状态。debug 构建跳过（C-2f 开发态防护）；
+        // 成功静默仅 bootlog 一行（C-2e）；读失败推一次性 Alert；写失败
+        // 沿用 cfg_changed 回路既有语义——共享配置回退为注册表现状 +
+        // persist_bool 落盘 + Alert（防每个 Snapshot 重试刷 UI，BF-5）。
+        bootlog::stage("autostart-reconcile");
+        let reconcile_cfg_on = cfg.autostart;
+        let reconcile_cfg_path = cfg_path.clone();
+        if let Err(e) = volttray_app::guarded("autostart-reconcile", || {
+            match autostart::reconcile(reconcile_cfg_on, &exe) {
+                autostart::ReconcileOutcome::NoAction
+                | autostart::ReconcileOutcome::SkippedDev => {}
+                autostart::ReconcileOutcome::Repaired { old, new } => {
+                    bootlog::note(&format!(
+                        "autostart reconciled: {} -> {}",
+                        old.as_deref().unwrap_or("<missing>"),
+                        new.as_deref().unwrap_or("<removed>")
+                    ));
+                }
+                autostart::ReconcileOutcome::ReadFailed(reason) => {
+                    bootlog::note(&format!("autostart state unreadable: {reason}"));
+                    if let Ok(mut o) = observer.lock() {
+                        o.push(DiagEvent::new(
+                            Layer::App,
+                            DiagKind::Alert {
+                                level: "warning".into(),
+                                message: format!(
+                                    "自启注册表状态无法核实（{reason}）；设置中的自启开关可能与实际不符"
+                                ),
+                            },
+                        ));
+                    }
+                }
+                autostart::ReconcileOutcome::WriteFailed { registry_on, reason } => {
+                    bootlog::note(&format!("autostart reconcile write failed: {reason}"));
+                    if let Ok(mut guard) = config_arc.write() {
+                        guard.autostart = registry_on;
+                    }
+                    persist_bool(&reconcile_cfg_path, "autostart", registry_on);
+                    if let Ok(mut o) = observer.lock() {
+                        o.push(DiagEvent::new(
+                            Layer::App,
+                            DiagKind::Alert {
+                                level: "warning".into(),
+                                message: format!(
+                                    "autostart registry sync failed; config reverted to {registry_on}"
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+        }) {
+            bootlog::note(&format!("autostart-reconcile: {e}"));
+        }
+
         let (gui_tx, gui_rx) = mpsc::channel::<GuiMsg>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
         // WP-A：通道归因失配计数（诊断导出可见，v3 红队 P2-6）。
