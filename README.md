@@ -74,7 +74,7 @@ cargo build --release --locked -p volttray-tray
 
 产物为 `volttray\target\release\volttray-tray.exe`。要求 Rust stable（仓库 `rust-toolchain.toml` 锁定 1.90.0，`rustup` 会自动按此安装）与 MSVC 构建环境。
 
-**云端构建**：推送到 `main` 即触发 CI（windows-latest）：自动 `cargo fmt` 回推、`clippy -D warnings`、全量测试、`cargo build --release --locked` 并把 EXE 作为 artifact 上传；Releases 页的安装包即由此流水线产出。本地没有 Rust 环境时，fork 后 push 即可在云端取到 EXE。
+**云端构建**：推送到 `main` 即触发 CI（windows-latest）：`cargo fmt --check`（不一致即失败、作者本地修复）、`clippy -D warnings`、全量测试、`cargo build --release --locked` 并把 EXE 作为 artifact 上传；Releases 页的安装包即由此流水线产出。本地没有 Rust 环境时，fork 后 push 即可在云端取到 EXE。
 
 ## 经验知识库
 
