@@ -14,7 +14,7 @@ Logi-VoltTray/
 ├── README.md                 # 产品说明（功能 / 快速上手 / 配置 / 构建）
 ├── logi_*.py, red/, tests/   # 早期 Python 参考实现与协议逻辑测试
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
-├── .github/workflows/        # ci.yml（fmt 自动回推 + clippy + 测试 + 构建）
+├── .github/workflows/        # ci.yml（fmt --check + clippy + 测试 + 构建）
 │                             # build-logi.yml / nightly.yml / bootstrap-lock.yml
 ├── docs/
 │   └── experience/           # 本知识库（仓库根级 docs/experience/）
@@ -23,7 +23,7 @@ Logi-VoltTray/
     ├── .cargo/config.toml    # MSVC 静态链接 CRT（crt-static），消除 VCRUNTIME140.dll 运行时依赖
     ├── RELEASES.md           # 各版本发布说明（v0.3.6 起；最新版本可能滞后，见 §10）
     ├── docs/
-    │   └── decisions.md      # 实现决策记录 D-01 ~ D-71（最重要的单一文档）
+    │   └── decisions.md      # 实现决策记录 D-01 ~ D-83（最重要的单一文档）
     ├── fixtures/             # 协议黄金样例与测试数据（golden/、battery_map_cases.json、
     │                         # features.json、voltage_curves.json 及生成脚本 gen_golden.py）
     ├── fuzz/                 # cargo-fuzz 模糊测试入口（fuzz_targets/frame_fuzz.rs，打协议帧解析）
@@ -67,13 +67,13 @@ cargo build --release --locked -p volttray-tray
 ## 5. 发布流程（与门禁清单一一对应）
 
 1. 版本号独立 chore 提交：只改 `volttray/Cargo.toml`（workspace 统一版本）+ `Cargo.lock`；
-2. push 触发 CI：fmt 自动回推（注意**回推错位**，见下）、`clippy -D warnings`、全量测试、release 构建并上传 artifact；
+2. push 触发 CI：`cargo fmt --check`（不一致即失败、作者本地修复）、`clippy -D warnings`、全量测试、release 构建并上传 artifact；
 3. 打 tag 指向 chore 提交；从 CI artifact 取 EXE 传 Release；
 4. Release 说明：中文、「能干什么 / 修了什么 / 要注意什么」三段、未验证项单列、附 sha256 与构建 head_sha；
 5. 发布前照 [03 发布质量门禁](03-release-quality-gate.md) 逐条核验；
 6. 发布后按 [02 E26](02-collaboration-playbook.md#e26-版本发布后经验回写机制用户常设规则) 把本版本链路的有价值经验回写进本知识库（用户常设规则，首个适用版本 v0.3.16；仅文档提交，不发版、不改版本号）。
 
-**CI 特性必须知道**：ci.yml 的 fmt 步骤会把 `cargo fmt` 结果自动回推 main——main HEAD 经常比构建提交新一个无 CI 的格式化提交。任何「CI 全绿」取证先对齐 head_sha（E5 / 门禁 B2）。
+**CI 特性必须知道**：v0.3.17 起 ci.yml 的 fmt 步骤为 `cargo fmt --check`——不一致即 CI 失败、由作者本地修复后推送，不再自动回推 main（此前的自动回推机制及其「main HEAD ≠ 构建提交」错位风险，见 01 E5 与 03 门禁 B2 的历史记录）。「CI 全绿」取证仍须对齐 head_sha（门禁 B1）。
 
 ## 6. 红线清单（先过红线，再谈功能）
 
@@ -90,7 +90,7 @@ cargo build --release --locked -p volttray-tray
 
 新加入者第一天最可能接到的活就是用户报障。按此顺序排查（各步依据见 [01](01-engineering-lessons.md) 对应条目）：
 
-**第一步：拿到诊断导出 + 重建物理情境。** 让用户用托盘菜单「**诊断面板…**」导出诊断 JSON（菜单项实际名称以此为准，v0.3.15 起弹出「另存为」对话框、保存位置用户自选）——任何子项失败都会降级为空 + reason，导出本身永不失败（E4 / D-69），放心要。同时问清三件事：鼠标当时是否在休眠、用户有没有动过它、系统是否刚重启（E4 物理解读教训：空导出可能只是鼠标在睡）。
+**第一步：拿到诊断导出 + 重建物理情境。** 让用户用托盘菜单「**导出诊断信息…**」导出诊断 JSON（v0.3.17 起菜单名；旧版为「诊断面板…」。v0.3.15 起弹出「另存为」对话框、保存位置用户自选）——任何子项失败都会降级为空 + reason，导出本身永不失败（E4 / D-69），放心要。同时问清三件事：鼠标当时是否在休眠、用户有没有动过它、系统是否刚重启（E4 物理解读教训：空导出可能只是鼠标在睡）。
 
 **第二步：按字段读诊断。**
 
@@ -104,7 +104,7 @@ cargo build --release --locked -p volttray-tray
 | `devices` 为空数组 | 不等于 bug：先回第一步确认物理情境（E4） |
 | `devices` 事件流 | 「电量显示不准 / 跳变」类报障：文件夹暂无已定性根因——按 E7 纪律先取证（事件流中的连续读数、电量来源回退路径、版本号与轮询档位），如实标注「未定性」，不凭猜测给用户结论 |
 
-**第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复未随 v0.3.15 发布、将随下一版本发布**——对 ≤v0.3.15 的用户不要说「升级即可修复」，已发布版本暂无经真机验证的临时缓解措施（改用无线连接或重启软件是否有效未经验证，不做推荐）。
+**第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复已随 v0.3.16 发布**——对 ≤v0.3.15 的用户可直接建议升级至 ≥v0.3.16（T6 修复本体见 D-70/D-71；v0.3.16 发布说明未单列该修复，发布状态依 v0.3.15…v0.3.16 提交区间核实：修复提交 `5e265e26b0b`、`700ccf80bd0` 在区间内）；开机自启勾选了却不自启 = exe 换版致注册表指向旧路径（v0.3.19 U-7），≥v0.3.19 启动期自动对账修复，旧版本手动关→开一次即可。
 
 **边界**：排查动作同样受红线约束——不要在软件侧为排查增加对休眠设备的主动探测（红线 1 / D-33）。
 
@@ -120,7 +120,7 @@ cargo build --release --locked -p volttray-tray
 | 文档 | 读它解决什么 |
 | --- | --- |
 | 根 `README.md` | 产品功能、配置键、用户视角行为 |
-| `volttray/docs/decisions.md`（D-01 ~ D-71） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
+| `volttray/docs/decisions.md`（D-01 ~ D-83） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | [本知识库 01](01-engineering-lessons.md) | 事故教训三段式 |
 | [本知识库 03](03-release-quality-gate.md) | 发布前逐条核验 |
@@ -129,7 +129,7 @@ cargo build --release --locked -p volttray-tray
 
 ## 10. 已知文档滞后点（以代码为准）
 
-- 根 `README.md` 的下载入口与「最新版本」表述可能滞后于实际已发布版本（截至 2026-10-17 仍指向 v0.3.14，而 v0.3.15 已发布）。找最新版本：先看 GitHub Releases 页，再对 `volttray/RELEASES.md`。
+- （该滞后已消除：根 README 下载区 2026-10-19 核指向 v0.3.19；若再滞后，找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`。）
 - 轮询档位曾长期存在文档旧口径（60/300/600/900/1800 秒），现已统一为 `crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
 - 「30 秒槽位扫描」旧文档表述为「每 30 秒例行枚举」，实际是嵌在枚举循环内、外层每次迭代才查门限：空闲时一个轮询周期至多扫一次（v0.3.15 起文档口径已修正，定性见 [01 E18](01-engineering-lessons.md#e18-托盘应用性能审查先定性每个周期唤醒几次查几次画几次再谈优化)）。
 
@@ -157,6 +157,6 @@ cargo build --release --locked -p volttray-tray
 ## 12. 上手第一周建议路径
 
 1. 读本文件 + 根 README，装环境跑通构建与全量测试；
-2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复），理解三条主战场；
+2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复）、D-72 ~ D-83（v0.3.16–v0.3.19 设计包落地与发布修复主线），理解主战场；
 3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 11 条（E1–E6 + E16–E20），把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
 4. 接到用户报障时先走 §7 排查入口；领任务前读 [02 协作方法论](02-collaboration-playbook.md)，交付前照 [03 门禁清单](03-release-quality-gate.md) 自查。
