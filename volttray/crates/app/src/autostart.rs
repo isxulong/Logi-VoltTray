@@ -302,7 +302,7 @@ mod imp {
                 let _ = RegCloseKey(hkey);
                 return Ok(None);
             }
-            let mut buf = vec![0u16; ((size as usize + 1) / 2).max(1)];
+            let mut buf = vec![0u16; (size as usize).div_ceil(2).max(1)];
             let mut size2 = (buf.len() * 2) as u32;
             let r2 = RegQueryValueExW(
                 hkey,
