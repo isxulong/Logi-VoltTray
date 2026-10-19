@@ -4,7 +4,7 @@ Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键
 
 [![GitHub Release](https://img.shields.io/github/v/release/isxulong/Logi-VoltTray)](https://github.com/isxulong/Logi-VoltTray/releases)
 
-**下载**：当前最新版为 [v0.3.18](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.18)，下载 `volttray-tray.exe`（约 1.3 MB）即可；更多历史版本见 [Releases 页](https://github.com/isxulong/Logi-VoltTray/releases)。Windows 10 / 11（x64）双击即用，免安装、免管理员权限。
+**下载**：当前最新版为 [v0.3.19](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.19)，下载 `volttray-tray.exe`（约 1.3 MB）即可；更多历史版本见 [Releases 页](https://github.com/isxulong/Logi-VoltTray/releases)。Windows 10 / 11（x64）双击即用，免安装、免管理员权限。
 
 ## 功能列表
 
