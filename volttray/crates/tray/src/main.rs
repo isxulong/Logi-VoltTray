@@ -2447,21 +2447,22 @@ mod imp {
         bootlog::stage("autostart-reconcile");
         let reconcile_cfg_on = cfg.autostart;
         let reconcile_cfg_path = cfg_path.clone();
-        if let Err(e) = volttray_app::guarded("autostart-reconcile", || {
-            match autostart::reconcile(reconcile_cfg_on, &exe) {
-                autostart::ReconcileOutcome::NoAction
-                | autostart::ReconcileOutcome::SkippedDev => {}
-                autostart::ReconcileOutcome::Repaired { old, new } => {
-                    bootlog::note(&format!(
-                        "autostart reconciled: {} -> {}",
-                        old.as_deref().unwrap_or("<missing>"),
-                        new.as_deref().unwrap_or("<removed>")
-                    ));
-                }
-                autostart::ReconcileOutcome::ReadFailed(reason) => {
-                    bootlog::note(&format!("autostart state unreadable: {reason}"));
-                    if let Ok(mut o) = observer.lock() {
-                        o.push(DiagEvent::new(
+        if let Err(e) = volttray_app::guarded("autostart-reconcile", || match autostart::reconcile(
+            reconcile_cfg_on,
+            &exe,
+        ) {
+            autostart::ReconcileOutcome::NoAction | autostart::ReconcileOutcome::SkippedDev => {}
+            autostart::ReconcileOutcome::Repaired { old, new } => {
+                bootlog::note(&format!(
+                    "autostart reconciled: {} -> {}",
+                    old.as_deref().unwrap_or("<missing>"),
+                    new.as_deref().unwrap_or("<removed>")
+                ));
+            }
+            autostart::ReconcileOutcome::ReadFailed(reason) => {
+                bootlog::note(&format!("autostart state unreadable: {reason}"));
+                if let Ok(mut o) = observer.lock() {
+                    o.push(DiagEvent::new(
                             Layer::App,
                             DiagKind::Alert {
                                 level: "warning".into(),
@@ -2470,25 +2471,27 @@ mod imp {
                                 ),
                             },
                         ));
-                    }
                 }
-                autostart::ReconcileOutcome::WriteFailed { registry_on, reason } => {
-                    bootlog::note(&format!("autostart reconcile write failed: {reason}"));
-                    if let Ok(mut guard) = config_arc.write() {
-                        guard.autostart = registry_on;
-                    }
-                    persist_bool(&reconcile_cfg_path, "autostart", registry_on);
-                    if let Ok(mut o) = observer.lock() {
-                        o.push(DiagEvent::new(
-                            Layer::App,
-                            DiagKind::Alert {
-                                level: "warning".into(),
-                                message: format!(
-                                    "autostart registry sync failed; config reverted to {registry_on}"
-                                ),
-                            },
-                        ));
-                    }
+            }
+            autostart::ReconcileOutcome::WriteFailed {
+                registry_on,
+                reason,
+            } => {
+                bootlog::note(&format!("autostart reconcile write failed: {reason}"));
+                if let Ok(mut guard) = config_arc.write() {
+                    guard.autostart = registry_on;
+                }
+                persist_bool(&reconcile_cfg_path, "autostart", registry_on);
+                if let Ok(mut o) = observer.lock() {
+                    o.push(DiagEvent::new(
+                        Layer::App,
+                        DiagKind::Alert {
+                            level: "warning".into(),
+                            message: format!(
+                                "autostart registry sync failed; config reverted to {registry_on}"
+                            ),
+                        },
+                    ));
                 }
             }
         }) {

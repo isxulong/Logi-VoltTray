@@ -110,10 +110,7 @@ pub(crate) fn path_matches(stored_path: &str, exe: &std::path::Path) -> bool {
 /// 构造 Run 值的规范写入形态（写入侧 canonical 化，BF-1）：
 /// `"<标准 Win32 形态路径>"`＋可选参数段（AF-7：重写时保留用户参数）。
 pub(crate) fn build_run_value(exe: &std::path::Path, args: &str) -> String {
-    let mut value = format!(
-        "\"{}\"",
-        strip_verbose_prefixes(&exe.to_string_lossy())
-    );
+    let mut value = format!("\"{}\"", strip_verbose_prefixes(&exe.to_string_lossy()));
     let args = args.trim();
     if !args.is_empty() {
         value.push(' ');
@@ -170,10 +167,7 @@ pub enum ReconcileOutcome {
     },
     /// 写/删失败——`registry_on` 为失败后注册表现状（值存在即 true），
     /// 调用方按既有对账回路失败语义回退共享配置＋persist＋Alert（BF-5）。
-    WriteFailed {
-        registry_on: bool,
-        reason: String,
-    },
+    WriteFailed { registry_on: bool, reason: String },
 }
 
 /// 启动一次性对账（U-7 核心，C-1）。
@@ -433,13 +427,19 @@ mod tests {
 
     #[test]
     fn f01_quoted_entry_matches() {
-        assert!(entry_matches(r#""C:\Apps\volttray-tray.exe""#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r#""C:\Apps\volttray-tray.exe""#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
     }
 
     #[test]
     fn f02_unclosed_quote_no_match() {
         // 残缺引号保守保留 → 判不等 → 收敛重写（R2 划界锁定）。
-        assert!(!entry_matches(r#""C:\Apps\volttray-tray.exe"#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(!entry_matches(
+            r#""C:\Apps\volttray-tray.exe"#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
     }
 
     #[test]
@@ -452,7 +452,10 @@ mod tests {
 
     #[test]
     fn f04_verbose_prefix_stored_matches() {
-        assert!(entry_matches(r#""\\?\C:\Apps\volttray-tray.exe""#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r#""\\?\C:\Apps\volttray-tray.exe""#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
         // 双向：current_exe 返回 \\?\ 形态时同样判匹配（比较侧 BF-1）。
         assert!(entry_matches(
             r#""C:\Apps\volttray-tray.exe""#,
@@ -470,12 +473,18 @@ mod tests {
 
     #[test]
     fn f06_forward_slashes_match() {
-        assert!(entry_matches(r#""C:/Apps/volttray-tray.exe""#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r#""C:/Apps/volttray-tray.exe""#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
     }
 
     #[test]
     fn f07_doubled_backslash_collapsed_and_unc_preserved() {
-        assert!(entry_matches(r#""C:\\Apps\\volttray-tray.exe""#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r#""C:\\Apps\\volttray-tray.exe""#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
         // UNC 前导 \\ 不被折叠（R4）。
         assert_eq!(
             normalize_path(r"\\server\share\x.exe"),
@@ -489,7 +498,10 @@ mod tests {
 
     #[test]
     fn f08_trailing_backslash_matches() {
-        assert!(entry_matches(r#""C:\Apps\volttray-tray.exe\""#, exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r#""C:\Apps\volttray-tray.exe\""#,
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
     }
 
     #[test]
@@ -519,7 +531,10 @@ mod tests {
 
     #[test]
     fn f12_unquoted_no_space_matches() {
-        assert!(entry_matches(r"C:\Apps\volttray-tray.exe", exe(r"C:\Apps\volttray-tray.exe")));
+        assert!(entry_matches(
+            r"C:\Apps\volttray-tray.exe",
+            exe(r"C:\Apps\volttray-tray.exe")
+        ));
     }
 
     #[test]
@@ -579,10 +594,19 @@ mod tests {
     #[test]
     fn f18_strip_verbose_prefixes_variants() {
         assert_eq!(strip_verbose_prefixes(r"\\?\C:\x\y.exe"), r"C:\x\y.exe");
-        assert_eq!(strip_verbose_prefixes(r"\\?\UNC\srv\share\y.exe"), r"\\srv\share\y.exe");
+        assert_eq!(
+            strip_verbose_prefixes(r"\\?\UNC\srv\share\y.exe"),
+            r"\\srv\share\y.exe"
+        );
         // 大小写不敏感。
-        assert_eq!(strip_verbose_prefixes(r"\\?\unc\srv\share\y.exe"), r"\\srv\share\y.exe");
-        assert_eq!(strip_verbose_prefixes(r"\\?\C:\x\y.exe".to_uppercase().as_str()), r"C:\X\Y.EXE");
+        assert_eq!(
+            strip_verbose_prefixes(r"\\?\unc\srv\share\y.exe"),
+            r"\\srv\share\y.exe"
+        );
+        assert_eq!(
+            strip_verbose_prefixes(r"\\?\C:\x\y.exe".to_uppercase().as_str()),
+            r"C:\X\Y.EXE"
+        );
         // 无前缀原样返回（保留原大小写）。
         assert_eq!(strip_verbose_prefixes(r"C:\Apps\Y.exe"), r"C:\Apps\Y.exe");
     }
@@ -628,7 +652,10 @@ mod tests {
     fn f20_decide_table() {
         let e = exe(r"C:\Apps\volttray-tray.exe");
         assert_eq!(decide(false, None, e), ReconcileAction::NoAction);
-        assert_eq!(decide(false, Some(r#""C:\Old\x.exe""#), e), ReconcileAction::Remove);
+        assert_eq!(
+            decide(false, Some(r#""C:\Old\x.exe""#), e),
+            ReconcileAction::Remove
+        );
         assert_eq!(decide(true, None, e), ReconcileAction::Write);
         assert_eq!(
             decide(true, Some(r#""C:\Apps\volttray-tray.exe""#), e),
@@ -636,7 +663,9 @@ mod tests {
         );
         assert_eq!(
             decide(true, Some(r#""C:\Old\x.exe""#), e),
-            ReconcileAction::Rewrite { args: String::new() }
+            ReconcileAction::Rewrite {
+                args: String::new()
+            }
         );
     }
 
@@ -645,12 +674,16 @@ mod tests {
         let e = exe(r"C:\Apps\volttray-tray.exe");
         assert_eq!(
             decide(true, Some(r#""C:\Old\x.exe" --minimized"#), e),
-            ReconcileAction::Rewrite { args: "--minimized".to_string() }
+            ReconcileAction::Rewrite {
+                args: "--minimized".to_string()
+            }
         );
         // 无引号含空格的旧值：截断不匹配，参数段不可信不保留（BF-8）。
         assert_eq!(
             decide(true, Some(r"C:\Old\dir with space\x.exe"), e),
-            ReconcileAction::Rewrite { args: String::new() }
+            ReconcileAction::Rewrite {
+                args: String::new()
+            }
         );
     }
 
@@ -660,10 +693,7 @@ mod tests {
         // 锁定「不会每启动重复重写」。
         let e = exe(r"C:\Apps\volttray-tray.exe");
         let rewritten = build_run_value(e, "--minimized");
-        assert_eq!(
-            decide(true, Some(&rewritten), e),
-            ReconcileAction::NoAction
-        );
+        assert_eq!(decide(true, Some(&rewritten), e), ReconcileAction::NoAction);
         let rewritten_plain = build_run_value(e, "");
         assert_eq!(
             decide(true, Some(&rewritten_plain), e),
