@@ -242,7 +242,15 @@ mod tests {
     /// 断言二：unifying 正常设备不含标注。
     #[test]
     fn unifying_normal_row_has_no_annotation() {
-        let dev = snap("u1", "MX Master 3S", "unifying", Some(55), "active", false, false);
+        let dev = snap(
+            "u1",
+            "MX Master 3S",
+            "unifying",
+            Some(55),
+            "active",
+            false,
+            false,
+        );
         let text = device_row_text(&dev);
         assert!(!text.contains("未验证"), "已验证通道不标注：{text}");
         assert!(text.contains("55%"), "正常电量照常显示：{text}");
@@ -251,7 +259,15 @@ mod tests {
     /// 断言三：direct + sleeping 含「休眠中」（文案分流，不引导导出）。
     #[test]
     fn direct_sleeping_row_says_sleeping_no_export_hint() {
-        let dev = snap("b1", "MX Anywhere 3", "direct", None, "sleeping", true, false);
+        let dev = snap(
+            "b1",
+            "MX Anywhere 3",
+            "direct",
+            None,
+            "sleeping",
+            true,
+            false,
+        );
         let text = device_row_text(&dev);
         assert!(text.contains("休眠中"), "sleeping 行含「休眠中」：{text}");
         assert!(
@@ -266,7 +282,10 @@ mod tests {
         let dev = snap("v1", "MX Keys Mini", "direct", None, "offline", true, true);
         let text = device_row_text(&dev);
         assert!(dev.is_virtual);
-        assert!(text.contains("（该通道未验证，读不到请用『导出诊断信息…』）"), "{text}");
+        assert!(
+            text.contains("（该通道未验证，读不到请用『导出诊断信息…』）"),
+            "{text}"
+        );
     }
 
     /// 兜底信息行：无 direct 行且快照含 BTHHID 失败候选时追加禁用态行。
@@ -274,24 +293,35 @@ mod tests {
     fn hint_row_appended_when_bt_candidate_failed() {
         use volttray_app::diag_export::{ChannelEnumResult, EnumSnapshot};
         let menu = Menu::new();
-        let devs = vec![snap("u1", "MX Master 3S", "unifying", Some(80), "active", false, false)];
+        let devs = vec![snap(
+            "u1",
+            "MX Master 3S",
+            "unifying",
+            Some(80),
+            "active",
+            false,
+            false,
+        )];
         let snap_enum = EnumSnapshot {
             at_ms: 1,
             forced: false,
             candidate_channels: 2,
-            channels: vec![ChannelEnumResult {
-                key: "C52B|vid_046d".to_string(),
-                pid: "0xC52B".to_string(),
-                tag: "vid_046d&pid_c52b".to_string(),
-                open: "ok".to_string(),
-                error: None,
-            }, ChannelEnumResult {
-                key: "0001|bthhid".to_string(),
-                pid: "0x0001".to_string(),
-                tag: "bthhid&dev_...".to_string(),
-                open: "failed".to_string(),
-                error: Some("hid open failed".to_string()),
-            }],
+            channels: vec![
+                ChannelEnumResult {
+                    key: "C52B|vid_046d".to_string(),
+                    pid: "0xC52B".to_string(),
+                    tag: "vid_046d&pid_c52b".to_string(),
+                    open: "ok".to_string(),
+                    error: None,
+                },
+                ChannelEnumResult {
+                    key: "0001|bthhid".to_string(),
+                    pid: "0x0001".to_string(),
+                    tag: "bthhid&dev_...".to_string(),
+                    open: "failed".to_string(),
+                    error: Some("hid open failed".to_string()),
+                },
+            ],
             registered_slots: 1,
             error: None,
         };
@@ -303,7 +333,15 @@ mod tests {
     #[test]
     fn hint_row_skipped_when_direct_device_present() {
         let menu = Menu::new();
-        let devs = vec![snap("d1", "MX Keys Mini", "direct", Some(70), "active", false, false)];
+        let devs = vec![snap(
+            "d1",
+            "MX Keys Mini",
+            "direct",
+            Some(70),
+            "active",
+            false,
+            false,
+        )];
         append_direct_enum_failure_hint(&menu, &devs, None);
         assert_eq!(menu.items().len(), 0, "有 direct 行不追加");
     }
