@@ -1,7 +1,7 @@
 name: traffic-snapshot
 
 # T-09（实施令 P2，2026-10-20）：访问数据周快照——单次快照双抓（C 裁决吸收 A）。
-# - cron 周一 05:43 UTC（与 audit 周检 04:37、nightly 00:2x 全部错峰整点）；
+# - cron 周一 05:43 UTC（与 audit 周检 04:37、nightly 03:17 UTC 全部错峰整点）；
 # - 双抓一：traffic/views（平台访问数据。官方文档口径：仅返回最近 14 天
 #   （https://docs.github.com/en/rest/metrics/traffic —— "Get the total
 #   number of views and breakdown per day or week for the last 14 days"），
