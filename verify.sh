@@ -59,18 +59,24 @@ if [ "${1:-}" = "--quick" ]; then
   printf '[跳过] --quick 模式\n'
 elif command -v zig >/dev/null 2>&1; then
   wrapper="$(mktemp /tmp/zig-cc-XXXXXX.sh)"
+  # 数组版 wrapper（R2-F1 修复）：旧版 eval 拼接引号丢失，多参数调用（如 -E /tmp/t.c）
+  # 必粘连报 Unknown Clang option；bash 数组逐参传递，无引号面。
   cat > "$wrapper" <<'WEOF'
-#!/bin/sh
-args=""
+#!/usr/bin/env bash
+args=()
+skip_next=0
 for a in "$@"; do
   case "$a" in
     --target=*) ;;
     -target) skip_next=1; continue ;;
-    *) [ "$skip_next" = 1 ] && { skip_next=0; continue; }
-       args="$args \"$(printf "%s" "$a" | sed 's/"/"\\""/g')" ;;
+    *) if [ "$skip_next" = 1 ]; then
+         skip_next=0
+         continue
+       fi
+       args+=("$a") ;;
   esac
 done
-eval "exec zig cc -target x86_64-windows-gnu $args"
+exec zig cc -target x86_64-windows-gnu "${args[@]}"
 WEOF
   chmod +x "$wrapper"
   export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$wrapper"
