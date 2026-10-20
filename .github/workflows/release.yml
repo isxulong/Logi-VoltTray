@@ -2,6 +2,12 @@ name: release
 
 # 发版流水线：tag 触发（v*），windows-latest 构建 release 版 exe，
 # 计算 sha256 并上传到对应 GitHub Release（可复用长期方案，v0.3.16 引入）。
+#
+# T-05（实施令 P1，2026-10-20）：upload 前注入最近一次 nightly 状态到
+# Release 说明。C-F5/F-B1/F-A9 裁决——注入失败 ≠ 发布失败：注入步
+# continue-on-error: true 且脚本内 || true，读取失败时写兜底文案
+# 「最近一次 nightly：状态读取失败（发布时刻 API 不可用）」照常发布；
+# 失败信号本身由 nightly.yml 的 N-2 开单承载，不阻塞发版。
 on:
   push:
     tags: ["v*"]
@@ -9,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  actions: read # T-05：注入步读 nightly run 历史（gh run list）
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,9 +73,32 @@ jobs:
           cd target/release
           sha256sum volttray-tray.exe | tee volttray-tray.exe.sha256.txt
 
+      # T-05：注入最近一次 nightly 状态到 Release 说明（gh CLI 为 runner
+      # 预装件，C-F4）。先落兜底文案再尝试覆盖，保证 body 文件必然存在；
+      # 步级 continue-on-error + 脚本内 || true——发布时刻 API 不可用
+      # 不阻塞发版（F-A9：失败信号走 N-2 开单，不走这里）。
+      - name: inject nightly status into release body
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body_file="$RUNNER_TEMP/release-body.md"
+          fallback='最近一次 nightly：状态读取失败（发布时刻 API 不可用）'
+          printf '%s\n' "$fallback" > "$body_file" || true
+          line=$(gh run list --workflow nightly.yml -L 1 \
+            --json conclusion,createdAt \
+            --jq '.[0] | "最近一次 nightly：\(.conclusion // "未知")（run 创建于 \(.createdAt)）"' || true)
+          if [ -n "${line:-}" ]; then
+            printf '%s\n' "$line" > "$body_file" || true
+          fi
+          echo "---- release body ----" || true
+          cat "$body_file" || true
+
       - name: upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ runner.temp }}/release-body.md
           files: |
             volttray/target/release/volttray-tray.exe
             volttray/target/release/volttray-tray.exe.sha256.txt

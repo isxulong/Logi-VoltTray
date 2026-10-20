@@ -1,13 +1,31 @@
 name: nightly
 
-# 评审 P0-2：ubuntu + nightly 的 fuzz / 覆盖率 job。
-# 第 2 波（week2-ci-hardening）：fuzz 从 echo 占位升级为真实 cargo-fuzz
-# 短跑（volttray/fuzz 既有 frame_fuzz harness），并摘掉 continue-on-error
-# 空转口径——job 失败即真红，不再吞错。
+# T-05（实施令 P1，2026-10-20）：nightly 真实 fuzz 烟测 + 失败自动开单（N-2）
+# + 30 晚到期评审。批④ 0007 与 week2/PR#5/PR#6 已合入演进融合落地：
+# - fuzz 红就是信号，信号走 N-2 开单；崩溃样本 upload 挂 if: always()，
+#   fuzz 步红时不得被跳过（F-A8）；
+# - 「烟测≠防线」：5 分钟 smoke + RSS 2.5GB 上限的冒烟，目标是暴露构造性
+#   崩溃与接线退化，不是安全防线；
+# - 协议测试为真实门禁（PR#6 已合入裁决，失败即红）——0007 原设计的
+#   步级 continue-on-error 不再适用，见 N-2 开单步注记；
+# - 发布对账承载：docs/experience/03-release-quality-gate.md F 节（30 晚
+#   时钟挂常设区，本 workflow 是时钟的数据源）。
+
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch: {}
+
+permissions:
+  issues: write # N-2：失败开单（label 精确查重 + 追加评论）
+  actions: read # 30 晚到期评审读本 workflow 自身 run 历史
+
+env:
+  CARGO_TERM_COLOR: always
+  # T-05「30 晚」时钟起算日＝本 workflow（真实 fuzz 版）合入日。
+  # 维护者合入时若晚于此日期，请把本常量改为合入日。F-A10 裁决：
+  # 常量仅作下限，实际晚数按 run createdAt 实算，issue 正文写实际晚数。
+  FUZZ_CLOCK_START: "2026-10-20"
 
 jobs:
   fuzz-smoke:
@@ -32,17 +50,32 @@ jobs:
         with:
           components: rust-src
 
-      # 协议层 nightly 回归：真实门禁，失败即红（此前 continue-on-error 吞错）
+      # 协议层 nightly 回归：真实门禁，失败即红（PR#6 裁决；此前
+      # continue-on-error 吞错）。批④融合注记：0007 原设计保留步级
+      # continue-on-error（协议抖动不遮蔽 fuzz 信号），与已合入的真实
+      # 门禁裁决冲突——按「以 main 现状为基线、不回退已合入改动」
+      # 保留真实门禁；协议红与 fuzz 红均走 N-2 开单。
       - name: protocol tests on nightly
         run: cargo test -p volttray-protocol --locked
 
-      # fuzz 真跑（评审 P0-2 落地）：frame_fuzz harness 真实执行，时长克制
-      # （5 分钟 smoke）；发现 crash 时 cargo-fuzz 非零退出 → job 红
+      # cargo-fuzz 固定版本安装（taiki-e/install-action，双方收敛选型，
+      # 与 audit.yml 的 cargo-audit 统一）；0.13.2 = crates.io
+      # max_stable_version（2026-10-20 核对）。
       - name: install cargo-fuzz
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
 
+      # 语料跨晚复用（F-A8 配套：语料用 cache，artifact 只留崩溃样本）。
+      - name: fuzz corpus cache
+        uses: actions/cache@v4
+        with:
+          path: volttray/fuzz/corpus/frame_fuzz
+          key: frame_fuzz-corpus-${{ github.run_id }}
+          restore-keys: frame_fuzz-corpus-
+
+      # fuzz 真跑（评审 P0-2 落地 + T-05）：frame_fuzz harness 真实执行，
+      # 时长克制（5 分钟 smoke，week2 已合入口径）+ RSS 2.5GB 上限。
       # 显式钉 gnu target：taiki-e 装的是 musl 预编译版 cargo-fuzz，其
       # 默认 --target 取编译期平台即 musl，而 ASan 与 musl 静态 libc
       # 不兼容（nightly 重跑 fuzz 编译即死，质检已定位至 cargo-fuzz
@@ -50,14 +83,93 @@ jobs:
       # rust-std，glibc 动态链接与 ASan 兼容。
       - name: fuzz frame_fuzz (5min smoke)
         working-directory: volttray/fuzz
-        run: cargo fuzz run --target x86_64-unknown-linux-gnu frame_fuzz -- -max_total_time=300
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu frame_fuzz -- -max_total_time=300 -rss_limit_mb=2560
 
-      # crash 时上传统料/最小化用例，供离线复现（与 ci.yml 失败日志口径一致）
-      - name: upload fuzz artifacts (on failure)
-        if: failure()
+      # 崩溃样本上传：if: always()——fuzz 步红时 upload 不得被跳过
+      # （F-A8 裁决原文），否则崩溃样本在最需要时拿不到。正常晚
+      # 无崩溃文件，if-no-files-found: ignore 减噪。
+      - name: upload fuzz artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts
           path: volttray/fuzz/artifacts/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
+
+      # N-2 开单步（任一前置步红即触发）：gh CLI 为 runner 预装件（C-F4），
+      # 去重按 label 精确查（F-A6：标题仅作人类可读，不作查重键）；
+      # 处置出口零天数时限（K-8）；每 issue 追加评论上限 10 条，
+      # 达上限后仅计数不再追加（防噪三件套）。
+      # P2 修正（R1 评审退回项，批④合入时修复）：gh issue view --json
+      # comments --jq '.comments' 返回数组，须加 '| length' 取整数——
+      # 否则 [ "$count" -ge 10 ] 整数比较报错（退出码 2 → if 为假），
+      # 「评论上限 10 条」防噪机制失效。
+      # R2-F3① 已知缺口（0026 登记）：FAILED_STEP 硬编码步名，步改名
+      # 须同步更新；融合注记：协议测试现为真实门禁，协议红同样触发
+      # 本步，正文的失败步名以 run 页实际失败步为准。
+      - name: N-2 open-or-comment issue (ci-nightly-failure)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+          FAILED_STEP: "fuzz frame_fuzz (5min smoke)"
+        shell: bash
+        run: |
+          gh label create ci-nightly-failure \
+            --color B60205 \
+            --description "nightly fuzz 失败自动开单（N-2）" \
+            --if-not-exists
+          num=$(gh issue list --state open --label ci-nightly-failure \
+            --json number --limit 1 | jq -r '.[0].number // empty')
+          if [ -n "$num" ]; then
+            count=$(gh issue view "$num" --json comments --jq '.comments | length')
+            if [ "$count" -ge 10 ]; then
+              echo "[N-2] issue #${num} 评论已达上限（10），本晚失败仅计数、不再追加（防噪三件套）"
+            else
+              gh issue comment "$num" \
+                --body "nightly fuzz 失败（${FAILED_STEP}，实际失败步以 run 页为准）：${RUN_URL}"
+            fi
+          else
+            body=$(printf '触发：%s（实际失败步以 run 页为准）\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
+              "$FAILED_STEP" "$RUN_URL")
+            gh issue create --label ci-nightly-failure \
+              --title "nightly fuzz 失败（自动开单）" \
+              --body "$body"
+          fi
+
+      # 「30 晚无非红」到期评审：起算日常量仅作下限，到期判据按最近
+      # nightly run 的 createdAt 校核（F-A10），issue 正文写出实际
+      # 运行晚数；去重同样按 label（ci-review-due）精确查。
+      - name: 30-nights review-due check (ci-review-due)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh label create ci-review-due \
+            --color FBCA04 \
+            --description "30 晚到期评审（N-2 / T-05）" \
+            --if-not-exists
+          runs_json=$(gh run list --workflow nightly.yml \
+            --json conclusion,createdAt --limit 400)
+          total=$(printf '%s' "$runs_json" | jq --arg start "$FUZZ_CLOCK_START" \
+            '[.[] | select(.createdAt >= $start)] | length')
+          green=$(printf '%s' "$runs_json" | jq --arg start "$FUZZ_CLOCK_START" \
+            '[.[] | select(.conclusion == "success" and (.createdAt >= $start))] | length')
+          echo "时钟起算日 $FUZZ_CLOCK_START：实际运行 ${total} 晚，其中全绿 ${green} 晚"
+          if [ "$green" -lt 30 ]; then
+            echo "全绿 ${green} 晚 < 30，未到期"
+            exit 0
+          fi
+          num=$(gh issue list --state open --label ci-review-due \
+            --json number --limit 1 | jq -r '.[0].number // empty')
+          if [ -n "$num" ]; then
+            echo "[N-2] 到期评审单已存在：#${num}，不重复开"
+            exit 0
+          fi
+          body=$(printf 'T-05「30 晚」到期评审：自时钟起算日 %s 起实际运行 %s 晚、全绿 %s 晚（F-A10：按 run createdAt 实算，30 仅作下限）。\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
+            "$FUZZ_CLOCK_START" "$total" "$green")
+          gh issue create --label ci-review-due \
+            --title "30 晚到期评审：nightly fuzz 无非红（自动开单）" \
+            --body "$body"
