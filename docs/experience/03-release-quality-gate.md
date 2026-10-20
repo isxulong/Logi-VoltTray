@@ -138,7 +138,7 @@
 | T-10 README 3 秒说服力 | 随下一 Release | —（GIF 素材依赖维护者 Windows 真机，未验证项⑧） | 文字与结构已实施，待发布窗口（第 3 批 commit 0012）；GIF 素材待维护者真机录制后替换占位注释 | — | — |
 | T-11 v0.3.9 断档收口 | 建议 T-07 合入前完成 | —（远端五步序列需维护者操作，实施代理禁 push） | RELEASES.md 断档说明行已实施（第 3 批 commit 0013）；远端五步序列（disable → tag 76625759 → cancel → prerelease Release → enable）待维护者执行，完成前 /releases/latest 不受影响一项未验证 | 按实施令验证方式执行 `git ls-remote --tags` / `gh api .../releases/tags/v0.3.9` | 维护者执行五步后首次发布对账 |
 | T-12 经验库时间线修正 | 随下一 Release | docs/experience/README.md 补一句 | 已实施，待发布窗口（第 3 批 commit 0010） | — | — |
-| T-14 商标与命名评估 | 本期 Release 日 + 30 天（逾期自动关闭并记录） | `docs/naming-risk-assessment.md` | 未动工 | — | — |
+| T-14 商标与命名评估 | 本期 Release 日 + 30 天（逾期自动关闭并记录） | `docs/naming-risk-assessment.md` | 已实施，待评估（第 4 批 commit 0014）：载体文档就位（一页四块、结论三选一留空为正常态、三渠道政策链接 2026-10-20 实测 200）；30 天时钟自本期 Release 日起算 | — | — |
 | T-15 下载段诚实披露 | 随下一 Release | README 下载段 + 本文件 D 段 D6 核验项 | 已实施，待发布窗口（第 3 批 commit 0011）；下一 Release 说明含披露段核验入 F.1 常设区 | — | — |
 | N-1 执行对账表（本节） | 随下一 Release | 本节 F.1 / F.2 | 滚动维护中（随批刷新状态） | — | — |
 | N-2 失败自动开单 | 随下一 Release | nightly.yml / audit.yml 开单步（label 查重） | 已实施，待发布窗口（第 2 批 commit 0007/0008） | — | — |
