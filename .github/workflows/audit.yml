@@ -1,0 +1,72 @@
+name: audit
+
+# T-06（实施令 P1，2026-10-20）：cargo audit 周检 + 失败自动开单（N-2）。
+# - cron 周一 04:37 UTC（错峰整点）；ubuntu-latest 不占 windows 配额；
+# - 工具选型与 T-05 统一：taiki-e/install-action@v2 固定版本装
+#   cargo-audit@0.22.2（crates.io max_stable_version，2026-10-20 核对）；
+# - 只审 volttray/Cargo.lock，不 cargo install、不占构建缓存；
+# - 可替代实现＝dependabot 仅安全更新通道（注释备案，当前不启用）；
+# - 不手动升级 serde_json（漏洞处置走人工决策，不在本 workflow 内升依赖）；
+# - 处置出口＝下个发布窗口前处置并在 Release 说明标注，零天数时限
+#   （K-8：本注释与实施令双写）；
+# - N-2 开单正文区分「扫描失败」与「发现漏洞」两种红（防噪三件套）。
+on:
+  schedule:
+    - cron: "37 4 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  issues: write # N-2：失败开单（label ci-audit 精确查重 + 追加评论）
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 固定版本（与 T-05 统一选型，C-F4 / 双方收敛）。
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      # 只审 lock 文件本体，无需构建（--file 指定绝对路径，仓库根上下文）。
+      # 两种红都走 failure() 开单：扫描失败（audit 自身错误）与发现漏洞
+      # （RUSTSEC 命中）在开单正文中区分表述。
+      - name: cargo audit (volttray/Cargo.lock)
+        run: cargo audit --file volttray/Cargo.lock
+
+      # N-2 开单步（audit 步红才开单）：gh CLI 为 runner 预装件（C-F4），
+      # 去重按 label ci-audit 精确查（F-A6：标题仅作人类可读，不作查重键）；
+      # 处置出口零天数时限（K-8）；每 issue 追加评论上限 10 条，
+      # 达上限后仅计数不再追加（防噪三件套）。
+      - name: N-2 open-or-comment issue (ci-audit)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+        shell: bash
+        run: |
+          gh label create ci-audit \
+            --color D93F0B \
+            --description "cargo audit 周检失败自动开单（N-2 / T-06）" \
+            --if-not-exists
+          num=$(gh issue list --state open --label ci-audit \
+            --json number --limit 1 | jq -r '.[0].number // empty')
+          if [ -n "$num" ]; then
+            count=$(gh issue view "$num" --json comments --jq '.comments | length')
+            if [ "$count" -ge 10 ]; then
+              echo "[N-2] issue #${num} 评论已达上限（10），本次失败仅计数、不再追加（防噪三件套）"
+            else
+              gh issue comment "$num" \
+                --body "cargo audit 周检再次失败：${RUN_URL}（正文区分见首贴：扫描失败或发现漏洞）"
+            fi
+          else
+            body=$(printf 'cargo audit 周检失败：\nrun：%s\n\n两种红（按日志区分）：\n- 扫描失败：audit 自身错误（数据库拉取失败等），重跑即可恢复；\n- 发现漏洞：RUSTSEC 命中，需人工研判修复（不手动升级 serde_json，处置走人工决策）。\n\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限，K-8）。\n可替代实现：dependabot 仅安全更新通道（当前未启用，备案）。\n' \
+              "$RUN_URL")
+            gh issue create --label ci-audit \
+              --title "cargo audit 周检失败（自动开单）" \
+              --body "$body"
+          fi
