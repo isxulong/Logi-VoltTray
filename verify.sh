@@ -34,6 +34,9 @@ run "fmt --check" cargo fmt --all -- --check
 run "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # ③ test（门禁三，对齐 ci.yml：--locked）
+# 注（R2-F3 后半）：workspace 测试在 Linux 宿主编译 hidapi 需 libudev
+# 开发库；沙箱/精简 Linux 环境缺 libudev 时本步预期跳过（真实门禁以
+# windows-gnu 交叉目标的 fmt/clippy/check 三件套为准）。
 run "test" cargo test --workspace --locked
 
 # ④ commit trailer 契约（N-1 裁决：lint-only 只读提示，缺项不阻断）
