@@ -82,28 +82,37 @@ fn direct_annotation(dev: &DeviceSnapshot) -> &'static str {
     }
 }
 
-/// T-04③：枚举失败兜底信息行。无 direct 设备行、且最近一次枚举快照
-/// 存在打开失败的蓝牙（BTHHID/BTHENUM）候选通道时，追加一条禁用态
-/// 信息行（不进 MenuIds、零事件分支——M13 固定项额度不含设备区行）。
-/// 判定复用 IO 侧既有 key/tag 信息（Windows 蓝牙 HID 路径 tag 含
-/// bthhid/bthenum 段），GUI 侧零设备查询。
+/// T-04③ 判定：无 direct 设备行、且最近一次枚举快照存在打开失败的
+/// 蓝牙（BTHHID/BTHENUM）候选通道时，兜底提示行成立。判定复用 IO 侧
+/// 既有 key/tag 信息（Windows 蓝牙 HID 路径 tag 含 bthhid/bthenum 段），
+/// GUI 侧零设备查询。
+/// R1-F2 抽出为共享判定——main.rs 把它并入菜单内容签名，与重建分支的
+/// 追加判定同源，两处永不发散。
+pub fn enum_failure_hint_applies(
+    devices: &[DeviceSnapshot],
+    enum_snap: Option<&volttray_app::diag_export::EnumSnapshot>,
+) -> bool {
+    if devices.iter().any(|d| d.link == "direct") {
+        return false;
+    }
+    let Some(snap) = enum_snap else {
+        return false;
+    };
+    snap.channels.iter().any(|c| {
+        let t = c.tag.to_ascii_lowercase();
+        (t.contains("bthhid") || t.contains("bthenum"))
+            && (c.open == "failed" || c.open == "cached-reopen-failed")
+    })
+}
+
+/// T-04③：判定成立时追加一条禁用态信息行（不进 MenuIds、零事件
+/// 分支——M13 固定项额度不含设备区行）。
 pub fn append_direct_enum_failure_hint(
     menu: &Menu,
     devices: &[DeviceSnapshot],
     enum_snap: Option<&volttray_app::diag_export::EnumSnapshot>,
 ) {
-    if devices.iter().any(|d| d.link == "direct") {
-        return;
-    }
-    let Some(snap) = enum_snap else {
-        return;
-    };
-    let bt_failed = snap.channels.iter().any(|c| {
-        let t = c.tag.to_ascii_lowercase();
-        (t.contains("bthhid") || t.contains("bthenum"))
-            && (c.open == "failed" || c.open == "cached-reopen-failed")
-    });
-    if !bt_failed {
+    if !enum_failure_hint_applies(devices, enum_snap) {
         return;
     }
     let item = MenuItem::new("蓝牙/有线通道识别失败 → 请导出诊断反馈", false, None);

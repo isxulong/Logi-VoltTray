@@ -3137,6 +3137,47 @@ mod imp {
         s.devices.get(idx)
     }
 
+    /// 菜单内容签名：任一分量变化即触发 set_menu 重建（v0.3.3 P3-1 缓解）。
+    /// R1-F2（T-04③ 修复）：签名并入 `enum_failure_hint`（枚举失败摘要）——
+    /// 失败候选出现/消失本身即触发重建，兜底提示行不再依赖其余分量变化
+    /// 才出现。分量与重建分支（build_menu + append_direct_enum_failure_hint）
+    /// 一一对应，新增分量须同步两处。
+    #[allow(clippy::too_many_arguments)]
+    fn menu_content_sig(
+        pinned: Option<&str>,
+        poll_secs: u64,
+        blink_enabled: bool,
+        autostart_on: bool,
+        silent: bool,
+        default_id: Option<&str>,
+        devices: &[volttray_app::DeviceSnapshot],
+        enum_failure_hint: bool,
+    ) -> String {
+        let mut s = format!(
+            "{}|p{:?}|b{}|a{}|s{}|d{:?}|h{}",
+            pinned.unwrap_or("-"),
+            poll_secs,
+            blink_enabled,
+            autostart_on,
+            silent,
+            default_id,
+            enum_failure_hint as u8
+        );
+        for d in devices {
+            s.push_str(&format!(
+                "/{}:{}:{:?}:{}:{}",
+                d.id,
+                d.percent
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                d.charging,
+                d.gray,
+                d.state
+            ));
+        }
+        s
+    }
+
     fn refresh_ui(
         tray: &tray_icon::TrayIcon,
         state: &mut GuiState,
@@ -3153,30 +3194,25 @@ mod imp {
             .map(|d| d.id.clone());
         // v0.3.3 卫生项（P3-1 缓解）：菜单内容签名未变则跳过 set_menu 重建
         //（闪烁根源 = 每 500ms tick 反复 set_menu 同一内容）。
-        let sig = {
-            let mut s = format!(
-                "{}|p{:?}|b{}|a{}|s{}|d{:?}",
-                state.pinned.as_deref().unwrap_or("-"),
-                state.poll_secs,
-                state.blink_enabled,
-                state.autostart_on,
-                state.silent,
-                default_id.as_deref()
-            );
-            for d in &devices {
-                s.push_str(&format!(
-                    "/{}:{}:{:?}:{}:{}",
-                    d.id,
-                    d.percent
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                    d.charging,
-                    d.gray,
-                    d.state
-                ));
-            }
-            s
+        // R1-F2（T-04③ 修复）：签名并入「枚举失败摘要」布尔——失败候选
+        // 出现/消失本身即触发重建，不再依赖其余分量变化。
+        let enum_failure_hint = {
+            let guard = enum_snap.lock().ok();
+            crate::menu::enum_failure_hint_applies(
+                &devices,
+                guard.as_ref().and_then(|g| g.as_ref()),
+            )
         };
+        let sig = menu_content_sig(
+            state.pinned.as_deref(),
+            state.poll_secs,
+            state.blink_enabled,
+            state.autostart_on,
+            state.silent,
+            default_id.as_deref(),
+            &devices,
+            enum_failure_hint,
+        );
         if sig != state.menu_sig {
             let (menu_obj, new_ids) = build_menu(
                 &devices,
@@ -3523,6 +3559,57 @@ mod imp {
             assert!(!r.should_enumerate(now, true));
             r.request_refresh();
             assert!(r.should_enumerate(now, true));
+        }
+    }
+
+    #[cfg(test)]
+    mod menu_sig_tests {
+        use super::*;
+
+        fn dev(id: &str, link: &str) -> volttray_app::DeviceSnapshot {
+            volttray_app::DeviceSnapshot {
+                id: id.into(),
+                name: id.into(),
+                percent: Some(80),
+                charging: false,
+                link: link.into(),
+                state: "online".into(),
+                gray: false,
+                source: None,
+                physical_key: None,
+                is_virtual: false,
+                last_seen: None,
+            }
+        }
+
+        /// R1-F2 锁定①：同分量输入 → 签名逐字节相等（不触发重建）。
+        #[test]
+        fn same_inputs_yield_same_sig() {
+            let devices = vec![dev("m1", "btle")];
+            let a = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
+            let b = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
+            assert_eq!(a, b);
+        }
+
+        /// R1-F2 锁定②（T-04③ 主场景）：其余分量不变、仅枚举失败摘要
+        /// 翻转（新快照含失败候选）→ 签名不同 → 触发菜单重建，兜底提示行
+        /// 随 rebuild 出现。修复前该布尔不进签名，主场景下兜底行不触发。
+        #[test]
+        fn enum_failure_flip_changes_sig() {
+            let devices = vec![dev("m1", "btle")];
+            let base = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
+            let with_failure =
+                menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, true);
+            assert_ne!(base, with_failure);
+        }
+
+        /// R1-F2 锁定③：空设备列表下失败摘要翻转同样改变签名
+        /// （兜底行恰在「无 direct 行」时出现，空列表是其典型现场）。
+        #[test]
+        fn enum_failure_flip_changes_sig_with_empty_devices() {
+            let base = menu_content_sig(None, 60, false, false, false, None, &[], false);
+            let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true);
+            assert_ne!(base, with_failure);
         }
     }
 
