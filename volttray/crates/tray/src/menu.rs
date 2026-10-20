@@ -354,6 +354,15 @@ mod tests {
         append_direct_enum_failure_hint(&menu, &devs, None);
         assert_eq!(menu.items().len(), 0, "有 direct 行不追加");
     }
+}
+
+/// R2-F4：T-07 的两条断言原混在 T-04 新建的 tests 模块里——T-04 若需
+/// 单独 revert 会连带删掉 T-07 的测试。移出为独立模块，恢复 T-04 单独
+/// revert 的独立性（T-07 验收断言：固定项计数＋版本文案；断言内容逐字
+/// 保留。menu 依赖 tray-icon，测试由 Windows CI 承载）。
+#[cfg(test)]
+mod t07_tests {
+    use super::*;
 
     /// T-07：固定项计数断言——MenuItem / CheckMenuItem 合计 9 个（分隔符
     /// 与设备区行不计入 M13 额度）。实施令口径写「7→8」，现实基线固定项
