@@ -75,6 +75,8 @@ mod imp {
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
+    // T-07：菜单「检查更新」——ShellExecuteW 交系统默认浏览器，零 HTTP 客户端。
+    use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     use volttray_app::aumid;
@@ -3038,6 +3040,23 @@ mod imp {
             } else if e.id == ids.stats_export {
                 // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
                 crate::statsexport::begin_export(cmd_tx);
+            } else if e.id == ids.check_update {
+                // T-07（实施令零网络形态）：手动「检查更新」＝ShellExecuteW
+                // 交系统默认浏览器打开 /releases/latest——无 HTTP 客户端、
+                // 零常驻外联、零启动自动检查（未验证项④：真机点击实际打开
+                // 浏览器待 Windows 实测；此处仅常量 URL，零网络代码路径）。
+                let url = wide("https://github.com/isxulong/Logi-VoltTray/releases/latest");
+                let verb = wide("open");
+                let _ = unsafe {
+                    ShellExecuteW(
+                        None,
+                        PCWSTR(verb.as_ptr()),
+                        PCWSTR(url.as_ptr()),
+                        PCWSTR::null(),
+                        PCWSTR::null(),
+                        SW_SHOWNORMAL,
+                    )
+                };
             } else if e.id == ids.blink {
                 state.blink_enabled = !state.blink_enabled;
                 if let Ok(mut guard) = cfg_arc.write() {

@@ -1,8 +1,11 @@
-//! 托盘右键菜单（v0.3.0 产品方案 M13：固定项 7 个 ≤ 8；设备区行不计入上限）。
+//! 托盘右键菜单（T-07 起固定项 9 个：超出 v0.3.0 产品方案 M13 原上限 8，
+//! 实施令 2026-10-20 注记「后续再加固定项须先评审」进对账表 F.2；
+//! 设备区行不计入额度）。
 //!
 //! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
 //! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
-//! ── / 设置… / 导出诊断信息… / ── / 退出。
+//! ── / 设置… / 导出诊断信息… / 导出耗电统计… / 检查更新（当前 v{X}）/
+//! ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use volttray_app::DeviceSnapshot;
@@ -18,6 +21,10 @@ pub struct MenuIds {
     pub diag: MenuId,
     /// WP-B：导出耗电统计（CSV + 可选 HTML 报告 / JSON）。
     pub stats_export: MenuId,
+    /// T-07：手动「检查更新」——签发口径零网络形态：事件循环仅
+    /// ShellExecuteW 打开 GitHub /releases/latest 页，无 HTTP 客户端、
+    /// 零常驻外联、零启动自动检查。
+    pub check_update: MenuId,
     pub exit: MenuId,
 }
 
@@ -151,6 +158,17 @@ pub fn build_menu(
     // 导出诊断信息的另存为流程，并非「面板」。
     let diag = MenuItem::new("导出诊断信息…", true, None);
     let stats_export = MenuItem::new("导出耗电统计…", true, None);
+    // T-07（实施令零网络形态）：固定项「检查更新（当前 v{X}）」。实施令
+    // 口径为 7→8（M13 顶格 8/8），但现实基线固定项已是 8（stats_export 已
+    // 随 v0.3.19 在列），本项使固定项达 9、突破 M13 原上限 8——计数按现实
+    // 断言（见下方单测），偏离与「后续再加固定项须先评审」注记均登记于
+    // 对账表 F.2。版本号取编译期 CARGO_PKG_VERSION，与 EXE 内嵌版本资源
+    // 同源（门禁 B3 防手工脱节）。
+    let check_update = MenuItem::new(
+        format!("检查更新（当前 v{}）", env!("CARGO_PKG_VERSION")),
+        true,
+        None,
+    );
     let exit = MenuItem::new("退出", true, None);
 
     let ids = MenuIds {
@@ -162,6 +180,7 @@ pub fn build_menu(
         settings: settings.id().clone(),
         diag: diag.id().clone(),
         stats_export: stats_export.id().clone(),
+        check_update: check_update.id().clone(),
         exit: exit.id().clone(),
     };
 
@@ -173,6 +192,7 @@ pub fn build_menu(
     let _ = menu.append(&settings);
     let _ = menu.append(&diag);
     let _ = menu.append(&stats_export);
+    let _ = menu.append(&check_update);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&exit);
     (menu, ids)
@@ -286,5 +306,49 @@ mod tests {
         let devs = vec![snap("d1", "MX Keys Mini", "direct", Some(70), "active", false, false)];
         append_direct_enum_failure_hint(&menu, &devs, None);
         assert_eq!(menu.items().len(), 0, "有 direct 行不追加");
+    }
+
+    /// T-07：固定项计数断言——MenuItem / CheckMenuItem 合计 9 个（分隔符
+    /// 与设备区行不计入 M13 额度）。实施令口径写「7→8」，现实基线固定项
+    /// 已是 8（stats_export 随 v0.3.19 在列），故本项后为 9、突破 M13 原上
+    /// 限 8——按现实断言，偏离登记于对账表 F.2（测试由 Windows CI 承载）。
+    #[test]
+    fn t07_fixed_item_count_is_nine() {
+        use tray_icon::menu::MenuItemKind;
+        let (menu, _ids) = build_menu(&[], None, None, 1800, true, true, false);
+        let fixed = menu
+            .items()
+            .into_iter()
+            .filter(|k| !matches!(k, MenuItemKind::Predefined(_)))
+            .count();
+        assert_eq!(
+            fixed, 9,
+            "固定项应为 9：refresh/blink/silent/autostart/settings/diag/stats_export/check_update/exit"
+        );
+    }
+
+    /// T-07：新项文本含当前版本号（编译期 CARGO_PKG_VERSION，与 EXE 内嵌
+    /// 版本资源同源，门禁 B3）。
+    #[test]
+    fn t07_check_update_item_text_contains_version() {
+        use tray_icon::menu::MenuItemKind;
+        let (menu, ids) = build_menu(&[], None, None, 1800, true, true, false);
+        let text = menu
+            .items()
+            .into_iter()
+            .find_map(|k| match k {
+                MenuItemKind::MenuItem(mi) if mi.id() == &ids.check_update => Some(mi.text()),
+                _ => None,
+            })
+            .expect("check_update 项应存在于固定项区");
+        assert!(
+            text.starts_with("检查更新（当前 v"),
+            "文案前缀须为「检查更新（当前 v」：{text}"
+        );
+        assert!(
+            text.contains(env!("CARGO_PKG_VERSION")),
+            "文案须含编译期版本号 {}：{text}",
+            env!("CARGO_PKG_VERSION")
+        );
     }
 }

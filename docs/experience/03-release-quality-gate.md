@@ -132,7 +132,7 @@
 | T-04 功能分级标注 | 随下一 Release | 第 1 批 commit；四断言单测；README 实验性小节 | 已实施，待发布窗口 | — | — |
 | T-05 nightly fuzz 接电 + 发布标注 | 30 晚时钟自合入日起算（F.1） | nightly.yml / release.yml 重写；手动 dispatch 实证（未验证项⑤） | 已实施，待发布窗口（第 2 批 commit 0007）；30 晚时钟自合入日起算 | — | — |
 | T-06 cargo audit 周检 | 随下一 Release | audit.yml；手动 dispatch 实证（未验证项⑤） | 已实施，待发布窗口（第 2 批 commit 0008） | — | — |
-| T-07 菜单手动「检查更新」 | 门槛未达，维持 P2 | —（2026-10-20 复测 15 个资产累计 135、单版最高 35，未达门槛） | 未动工 | T-09 周快照读各 Release 资产 `download_count`（单资产 ≥100 口径） | 下一 Release 对账日 |
+| T-07 菜单手动「检查更新」 | 已实施（签发口径零网络形态） | menu.rs 固定项 + MenuIds.check_update + main.rs ShellExecuteW 分支（仅常量 URL）；新增 2 单测（固定项计数、新项文本含版本号） | 已实施，待发布窗口（第 4 批 commit 0016）；cargo check / clippy（1.90.0，windows target）exit 0；Cargo.lock 零 diff、网络依赖零新增。M13 注记：实施令口径「7→8」与现实不符——现实基线固定项已 8（stats_export 随 v0.3.19 在列），本项后为 9、突破 M13 上限 8，后续再加固定项须先评审；计数按现实断言（单测断 9）。2026-10-20 复测 15 资产累计 137（令文记 135）、单版最高 35，均未达单资产 ≥100 门槛（该门槛是 T-07 是否升自动化的判据，不阻碍本项落地） | T-09 周快照读各 Release 资产 `download_count`（单资产 ≥100 口径） | 下一 Release 对账日 |
 | T-08 蓝牙/有线触发式归因 | 事件驱动挂起（收到首份蓝牙/有线导出即归因） | — | 未动工 | — | — |
 | T-09 英文 README + Release 双语 + 周快照 | 90 天英文评审自上线日起算（F.1；起算日＝英文版合入 main，待维护者合入后登记） | `README.en-US.md`（四点勾稽：版本号 v0.3.19 / 功能分级 / 实验性小节 / 反馈链接，与中文版一致）；03 文档 D7 核验项；traffic-snapshot.yml（双抓 views + releases download_count，retention 400） | 已实施，待发布窗口（第 4 批 commit 0015）；workflow 首跑（含 GITHUB_TOKEN 对 traffic 端点实际行为、首个周快照 artifact）未验证，见未验证项⑥ | — | — |
 | T-10 README 3 秒说服力 | 随下一 Release | —（GIF 素材依赖维护者 Windows 真机，未验证项⑧） | 文字与结构已实施，待发布窗口（第 3 批 commit 0012）；GIF 素材待维护者真机录制后替换占位注释 | — | — |
