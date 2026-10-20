@@ -95,10 +95,18 @@ jobs:
           echo "---- release body ----" || true
           cat "$body_file" || true
 
+      # R1-F1 修复：append_body: true（钉版 action-gh-release@v2 原生支持，
+      # 已核 action.yml 输入清单与 src/github.ts 更新路径逻辑 L560-567：
+      # append_body 且两侧非空时 body = 既有 body + '\n' + workflow body）——
+      # Release 已存在（维护者按惯例以 annotated tag message 建 Release）时，
+      # tag message 保留为说明主体、nightly 状态行追加其后，不再被 body_path
+      # 恒覆盖。注意：同一 tag 重复触发会重复追加同一行（action concat 策略
+      # 固有，见其源码 revisit 注）；tag 一发一跑属预期形态，可接受。
       - name: upload release assets
         uses: softprops/action-gh-release@v2
         with:
           body_path: ${{ runner.temp }}/release-body.md
+          append_body: true
           files: |
             volttray/target/release/volttray-tray.exe
             volttray/target/release/volttray-tray.exe.sha256.txt
