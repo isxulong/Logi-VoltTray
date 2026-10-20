@@ -2995,7 +2995,7 @@ mod imp {
         // 非 tick 的 pump 只在内容变化（快照/配置/DPI）时重绘——事件
         // 驱动后不再存在「每 500ms 无条件刷新」的常驻开销。
         if snap_changed || (phase_tick && outcome.blinking) {
-            refresh_ui(tray, state, cache, ids);
+            refresh_ui(tray, state, cache, ids, enum_snap);
         }
 
         // 托盘图标事件：仅「左键按下」停闪（M11「单击停闪」原意）。
@@ -3013,7 +3013,7 @@ mod imp {
                 }
             );
             if stop_blink_click && state.blink.acknowledge_click() {
-                refresh_ui(tray, state, cache, ids);
+                refresh_ui(tray, state, cache, ids, enum_snap);
             }
         }
 
@@ -3049,7 +3049,7 @@ mod imp {
                     "menu toggle: blink_enabled -> {}",
                     state.blink_enabled
                 ));
-                refresh_ui(tray, state, cache, ids);
+                refresh_ui(tray, state, cache, ids, enum_snap);
             } else if e.id == ids.autostart {
                 let now_on = if state.autostart_on {
                     autostart::disable().is_ok()
@@ -3062,7 +3062,7 @@ mod imp {
                 }
                 persist_bool(cfg_path, "autostart", state.autostart_on);
                 bootlog::note(&format!("menu toggle: autostart -> {}", state.autostart_on));
-                refresh_ui(tray, state, cache, ids);
+                refresh_ui(tray, state, cache, ids, enum_snap);
             } else if e.id == ids.silent {
                 state.silent = !state.silent;
                 if let Ok(mut guard) = cfg_arc.write() {
@@ -3073,7 +3073,7 @@ mod imp {
                     "menu toggle: notification_silent -> {}",
                     state.silent
                 ));
-                refresh_ui(tray, state, cache, ids);
+                refresh_ui(tray, state, cache, ids, enum_snap);
             } else if e.id == ids.exit {
                 let _ = cmd_tx.send(IoCmd::Shutdown);
                 // WP-B（I-02 同口径）：等 IO 线程 run_stop + 双 store
@@ -3088,7 +3088,7 @@ mod imp {
                 unsafe { PostQuitMessage(0) };
             } else if let Some((_, dev_id)) = ids.device_rows.iter().find(|(mid, _)| *mid == e.id) {
                 state.pinned = Some(dev_id.clone());
-                refresh_ui(tray, state, cache, ids);
+                refresh_ui(tray, state, cache, ids, enum_snap);
             }
         }
 
@@ -3123,6 +3123,7 @@ mod imp {
         state: &mut GuiState,
         cache: &mut IconCache,
         ids: &mut crate::menu::MenuIds,
+        enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
     ) {
         let (devices, default_idx) = match &state.snapshot {
             Some(s) => (s.devices.clone(), s.default_device),
@@ -3167,6 +3168,12 @@ mod imp {
                 state.autostart_on,
                 state.silent,
             );
+            // T-04③：枚举含蓝牙/有线候选且失败、而菜单无 direct 行时，追加禁用态提示行
+            if let Ok(guard) = enum_snap.lock() {
+                if let Some(es) = guard.as_ref() {
+                    crate::menu::append_direct_enum_failure_hint(&menu_obj, &devices, Some(es));
+                }
+            }
             *ids = new_ids;
             tray.set_menu(Some(Box::new(menu_obj)));
             state.menu_sig = sig;

@@ -38,7 +38,7 @@ fn device_row_text(dev: &DeviceSnapshot) -> String {
             }
             (None, None) => "最后已知 · 电量未知".to_string(),
         };
-        return format!("{} — {}", dev.name, status);
+        return format!("{} — {}{}", dev.name, status, direct_annotation(dev));
     }
     // D-33：休眠是合法状态——显示最后已知电量并注明休眠，绝不显示「未读取/未知」。
     let status = if dev.state == "sleeping" {
@@ -55,7 +55,52 @@ fn device_row_text(dev: &DeviceSnapshot) -> String {
             None => "电量未知".to_string(),
         }
     };
-    format!("{} — {}", dev.name, status)
+    format!("{} — {}{}", dev.name, status, direct_annotation(dev))
+}
+
+/// T-04（C-F1 宽标注）：直连（蓝牙/有线）通道读不到读数（`direct &&
+/// (percent 无值 || 灰显)`）时的行尾标注。sleeping 行既有文案已含
+/// 「休眠中」、不引导导出（F-B3 文案分流，误标无效反馈清零）；其余
+/// direct 失败行（含虚拟最后已知行）统一标注引导语，把必然发生的
+/// 蓝牙首跑失败转化为反馈漏斗入口。设备行点击语义不变（钉选 +
+/// refresh_ui，零查询）。
+fn direct_annotation(dev: &DeviceSnapshot) -> &'static str {
+    if dev.link != "direct" || !(dev.percent.is_none() || dev.gray) {
+        return "";
+    }
+    if dev.state == "sleeping" {
+        ""
+    } else {
+        "（该通道未验证，读不到请用『导出诊断信息…』）"
+    }
+}
+
+/// T-04③：枚举失败兜底信息行。无 direct 设备行、且最近一次枚举快照
+/// 存在打开失败的蓝牙（BTHHID/BTHENUM）候选通道时，追加一条禁用态
+/// 信息行（不进 MenuIds、零事件分支——M13 固定项额度不含设备区行）。
+/// 判定复用 IO 侧既有 key/tag 信息（Windows 蓝牙 HID 路径 tag 含
+/// bthhid/bthenum 段），GUI 侧零设备查询。
+pub fn append_direct_enum_failure_hint(
+    menu: &Menu,
+    devices: &[DeviceSnapshot],
+    enum_snap: Option<&volttray_app::diag_export::EnumSnapshot>,
+) {
+    if devices.iter().any(|d| d.link == "direct") {
+        return;
+    }
+    let Some(snap) = enum_snap else {
+        return;
+    };
+    let bt_failed = snap.channels.iter().any(|c| {
+        let t = c.tag.to_ascii_lowercase();
+        (t.contains("bthhid") || t.contains("bthenum"))
+            && (c.open == "failed" || c.open == "cached-reopen-failed")
+    });
+    if !bt_failed {
+        return;
+    }
+    let item = MenuItem::new("蓝牙/有线通道识别失败 → 请导出诊断反馈", false, None);
+    let _ = menu.append(&item);
 }
 
 /// 构建菜单。
@@ -131,4 +176,115 @@ pub fn build_menu(
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&exit);
     (menu, ids)
+}
+
+#[cfg(test)]
+mod tests {
+    //! T-04 验收补强（F-A1 四断言）＋兜底信息行断言。menu.rs 此前无既有
+    //! 测试，本模块为纯新增。menu 依赖 tray-icon，测试由 Windows CI 承载。
+    use super::*;
+
+    fn snap(
+        id: &str,
+        name: &str,
+        link: &str,
+        percent: Option<u8>,
+        state: &str,
+        gray: bool,
+        is_virtual: bool,
+    ) -> DeviceSnapshot {
+        DeviceSnapshot {
+            id: id.to_string(),
+            name: name.to_string(),
+            percent,
+            charging: false,
+            link: link.to_string(),
+            state: state.to_string(),
+            gray,
+            source: Some("test".to_string()),
+            physical_key: Some("k".to_string()),
+            is_virtual,
+            last_seen: None,
+        }
+    }
+
+    /// 断言一：direct + percent=None 必含标注（C-F1 宽条件）。
+    #[test]
+    fn direct_no_percent_row_contains_annotation() {
+        let dev = snap("d1", "MX Keys Mini", "direct", None, "active", true, false);
+        assert!(
+            device_row_text(&dev).contains("（该通道未验证，读不到请用『导出诊断信息…』）"),
+            "direct 读不到读数必须含标注：{}",
+            device_row_text(&dev)
+        );
+    }
+
+    /// 断言二：unifying 正常设备不含标注。
+    #[test]
+    fn unifying_normal_row_has_no_annotation() {
+        let dev = snap("u1", "MX Master 3S", "unifying", Some(55), "active", false, false);
+        let text = device_row_text(&dev);
+        assert!(!text.contains("未验证"), "已验证通道不标注：{text}");
+        assert!(text.contains("55%"), "正常电量照常显示：{text}");
+    }
+
+    /// 断言三：direct + sleeping 含「休眠中」（文案分流，不引导导出）。
+    #[test]
+    fn direct_sleeping_row_says_sleeping_no_export_hint() {
+        let dev = snap("b1", "MX Anywhere 3", "direct", None, "sleeping", true, false);
+        let text = device_row_text(&dev);
+        assert!(text.contains("休眠中"), "sleeping 行含「休眠中」：{text}");
+        assert!(
+            !text.contains("导出诊断信息"),
+            "sleeping 行不引导导出：{text}"
+        );
+    }
+
+    /// 断言四：direct + 虚拟最后已知行含标注。
+    #[test]
+    fn direct_virtual_row_contains_annotation() {
+        let dev = snap("v1", "MX Keys Mini", "direct", None, "offline", true, true);
+        let text = device_row_text(&dev);
+        assert!(dev.is_virtual);
+        assert!(text.contains("（该通道未验证，读不到请用『导出诊断信息…』）"), "{text}");
+    }
+
+    /// 兜底信息行：无 direct 行且快照含 BTHHID 失败候选时追加禁用态行。
+    #[test]
+    fn hint_row_appended_when_bt_candidate_failed() {
+        use volttray_app::diag_export::{ChannelEnumResult, EnumSnapshot};
+        let menu = Menu::new();
+        let devs = vec![snap("u1", "MX Master 3S", "unifying", Some(80), "active", false, false)];
+        let snap_enum = EnumSnapshot {
+            at_ms: 1,
+            forced: false,
+            candidate_channels: 2,
+            channels: vec![ChannelEnumResult {
+                key: "C52B|vid_046d".to_string(),
+                pid: "0xC52B".to_string(),
+                tag: "vid_046d&pid_c52b".to_string(),
+                open: "ok".to_string(),
+                error: None,
+            }, ChannelEnumResult {
+                key: "0001|bthhid".to_string(),
+                pid: "0x0001".to_string(),
+                tag: "bthhid&dev_...".to_string(),
+                open: "failed".to_string(),
+                error: Some("hid open failed".to_string()),
+            }],
+            registered_slots: 1,
+            error: None,
+        };
+        append_direct_enum_failure_hint(&menu, &devs, Some(&snap_enum));
+        assert_eq!(menu.items().len(), 1, "追加一条禁用态信息行");
+    }
+
+    /// 兜底信息行：存在 direct 设备行时不追加。
+    #[test]
+    fn hint_row_skipped_when_direct_device_present() {
+        let menu = Menu::new();
+        let devs = vec![snap("d1", "MX Keys Mini", "direct", Some(70), "active", false, false)];
+        append_direct_enum_failure_hint(&menu, &devs, None);
+        assert_eq!(menu.items().len(), 0, "有 direct 行不追加");
+    }
 }
