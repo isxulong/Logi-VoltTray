@@ -132,3 +132,9 @@ jobs:
             test-ubuntu.log
           if-no-files-found: ignore
           retention-days: 7
+
+      # 第 0 步（实施令裁决）：actionlint 提示模式——先跑完本期、实测误报率后再
+      # 评审升必过（评审项已登记进 docs/experience/03-release-quality-gate.md F 节常设区）。
+      - name: actionlint (advisory mode)
+        uses: raven-actions/actionlint@v2
+        continue-on-error: true
