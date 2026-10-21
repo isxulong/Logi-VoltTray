@@ -12,14 +12,23 @@ on:
 jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
+    # nightly 首跑红修复：rust-toolchain.toml 把工具链钉在 1.90.0，rustup
+    # 目录覆盖会压过 dtolnay 的 nightly 默认——用 env 显式钉 nightly
+    # （env 优先级高于 rust-toolchain.toml），一处同修 fuzz 与
+    # protocol tests 两处名实不符（此前 protocol tests 实为 stable 跑）。
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     defaults:
       run:
         working-directory: volttray
     steps:
       - uses: actions/checkout@v4
 
-      # cargo-fuzz 需要 nightly 编译 libfuzzer
+      # cargo-fuzz 需要 nightly 编译 libfuzzer；rust-src 组件为
+      # sanitizer 插桩编译所需（-Zbuild-std 依赖，质检预检发现）
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
       # 协议层 nightly 回归：真实门禁，失败即红（此前 continue-on-error 吞错）
       - name: protocol tests on nightly
