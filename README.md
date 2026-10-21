@@ -13,7 +13,7 @@ Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键
      素材录制依赖维护者 Windows 真机，录制上线后删除本注释并替换为：
      ![托盘电量数字直显示意](docs/assets/volttray-demo.gif) -->
 
-**下载**：当前最新版为 [v0.3.19](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.19)，下载 `volttray-tray.exe`（约 1.3 MB）即可；更多历史版本见 [Releases 页](https://github.com/isxulong/Logi-VoltTray/releases)。Windows 10 / 11（x64）双击即用，免安装、免管理员权限。
+**下载**：当前最新版为 [v0.3.20](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.20)，下载 `volttray-tray.exe`（约 1.3 MB）即可；更多历史版本见 [Releases 页](https://github.com/isxulong/Logi-VoltTray/releases)。Windows 10 / 11（x64）双击即用，免安装、免管理员权限。
 
 > **未签名 EXE 首次运行可能被 Windows SmartScreen 拦截**（发布者无信誉积累）。若弹出蓝色「Windows 已保护你的电脑」提示：点「**更多信息**」→「**仍要运行**」即可放行；只放行本程序的这一个 EXE，不要据此放宽系统对其它未知程序的拦截设置。
 
