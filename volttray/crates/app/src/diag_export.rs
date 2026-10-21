@@ -524,4 +524,114 @@ mod tests {
             serde_json::from_str(&bundle_json(&missing_log("avg-none"))).unwrap();
         assert!(v2.get("avg_tx_interval_ms").is_none());
     }
+
+    /// T-02b 回归测试（A 加码）：枚举 DiagExport 全部序列化字段名并断言
+    /// 全文无 `C:\Users\<用户名段>` 残留——使审计结论
+    /// （docs/experience/05-diag-export-field-audit.md）不随结构体/依赖
+    /// 升级漂移：字段集变化时本测试失败，强制同步审计文档。
+    /// 字段值埋入单反斜杠路径（serde 输出即 JSON 转义形态，redact 规则一
+    /// 的真实处理形态）；tag 原文断言锁定「维持现状」结论（防误伤排障信息）。
+    #[test]
+    fn t02b_all_fields_enumerated_and_no_user_path_leak() {
+        let secret_user = "zhangsan_audit";
+        let device_name = "MX Master 3S Wireless Mouse (audit)";
+        let user_path = format!(r"C:\Users\{}\AppData\Roaming\LogiVoltTray", secret_user);
+        let devices = serde_json::json!([
+            {
+                "seq": 1,
+                "ts_ms": 1,
+                "layer": "app",
+                "type": "device_found",
+                "id": "046D|7&31a4c5e6&0&0000#3",
+                "name": device_name,
+            },
+            {
+                "seq": 2,
+                "ts_ms": 2,
+                "layer": "transport",
+                "type": "io_error",
+                "message": format!("hid open failed at {user_path}"),
+            },
+        ]);
+        let export = DiagExport {
+            devices,
+            devices_reason: Some(format!("path probe {user_path}")),
+            log_tail: LogTail {
+                path: user_path.clone(),
+                lines: vec![format!("persist battery to {user_path} failed")],
+                reason: Some(format!("log read failed at {user_path}")),
+            },
+            last_enum: Some(EnumSnapshot {
+                at_ms: 1_760_000_012_345,
+                forced: true,
+                candidate_channels: 1,
+                channels: vec![ChannelEnumResult {
+                    key: "C52B|7&31a4c5e6&0&0000".into(),
+                    pid: "0xC52B".into(),
+                    tag: "7&31a4c5e6&0&0000".into(),
+                    open: "failed".into(),
+                    error: Some(format!("hid open error: {user_path}")),
+                }],
+                registered_slots: 0,
+                error: Some(format!("enum failed: {user_path}")),
+            }),
+            last_enum_reason: Some(format!("enum snapshot lock poisoned at {user_path}")),
+            channel_map_miss: 0,
+            frame_tx: 0,
+            frame_rx: 0,
+            avg_tx_interval_ms: Some(12),
+            feature_index_tx: [("0x01".to_string(), 1u64)].into_iter().collect(),
+            feature_index_rx: [("0x01".to_string(), 1u64)].into_iter().collect(),
+            arm_all_fills: 0,
+            wake_successes: 0,
+            wake_miss_no_path: 0,
+            wake_miss_no_match: 0,
+            wake_miss_ambiguous: 0,
+            exported_at: 1_760_000_000,
+            app_version: "0.0.0-audit".into(),
+        };
+        let device_names = vec![device_name.to_string()];
+        let json = export.to_json_string_with(&device_names);
+
+        // ① 假用户名零残留（全文、含 JSON 转义形态）。
+        assert!(!json.contains(secret_user), "用户名残留：{json}");
+        // ② 设备名零残留。
+        assert!(!json.contains(device_name), "设备名残留：{json}");
+        // ③ <USER> 替换生效。
+        assert!(json.contains("<USER>"), "规则一未生效：{json}");
+        // ④ 字段名枚举：顶层键与审计文档 18 字段清单严格一致；
+        //    结构体字段集漂移在此失败，强制同步 05 审计文档。
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        let mut expected: Vec<&str> = [
+            "app_version",
+            "arm_all_fills",
+            "avg_tx_interval_ms",
+            "channel_map_miss",
+            "devices",
+            "devices_reason",
+            "exported_at",
+            "feature_index_rx",
+            "feature_index_tx",
+            "frame_rx",
+            "frame_tx",
+            "last_enum",
+            "last_enum_reason",
+            "log_tail",
+            "wake_miss_ambiguous",
+            "wake_miss_no_match",
+            "wake_miss_no_path",
+            "wake_successes",
+        ]
+        .into();
+        expected.sort();
+        assert_eq!(
+            keys, expected,
+            "DiagExport 序列化字段集与 05 审计文档清单不一致：{keys:?} vs {expected:?}"
+        );
+        // ⑤ 锁定 tag 维持现状（05 文档第三节①处置结论）：实例指纹
+        //    不脱敏，防未来误加规则静默破坏排障信息。
+        assert!(json.contains("7&31a4c5e6&0&0000"), "tag 原文应保留：{json}");
+    }
 }
