@@ -1,25 +1,47 @@
 name: nightly
 
-# 评审 P0-2：ubuntu + nightly 的 fuzz / 覆盖率 job 骨架。
-# 本轮仅骨架（continue-on-error）：协议层 fuzz target 在 volttray/fuzz/，
-# 覆盖率与 fuzz 语料的正式接入在后续迭代完成。
+# 评审 P0-2：ubuntu + nightly 的 fuzz / 覆盖率 job。
+# 第 2 波（week2-ci-hardening）：fuzz 从 echo 占位升级为真实 cargo-fuzz
+# 短跑（volttray/fuzz 既有 frame_fuzz harness），并摘掉 continue-on-error
+# 空转口径——job 失败即真红，不再吞错。
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch: {}
 
 jobs:
-  fuzz-coverage-skeleton:
+  fuzz-smoke:
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: volttray
     steps:
       - uses: actions/checkout@v4
+
+      # cargo-fuzz 需要 nightly 编译 libfuzzer
       - uses: dtolnay/rust-toolchain@nightly
-      - name: protocol tests on nightly（骨架：协议层先行）
-        run: cargo +nightly test -p volttray-protocol
-        continue-on-error: true
-      - name: fuzz skeleton（占位：cargo-fuzz 接入后续迭代）
-        run: 'echo "fuzz target: volttray/fuzz/fuzz_targets/frame_fuzz.rs（本轮仅骨架，见评审 P0-2）"'
+
+      # 协议层 nightly 回归：真实门禁，失败即红（此前 continue-on-error 吞错）
+      - name: protocol tests on nightly
+        run: cargo test -p volttray-protocol --locked
+
+      # fuzz 真跑（评审 P0-2 落地）：frame_fuzz harness 真实执行，时长克制
+      # （5 分钟 smoke）；发现 crash 时 cargo-fuzz 非零退出 → job 红
+      - name: install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: fuzz frame_fuzz (5min smoke)
+        working-directory: volttray/fuzz
+        run: cargo fuzz run frame_fuzz -- -max_total_time=300
+
+      # crash 时上传统料/最小化用例，供离线复现（与 ci.yml 失败日志口径一致）
+      - name: upload fuzz artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: volttray/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
