@@ -281,6 +281,9 @@ tray 层（Windows 专属代码）无法在 Linux CI 编译，上述 Windows 运
 
 ## v0.3.9
 
+> 断档说明：2026-10-14 发布时 tag 遗漏，2026-10 补打（源码提交 76625759）。
+> 补打状态（2026-10-20 登记）：五步远端序列（disable release.yml → tag v0.3.9 → cancel 存量 run → prerelease Release 无附件 → enable release.yml）待维护者执行；执行完成前，tag 与 Release 均尚未在远端存在。不重建、不分发 v0.3.9 二进制。
+
 真机「系统重启后无法识别电量（托盘 ?）、手动刷新无效」修复：HID 设备识别/查询层的重枚举与自愈。
 
 ### 根因（重启后 ? 且刷新无效的原因）
