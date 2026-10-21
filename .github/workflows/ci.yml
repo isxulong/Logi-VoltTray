@@ -6,6 +6,8 @@ on:
   # v0.3.17（一轮 P0-②）：PR 同门禁（此前仅 push main 触发，PR 零验证）
   pull_request: {}
   workflow_dispatch: {}
+  # R1 发布门禁：允许 release.yml 以 workflow_call 复用本门禁作为发布前置
+  workflow_call: {}
 
 # v0.3.17（一轮 P0-②）：fmt 不再自动回推，CI 无任何写权限需求
 permissions:

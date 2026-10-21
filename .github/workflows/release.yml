@@ -14,7 +14,35 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # R1 发布门禁①（test+clippy 前置）：build 前复用 ci.yml 全量门禁
+  # （fmt --check / clippy -D warnings / 全量 test / 协议冻结 / 构建），
+  # 任一步骤不过则发布失败。经 workflow_call 复用，口径与 main 门禁唯一。
+  ci-gate:
+    uses: ./.github/workflows/ci.yml
+
+  # R1 发布门禁②（main 祖先断言）：被 tag 的 commit 必须已存在于 main，
+  # 防止对未合入 main 的提交（如 PR 分支头 / 本地临时 tag）发布。
+  verify-tag-on-main:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: assert tagged commit is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "OK：被 tag 的 commit ${{ github.sha }} 已存在于 main"
+          else
+            echo "::error::被 tag 的 commit ${{ github.sha }} 不在 main 分支上，发布中止"
+            exit 1
+          fi
+
   build-release:
+    needs: [ci-gate, verify-tag-on-main]
     runs-on: windows-latest
     defaults:
       run:
