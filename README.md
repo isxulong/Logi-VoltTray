@@ -1,5 +1,7 @@
 # LogiVoltTray
 
+**简体中文**（主位版本，内容如有出入以本版为准） | [English](README.en-US.md)
+
 Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键盘 / 鼠标的实时电量数字，不用打开任何窗口。
 
 [![GitHub Release](https://img.shields.io/github/v/release/isxulong/Logi-VoltTray)](https://github.com/isxulong/Logi-VoltTray/releases)
