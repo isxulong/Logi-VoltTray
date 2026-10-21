@@ -18,7 +18,7 @@
 - `cargo fmt --all -- --check` 通过；
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` 零告警；
 - `cargo test --workspace --locked` 全部通过；
-- 仓库根 `bash verify.sh` 可一键跑上述三件套（可选交叉编译 check）。注：`verify.sh` 所属工具脚本随补丁批②–⑤合入生效，本批尚未入库。
+- 仓库根 `bash verify.sh` 可一键跑上述三件套（可选交叉编译 check）。
 
 ## PR 约定
 
