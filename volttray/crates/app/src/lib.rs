@@ -16,6 +16,7 @@ pub mod observer;
 pub mod persist;
 pub mod physkey;
 pub mod reconnect;
+pub mod redact;
 pub mod stats;
 pub mod wakechannel;
 

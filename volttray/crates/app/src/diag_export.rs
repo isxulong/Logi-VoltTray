@@ -152,10 +152,20 @@ pub struct DiagExport {
 }
 
 impl DiagExport {
-    /// 序列化为 JSON 文本。字段全部可序列化，此路径不会失败；
-    /// 兜底返回 `"{}"`（导出永远成功）。
+    /// 序列化为 JSON 文本（设备名不脱敏——既有语义，旧调用形态零改动）。
+    /// 字段全部可序列化，此路径不会失败；兜底返回 `"{}"`（导出永远成功）。
     pub fn to_json_string(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+        self.to_json_string_with(&[])
+    }
+
+    /// 序列化为 JSON 文本并对全文执行文本侧脱敏（T-02a）：
+    /// `C:\Users\<名>` → `<USER>`（覆盖 USERPROFILE/APPDATA/LOCALAPPDATA
+    /// 三前缀主干），设备名按出现顺序 → 「设备N」。设备名由调用方
+    /// （tray 侧 export_diag）从诊断事件流 DeviceFound 收集；锁中毒时
+    /// 收集为空数组，仅规则一生效（残余登记 T-02b 审计与对账跟踪）。
+    pub fn to_json_string_with(&self, device_names: &[String]) -> String {
+        let raw = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string());
+        crate::redact::redact_text(&raw, device_names)
     }
 }
 

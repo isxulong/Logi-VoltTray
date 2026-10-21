@@ -2229,15 +2229,14 @@ mod imp {
     }
 
     /// tmp→rename 落盘（WP-B JSON/HTML 副产物）：写中途失败不留半截目标
-    /// 文件；失败清 tmp。Windows 下 rename 不覆盖既有文件，先删后改
-    ///（目标已存在 = 用户在 Save-As 覆盖确认过同主干文件）。
+    /// 文件；失败清 tmp。rename 在 Windows 上原子覆盖既有目标，失败时
+    /// 旧文件保留、错误向上返回。
     pub(crate) fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
         let mut tmp_os = path.as_os_str().to_owned();
         tmp_os.push(".tmp");
         let tmp = PathBuf::from(tmp_os);
         let result = (|| {
             std::fs::write(&tmp, content)?;
-            let _ = std::fs::remove_file(path);
             std::fs::rename(&tmp, path)
         })();
         if result.is_err() {
@@ -3332,11 +3331,25 @@ mod imp {
         channel_map_miss: &Arc<AtomicU64>,
     ) {
         // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
-        let (devices, devices_reason) = match observer.lock() {
-            Ok(o) => (o.export_value(true), None),
+        // T-02a：同一次持锁内顺带收集设备名（事件流 DeviceFound；EnumSnapshot
+        // 本身无设备名字段——快照侧无名可取，事件流为唯一来源；锁中毒时收集为
+        // 空数组，仅 <USER> 规则生效，残余登记 T-02b 审计与对账跟踪）。
+        let (devices, devices_reason, device_names) = match observer.lock() {
+            Ok(o) => {
+                let mut names: Vec<String> = Vec::new();
+                for ev in o.events() {
+                    if let DiagKind::DeviceFound { name, .. } = &ev.kind {
+                        if !name.is_empty() && !names.iter().any(|n| n == name) {
+                            names.push(name.clone());
+                        }
+                    }
+                }
+                (o.export_value(true), None, names)
+            }
             Err(_) => (
                 serde_json::Value::Array(Vec::new()),
                 Some("observer lock poisoned".to_string()),
+                Vec::new(),
             ),
         };
         // log_tail：bootlog 登记的真实日志路径（APPDATA → EXE 目录 → TEMP
@@ -3374,7 +3387,7 @@ mod imp {
             exported_at,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
-        .to_json_string();
+        .to_json_string_with(&device_names);
         // v0.3.15：保存位置由用户经「另存为」对话框自选；取消则不写任何
         // 文件、不弹错误，仅留 bootlog。导出文件由用户自行管理——本路径
         // 不做任何自动清理（含 %APPDATA% 下的历史导出文件）。
@@ -3585,6 +3598,51 @@ mod imp {
             assert_eq!(std::fs::read(&old1).unwrap(), b"{\"old\":1}");
             assert_eq!(std::fs::read(&old2).unwrap(), b"{\"old\":2}");
             assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep me");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// T-01(a) 故障注入：rename 失败时旧目标逐字节保留、返回 Err、
+        /// tmp 被清理。注入形态＝目标被目录占位（Linux EISDIR / Windows
+        /// Access Denied，跨平台必失败；Windows 句柄占用形态不可移植构造，
+        /// 由 CI windows 环境承载）。
+        #[test]
+        fn write_tmp_rename_failure_keeps_old_target_and_cleans_tmp() {
+            let root = temp_root("t01a");
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("target.json");
+            std::fs::create_dir(&path).unwrap();
+            let inner = path.join("keep.txt");
+            std::fs::write(&inner, b"old-bytes").unwrap();
+            let result = write_tmp_rename(&path, "new-content");
+            assert!(result.is_err(), "rename 到目录占位目标必须返回 Err");
+            assert!(inner.is_file(), "旧目标（目录形态及其内容）必须保留");
+            assert_eq!(
+                std::fs::read(&inner).unwrap(),
+                b"old-bytes",
+                "旧目标逐字节保留"
+            );
+            assert!(
+                !root.join("target.json.tmp").exists(),
+                "失败后 tmp 必须被清理"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// T-01(b) 原子性：目标已存在时覆盖写，任何可观察时刻目标存在且
+        /// 内容完整——成功＝新值；成功后无 tmp 残留（失败＝旧值由 (a) 承载）。
+        #[test]
+        fn write_tmp_rename_overwrite_is_atomic() {
+            let root = temp_root("t01b");
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("target.json");
+            std::fs::write(&path, "old-content").unwrap();
+            write_tmp_rename(&path, "new-content").expect("覆盖写必须成功");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "new-content",
+                "成功后目标＝新值"
+            );
+            assert!(!root.join("target.json.tmp").exists(), "成功后无 tmp 残留");
             let _ = std::fs::remove_dir_all(&root);
         }
     }

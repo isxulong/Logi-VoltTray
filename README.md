@@ -1,10 +1,21 @@
 # LogiVoltTray
 
+**简体中文**（主位版本，内容如有出入以本版为准） | [English](README.en-US.md)
+
 Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键盘 / 鼠标的实时电量数字，不用打开任何窗口。
 
 [![GitHub Release](https://img.shields.io/github/v/release/isxulong/Logi-VoltTray)](https://github.com/isxulong/Logi-VoltTray/releases)
 
+官方软件没有托盘电量数字——这个软件补上：电量百分比直接画在系统托盘图标上，开窗口、进设置页都不用。
+
+<!-- TODO(T-10 施工项，实施令未验证项⑧)：此处嵌入托盘电量数字直显 GIF
+     （≤3 秒、循环、<2MB，存放 docs/assets/volttray-demo.gif）。
+     素材录制依赖维护者 Windows 真机，录制上线后删除本注释并替换为：
+     ![托盘电量数字直显示意](docs/assets/volttray-demo.gif) -->
+
 **下载**：当前最新版为 [v0.3.19](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.19)，下载 `volttray-tray.exe`（约 1.3 MB）即可；更多历史版本见 [Releases 页](https://github.com/isxulong/Logi-VoltTray/releases)。Windows 10 / 11（x64）双击即用，免安装、免管理员权限。
+
+> **未签名 EXE 首次运行可能被 Windows SmartScreen 拦截**（发布者无信誉积累）。若弹出蓝色「Windows 已保护你的电脑」提示：点「**更多信息**」→「**仍要运行**」即可放行；只放行本程序的这一个 EXE，不要据此放宽系统对其它未知程序的拦截设置。
 
 ## 功能列表
 
@@ -55,6 +66,8 @@ Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键
 
 - **运行日志** `%APPDATA%\LogiVoltTray\logi-volttray.log`：从启动第一阶段就开始记录（含配置加载警告、启动失败原因），即使是「双击没反应」这类启动即退的场景也有留痕。设置应用（逐项差异）、闪烁启停（含停止原因）、通知派发 / 静音 / 失败等事件也都记录在内。
 - **诊断导出**：右键菜单「导出诊断信息…」→「另存为」对话框自选位置保存 `LogiVoltTray-diag-export-<时间戳>.json`（v0.3.15 起；更早版本为写入配置目录并弹窗告知路径）：脱敏后的诊断事件流（序列号等已打码，记录了每个通道、每个设备槽位的握手与电量查询结果）+ 最近一次设备枚举快照 + 运行日志末尾约 200 行。反馈问题时请附上这份文件。
+- **隐私披露（v0.3.20 起）**：诊断导出自 v0.3.20 起自动将导出文本中的本机用户名（`C:\Users\<名>` 路径段）替换为 `<USER>`，设备名按出现顺序替换为「设备N」。此前版本导出的文件可能含本机用户名与设备名，请在提交前自行检查删除。
+- **反馈渠道**：问题请通过 [issues](https://github.com/isxulong/Logi-VoltTray/issues) 提交（有 bug-report 模板引导，请附上『导出诊断信息…』产生的 JSON 文件）。若导出文件来自 v0.3.20 之前版本，可能含本机用户名，请在提交前删除该字段。
 
 ## 设计理念
 
@@ -75,6 +88,8 @@ cargo build --release --locked -p volttray-tray
 产物为 `volttray\target\release\volttray-tray.exe`。要求 Rust stable（仓库 `rust-toolchain.toml` 锁定 1.90.0，`rustup` 会自动按此安装）与 MSVC 构建环境。
 
 **云端构建**：推送到 `main` 即触发 CI（windows-latest）：`cargo fmt --check`（不一致即失败、作者本地修复）、`clippy -D warnings`、全量测试、`cargo build --release --locked` 并把 EXE 作为 artifact 上传；Releases 页的安装包即由此流水线产出。本地没有 Rust 环境时，fork 后 push 即可在云端取到 EXE。
+
+**唯一分发形态为 Rust 版 `volttray-tray.exe`**。仓库根的 `logi_*.py` 是受维护的协议参考实现与黄金向量生成器（`volttray/fixtures/gen_golden.py` 产出 `fixtures/golden/` 向量，CI 每轮以 `python -m unittest discover -s tests` 跑协议冻结测试），不再经独立流水线产出 Python 版 EXE。
 
 ## 经验知识库
 

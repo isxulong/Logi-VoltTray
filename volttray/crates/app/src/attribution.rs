@@ -761,10 +761,10 @@ fn build_recent_rates(
 }
 
 // ---------------------------------------------------------------------------
-// CSV 导出（蓝队场景 9 列 schema，AC-B2 对账基准；UTF-8 with BOM）
+// CSV 导出（蓝队场景 11 列 schema，AC-B2 对账基准；UTF-8 with BOM）
 // ---------------------------------------------------------------------------
 
-/// CSV 表头（13 列；空态 0 段时仅输出本行，R5-P-03）。
+/// CSV 表头（11 列；空态 0 段时仅输出本行，R5-P-03）。
 pub const CSV_HEADER: &str = "device_key,display_name,segment_type,start_ts,end_ts,duration_min,start_pct,end_pct,delta_pct,rate_pct_per_hour,note";
 
 /// CSV 字段转义（含 `,` `"` 换行时加引号、内引号双写）。

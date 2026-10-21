@@ -1,0 +1,104 @@
+name: traffic-snapshot
+
+# T-09（实施令 P2，2026-10-20）：访问数据周快照——单次快照双抓（C 裁决吸收 A）。
+# - cron 周一 05:43 UTC（与 audit 周检 04:37、nightly 00:2x 全部错峰整点）；
+# - 双抓一：traffic/views（平台访问数据。官方文档口径：仅返回最近 14 天
+#   （https://docs.github.com/en/rest/metrics/traffic —— "Get the total
+#   number of views and breakdown per day or week for the last 14 days"），
+#   平台不留历史，故每周快照落 artifact、retention-days: 400 长期留存）；
+# - 双抓二：releases 各资产 download_count（T-07「检查更新」门槛＝单资产
+#   ≥100 下载的唯一数据源。2026-10-20 基线实测：11 个 release、15 个资产、
+#   累计 137、单版最高 35——未达门槛，T-07 维持 P2）；
+# - 施工第一步实测（2026-10-20）：fine-grained PAT 对 traffic/views 返回
+#   403 "Resource not accessible by personal access token"（官方口径：该
+#   端点要求 repo Administration 读取权限）；GITHUB_TOKEN 同级权限预计
+#   同样 403——以首次实跑结果为准，403 不算红，如实写入快照 JSON 的
+#   traffic_error 字段（未验证项⑥：GITHUB_TOKEN 行为待首跑实证）；
+# - 退化路径（traffic 侧 403 时）：views 数据退化为维护者用带
+#   Administration 读取权限的 PAT 手动 `gh api repos/isxulong/Logi-VoltTray/traffic/views`
+#   + 人工归档进 docs（约 5 分钟/周）；releases 侧 download_count 用
+#   GITHUB_TOKEN 即可抓取（2026-10-20 实测可读），周快照照常产出，
+#   T-07 门槛取证不中断；
+# - 不开单（N-2 仅覆盖 nightly/audit 两类红；本 workflow 产出数据快照，
+#   无红类）、不装第三方工具（纯 curl + jq，ubuntu-latest 预装件）。
+on:
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read # 只读仓库即可（API 走 GITHUB_TOKEN，releases 端点公开可读）
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 双抓一：traffic/views。403 预期可达——写入 traffic_error 字段继续，
+      # 不让整个快照失败（快照的价值一半在 releases 侧）。
+      - name: fetch traffic/views (403-tolerant)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o traffic_raw.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/traffic/views") || code="000"
+          echo "traffic/views HTTP ${code}"
+          if [ "$code" = "200" ]; then
+            jq '{views: .}' traffic_raw.json > traffic_part.json
+          else
+            msg=$(jq -r '.message // empty' traffic_raw.json 2>/dev/null || echo "no body")
+            jq -n --arg code "$code" --arg msg "$msg" \
+              '{traffic_error: ("HTTP " + $code + (if $msg != "" then ": " + $msg else "" end))}' \
+              > traffic_part.json
+          fi
+
+      # 双抓二：releases 各资产 download_count（T-07 门槛唯一数据源，
+      # 2026-10-20 实测 GITHUB_TOKEN 同级权限可读）。
+      - name: fetch releases download_count
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          page=1
+          : > releases_raw.jsonl
+          while :; do
+            body=$(curl -sS -f \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100&page=${page}")
+            echo "$body" >> releases_raw.jsonl
+            n=$(echo "$body" | jq 'length')
+            [ "$n" -lt 100 ] && break
+            page=$((page+1))
+          done
+          jq -s 'add | [
+            .[] | select(. != null)
+            | {tag: .tag_name, prerelease: .prerelease,
+               assets: [.assets[] | {name, download_count}]}
+          ] | {releases: ., snapshot_at: (now | todate)}' releases_raw.jsonl \
+            > releases_part.json
+
+      # 合并单次快照 JSON：views 与 releases 字段齐备（实施令验证口径）。
+      - name: merge snapshot json
+        shell: bash
+        run: |
+          jq -s '.[0] * .[1]' traffic_part.json releases_part.json \
+            > traffic-snapshot.json
+          jq . traffic-snapshot.json
+          total=$(jq '[.. | objects | select(has("download_count")) | .download_count] | add // 0' traffic-snapshot.json)
+          peak=$(jq '[.. | objects | select(has("download_count")) | .download_count] | max // 0' traffic-snapshot.json)
+          echo "T-07 门槛读数：累计 ${total}、单资产最高 ${peak}（门槛＝单资产 ≥100）"
+
+      - name: upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: traffic-snapshot-${{ github.run_id }}
+          path: traffic-snapshot.json
+          retention-days: 400
+          if-no-files-found: error

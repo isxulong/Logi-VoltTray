@@ -15,7 +15,7 @@ Logi-VoltTray/
 ├── logi_*.py, red/, tests/   # 早期 Python 参考实现与协议逻辑测试
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
 ├── .github/workflows/        # ci.yml（fmt --check + clippy + 测试 + 构建）
-│                             # build-logi.yml / nightly.yml / bootstrap-lock.yml
+│                             # nightly.yml / bootstrap-lock.yml
 ├── docs/
 │   └── experience/           # 本知识库（仓库根级 docs/experience/）
 └── volttray/                 # 现行工程：Rust workspace（5 crates）
