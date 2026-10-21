@@ -92,6 +92,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu 首跑实证（PR #2 CI）：transport 默认特性 hid 把 optional
+      # hidapi 拉入全平台构建，其 build.rs 需要系统库 libudev——windows-only
+      # CI 的盲区，新门禁立功。方案 A：安装系统依赖，留在本波纯 CI 配置范围；
+      # transport 特性门控优化（方案 B）属代码级改动，记入后续波次。
+      - name: install system deps (libudev for hidapi)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt, clippy
