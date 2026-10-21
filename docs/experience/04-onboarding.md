@@ -130,7 +130,7 @@ cargo build --release --locked -p volttray-tray
 
 ## 10. 已知文档滞后点（以代码为准）
 
-- （该滞后已消除：根 README 下载区 2026-10-19 核指向 v0.3.19；若再滞后，找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`。）
+- 根 README 下载区滞后核销机制：找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`；每次发布对账时按此复核并登记核销项（本次核销：2026-10-22 核指向 v0.3.20）。
 - 轮询档位曾长期存在文档旧口径（60/300/600/900/1800 秒），现已统一为 `crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
 - 「30 秒槽位扫描」旧文档表述为「每 30 秒例行枚举」，实际是嵌在枚举循环内、外层每次迭代才查门限：空闲时一个轮询周期至多扫一次（v0.3.15 起文档口径已修正，定性见 [01 E18](01-engineering-lessons.md#e18-托盘应用性能审查先定性每个周期唤醒几次查几次画几次再谈优化)）。
 
@@ -159,5 +159,5 @@ cargo build --release --locked -p volttray-tray
 
 1. 读本文件 + 根 README，装环境跑通构建与全量测试；
 2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复）、D-72 ~ D-83（v0.3.16–v0.3.19 设计包落地与发布修复主线），理解主战场；
-3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 11 条（E1–E6 + E16–E20），把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
+3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 18 条（E1–E6、E16–E20、E27–E33），把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
 4. 接到用户报障时先走 §7 排查入口；领任务前读 [02 协作方法论](02-collaboration-playbook.md)，交付前照 [03 门禁清单](03-release-quality-gate.md) 自查。
