@@ -80,3 +80,48 @@ jobs:
             test.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # 第 2 波（week2-ci-hardening）：Ubuntu 门禁——与 windows job 并行，
+  # fmt/clippy/test 全集，消除单平台盲区（tray 的 Windows-only 依赖均在
+  # cfg(windows) 下门控，workspace 跨平台可编译）。
+  ubuntu:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: volttray
+
+      - name: fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee ../clippy-ubuntu.log
+
+      - name: test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee ../test-ubuntu.log
+
+      - name: upload logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-ubuntu
+          path: |
+            clippy-ubuntu.log
+            test-ubuntu.log
+          if-no-files-found: ignore
+          retention-days: 7
