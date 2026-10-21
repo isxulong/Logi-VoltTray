@@ -24,8 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # cargo-fuzz 需要 nightly 编译 libfuzzer；rust-src 组件为
-      # sanitizer 插桩编译所需（-Zbuild-std 依赖，质检预检发现）
+      # cargo-fuzz 需要 nightly 编译 libfuzzer；rust-src 为 cargo-fuzz
+      # 夜间构建常规依赖组件，保留（实际 build 未用 -Zbuild-std——
+      # 此前「rust-src 为 -Zbuild-std 插桩所需」系质检基于 musl 报错的
+      # 误判，质检已自我更正）
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
@@ -41,9 +43,14 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      # 显式钉 gnu target：taiki-e 装的是 musl 预编译版 cargo-fuzz，其
+      # 默认 --target 取编译期平台即 musl，而 ASan 与 musl 静态 libc
+      # 不兼容（nightly 重跑 fuzz 编译即死，质检已定位至 cargo-fuzz
+      # v0.13.2 src/options.rs L101）。nightly 自带 host gnu 的
+      # rust-std，glibc 动态链接与 ASan 兼容。
       - name: fuzz frame_fuzz (5min smoke)
         working-directory: volttray/fuzz
-        run: cargo fuzz run frame_fuzz -- -max_total_time=300
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu frame_fuzz -- -max_total_time=300
 
       # crash 时上传统料/最小化用例，供离线复现（与 ci.yml 失败日志口径一致）
       - name: upload fuzz artifacts (on failure)
