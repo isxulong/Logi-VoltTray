@@ -52,6 +52,13 @@ cargo build --release --locked -p volttray-tray
 - release profile：体积优先（`opt-level="z"` + LTO + 单 codegen unit + strip，单文件 EXE ≤ 5MB 目标）；**`panic = "unwind"` 是有意选择**（PRD 要求 GUI 边界用 `catch_unwind`，不能开 abort——这也是 E1 中「线程 panic 进程不死」的制度背景）。
 - 无本地 Rust 环境时：fork 后 push 触发 CI，从云端 artifact 取 EXE。
 
+### 本地与 CI 工具导读
+
+- **verify.sh（本地一键自检）**：仓库根 `bash verify.sh`（`--quick` 跳过交叉编译 check）一键跑 PR 门禁三件套——`cargo fmt --check` / `clippy -D warnings` / `cargo test --locked`——外加 release 目标交叉编译 check 与 commit trailer 契约 lint（提示模式）。脚本只读、不改任何文件；覆盖范围声明见脚本头注释（windows 真机环境、协议冻结 python 测试等不在其覆盖范围，完整门禁以 CI 为准）。
+- **fuzz（协议帧模糊测试）**：`volttray/fuzz/`（cargo-fuzz），目标 `frame_fuzz` 打协议帧解析，本地跑 `cargo fuzz run frame_fuzz`（需 nightly 工具链）；`.github/workflows/nightly.yml` 每晚自动跑 5 分钟真实烟测，失败自动开单。「30 晚」时钟自该 workflow 合入日起算，判据与时钟挂载见 [06 F.1](06-release-reconciliation.md)。
+- **fixtures 再生成**：协议黄金样例与测试数据由 `volttray/fixtures/gen_golden.py` 生成（产出 `fixtures/golden/` 向量等），协议编解码行为改动后重跑该脚本再生成，勿手改 golden 文件。
+- **audit.yml 周检结果查看**：cargo audit 供应链周检（`.github/workflows/audit.yml`，每周一跑），结果在仓库 Actions 页的 audit 工作流运行记录中查看；扫描失败或发现漏洞均自动开单（label 查重防噪）。
+
 ## 4. 测试与验证分层
 
 | 层 | 能在哪跑 | 验证方式 |
@@ -124,7 +131,14 @@ cargo build --release --locked -p volttray-tray
 | `volttray/docs/decisions.md`（D-01 ~ D-83） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | [本知识库 01](01-engineering-lessons.md) | 事故教训三段式 |
+| [本知识库 02](02-collaboration-playbook.md) | 证据优于自述、红蓝对抗、收口纪律等协作方法论（E7–E14、E21–E26、E34） |
 | [本知识库 03](03-release-quality-gate.md) | 发布前逐条核验 |
+| [本知识库 05](05-diag-export-field-audit.md) | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
+| [本知识库 06](06-release-reconciliation.md) | 发布对账机制与本期对账表（内部维护区，外部读者可忽略） |
+| [`docs/naming-risk-assessment.md`](../naming-risk-assessment.md) | 商标与命名 go/no-go 评估载体（T-14，结论待维护者裁决） |
+| [`CONTRIBUTING.md`](../../CONTRIBUTING.md) | 贡献指南：提交规范、PR 自检清单与行为红线 |
+| [`SECURITY.md`](../../SECURITY.md) | 安全策略：报告渠道、范围声明与供应链 |
+| [`verify.sh`](../../verify.sh) | 本地推送前一键三件套自检（fmt / clippy / test + 交叉 check） |
 
 **关于 PRD 与蓝图**：`decisions.md`、`Cargo.toml` 注释中引用的「PRD」「蓝图」是早期产品文档，**未入库**（全仓检索无对应文件）；决策的权威落点是 `decisions.md` 本身，这些引用视为历史出处标注，找不到原文不影响使用本知识库。
 
