@@ -3331,11 +3331,25 @@ mod imp {
         channel_map_miss: &Arc<AtomicU64>,
     ) {
         // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
-        let (devices, devices_reason) = match observer.lock() {
-            Ok(o) => (o.export_value(true), None),
+        // T-02a：同一次持锁内顺带收集设备名（事件流 DeviceFound；EnumSnapshot
+        // 本身无设备名字段——快照侧无名可取，事件流为唯一来源；锁中毒时收集为
+        // 空数组，仅 <USER> 规则生效，残余登记 T-02b 审计与对账跟踪）。
+        let (devices, devices_reason, device_names) = match observer.lock() {
+            Ok(o) => {
+                let mut names: Vec<String> = Vec::new();
+                for ev in o.events() {
+                    if let DiagKind::DeviceFound { name, .. } = &ev.kind {
+                        if !name.is_empty() && !names.iter().any(|n| n == name) {
+                            names.push(name.clone());
+                        }
+                    }
+                }
+                (o.export_value(true), None, names)
+            }
             Err(_) => (
                 serde_json::Value::Array(Vec::new()),
                 Some("observer lock poisoned".to_string()),
+                Vec::new(),
             ),
         };
         // log_tail：bootlog 登记的真实日志路径（APPDATA → EXE 目录 → TEMP
@@ -3373,7 +3387,7 @@ mod imp {
             exported_at,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         }
-        .to_json_string();
+        .to_json_string_with(&device_names);
         // v0.3.15：保存位置由用户经「另存为」对话框自选；取消则不写任何
         // 文件、不弹错误，仅留 bootlog。导出文件由用户自行管理——本路径
         // 不做任何自动清理（含 %APPDATA% 下的历史导出文件）。
