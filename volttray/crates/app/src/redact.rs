@@ -84,7 +84,10 @@ mod tests {
     fn redacts_username_in_json_escaped_paths() {
         let input = r#"{"log_tail":{"path":"C:\\Users\\zhangsan\\AppData\\Roaming\\LogiVoltTray\\logi-volttray.log","lines":["ok"]},"app_version":"0.3.19"}"#;
         let out = redact_text(input, &[]);
-        assert!(out.contains(r#"C:\\Users\\<USER>\\"#), "用户名段必须替换为 <USER>");
+        assert!(
+            out.contains(r#"C:\\Users\\<USER>\\"#),
+            "用户名段必须替换为 <USER>"
+        );
         assert!(!out.contains("zhangsan"), "不得残留原用户名");
         assert!(
             out.contains(r#""app_version":"0.3.19""#),
@@ -114,7 +117,10 @@ mod tests {
         assert!(out.contains("设备2"), "第二个设备名 → 设备2");
         assert!(!out.contains("MX Master"), "不得残留设备名");
         assert!(!out.contains("MX Keys"), "不得残留设备名");
-        assert!(out.contains("\"devices\":[{\"name\":\""), "JSON 结构其余字符保留");
+        assert!(
+            out.contains("\"devices\":[{\"name\":\""),
+            "JSON 结构其余字符保留"
+        );
     }
 
     /// 无匹配时不改一个字符（恒等）；空设备名不产生替换。

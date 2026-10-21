@@ -3615,10 +3615,7 @@ mod imp {
             std::fs::write(&inner, b"old-bytes").unwrap();
             let result = write_tmp_rename(&path, "new-content");
             assert!(result.is_err(), "rename 到目录占位目标必须返回 Err");
-            assert!(
-                inner.is_file(),
-                "旧目标（目录形态及其内容）必须保留"
-            );
+            assert!(inner.is_file(), "旧目标（目录形态及其内容）必须保留");
             assert_eq!(
                 std::fs::read(&inner).unwrap(),
                 b"old-bytes",
@@ -3645,10 +3642,7 @@ mod imp {
                 "new-content",
                 "成功后目标＝新值"
             );
-            assert!(
-                !root.join("target.json.tmp").exists(),
-                "成功后无 tmp 残留"
-            );
+            assert!(!root.join("target.json.tmp").exists(), "成功后无 tmp 残留");
             let _ = std::fs::remove_dir_all(&root);
         }
     }
