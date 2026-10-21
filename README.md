@@ -89,6 +89,8 @@ cargo build --release --locked -p volttray-tray
 
 **云端构建**：推送到 `main` 即触发 CI（windows-latest）：`cargo fmt --check`（不一致即失败、作者本地修复）、`clippy -D warnings`、全量测试、`cargo build --release --locked` 并把 EXE 作为 artifact 上传；Releases 页的安装包即由此流水线产出。本地没有 Rust 环境时，fork 后 push 即可在云端取到 EXE。
 
+**唯一分发形态为 Rust 版 `volttray-tray.exe`**。仓库根的 `logi_*.py` 是受维护的协议参考实现与黄金向量生成器（`volttray/fixtures/gen_golden.py` 产出 `fixtures/golden/` 向量，CI 每轮以 `python -m unittest discover -s tests` 跑协议冻结测试），不再经独立流水线产出 Python 版 EXE。
+
 ## 经验知识库
 
 [docs/experience](https://github.com/isxulong/Logi-VoltTray/tree/main/docs/experience) 沉淀了本项目真实迭代中的工程经验教训、协作与流程方法论、发布质量门禁清单和新手（含新加入的 AI）上手指引：想了解某个设计背后的真机教训、发布前该逐条核对什么，或快速上手本项目，从 [docs/experience/README.md](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/README.md) 的文件导航表进入即可。
