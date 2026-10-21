@@ -116,28 +116,28 @@
    对账区、常设区保留（F-A3）；
 3. 不建每周常设对账（K-6）。
 
-对账表（状态口径：2026-10-20 第 2 批实施时点；「取证动作/复核日期」登记位
+对账表（状态口径：2026-10-20 第 3 批前半实施时点，第 1/2 批行已随各自批次实施刷新；「取证动作/复核日期」登记位
 按 N-3 规则行填写，未降级条目留「—」）：
 
 | 条款 | 截止 | 验收证据 | 状态 | 取证动作 | 复核日期 |
 | --- | --- | --- | --- | --- | --- |
 | T-01 配置写丢档窗口消除 | 随下一 Release | 本地分支 commit（第 1 批）；release notes 标注该修复 | 已实施，待发布窗口 | — | — |
 | T-02a 诊断导出文本侧脱敏 | 随下一 Release | 第 1 批 commit；redact 4 单测真跑通过；三载体披露 | 已实施，待发布窗口；残余（锁中毒时设备名收集为空）随本 Release 对账跟踪（F-A2 升级登记） | — | — |
-| T-02b 诊断导出全文审计 | 随下一 Release | `05-diag-export-field-audit.md` + 字段名回归测试 | 本批实施中 | — | — |
+| T-02b 诊断导出全文审计 | 随下一 Release | `05-diag-export-field-audit.md` + 字段名回归测试 | 已实施，待发布窗口（第 2 批 commit 0009） | — | — |
 | T-03+T-16 反馈通路四件套 | 随下一 Release | 第 1 批 commit（模板/README/CONTRIBUTING/SECURITY） | 已实施，待发布窗口 | — | — |
 | T-04 功能分级标注 | 随下一 Release | 第 1 批 commit；四断言单测；README 实验性小节 | 已实施，待发布窗口 | — | — |
-| T-05 nightly fuzz 接电 + 发布标注 | 30 晚时钟自合入日起算（F.1） | nightly.yml / release.yml 重写；手动 dispatch 实证（未验证项⑤） | 本批实施中 | — | — |
-| T-06 cargo audit 周检 | 随下一 Release | audit.yml；手动 dispatch 实证（未验证项⑤） | 本批实施中 | — | — |
+| T-05 nightly fuzz 接电 + 发布标注 | 30 晚时钟自合入日起算（F.1） | nightly.yml / release.yml 重写；手动 dispatch 实证（未验证项⑤） | 已实施，待发布窗口（第 2 批 commit 0007）；30 晚时钟自合入日起算 | — | — |
+| T-06 cargo audit 周检 | 随下一 Release | audit.yml；手动 dispatch 实证（未验证项⑤） | 已实施，待发布窗口（第 2 批 commit 0008） | — | — |
 | T-07 菜单手动「检查更新」 | 门槛未达，维持 P2 | —（2026-10-20 复测 15 个资产累计 135、单版最高 35，未达门槛） | 未动工 | T-09 周快照读各 Release 资产 `download_count`（单资产 ≥100 口径） | 下一 Release 对账日 |
 | T-08 蓝牙/有线触发式归因 | 事件驱动挂起（收到首份蓝牙/有线导出即归因） | — | 未动工 | — | — |
 | T-09 英文 README + Release 双语 + 周快照 | 90 天英文评审自上线日起算（F.1） | — | 未动工 | — | — |
 | T-10 README 3 秒说服力 | 随下一 Release | —（GIF 素材依赖维护者 Windows 真机，未验证项⑧） | 未动工 | — | — |
 | T-11 v0.3.9 断档收口 | 建议 T-07 合入前完成 | —（远端五步序列需维护者操作，实施代理禁 push） | 未动工 | — | — |
-| T-12 经验库时间线修正 | 随下一 Release | docs/experience/README.md 补一句 | 未动工 | — | — |
+| T-12 经验库时间线修正 | 随下一 Release | docs/experience/README.md 补一句 | 已实施，待发布窗口（第 3 批 commit 0010） | — | — |
 | T-14 商标与命名评估 | 本期 Release 日 + 30 天（逾期自动关闭并记录） | `docs/naming-risk-assessment.md` | 未动工 | — | — |
 | T-15 下载段诚实披露 | 随下一 Release | README 下载段 + 本文件 D 段核验项 | 未动工 | — | — |
-| N-1 执行对账表（本节） | 随下一 Release | 本节 F.1 / F.2 | 本批实施中 | — | — |
-| N-2 失败自动开单 | 随下一 Release | nightly.yml / audit.yml 开单步（label 查重） | 本批实施中 | — | — |
-| N-3 降级必附取证 | 随下一 Release | F.1 规则行 + T-07 首条登记 | 本批实施中 | — | — |
+| N-1 执行对账表（本节） | 随下一 Release | 本节 F.1 / F.2 | 滚动维护中（随批刷新状态） | — | — |
+| N-2 失败自动开单 | 随下一 Release | nightly.yml / audit.yml 开单步（label 查重） | 已实施，待发布窗口（第 2 批 commit 0007/0008） | — | — |
+| N-3 降级必附取证 | 随下一 Release | F.1 规则行 + T-07 首条登记 | 已实施，待发布窗口（第 2 批 commit 0006） | — | — |
 | T-13（砍除留痕，不立条） | — | F.1 留痕句原文 | 留痕 | — | — |
 | N-4（撤回留痕，不立条） | — | F.1 留痕句原文 | 留痕 | — | — |
