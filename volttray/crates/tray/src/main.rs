@@ -855,8 +855,24 @@ mod imp {
         // WP-A（v3 A-1/A-1b）：last_known.json 持久化——启动加载（损坏
         // 回退 .bak 由 store 内部处理），随后把最后已知读数播种为虚拟条目
         // （重启即可灰显最后已知电量，零查询、next_due 恒 None）。
-        let (mut store, load_outcome) =
-            LastKnownStore::load(persist::default_path(), FlushTuning::default());
+        // 相位二（第 4 项）：experimental_persist_last_known=false 时整体
+        // 停用——不加载存量（不触发 .bak 改名副作用）、不播种、不落盘。
+        // 开关在启动时读取一次，运行期改配置需重启生效（设置页已标注）。
+        let persist_enabled = core
+            .lock()
+            .map(|c| c.config().experimental_persist_last_known)
+            .unwrap_or(true);
+        let (mut store, load_outcome) = if persist_enabled {
+            LastKnownStore::load(persist::default_path(), FlushTuning::default())
+        } else {
+            bootlog::note(
+                "experimental: persist_last_known OFF — last_known.json disabled (no load, no seeding, no writes)",
+            );
+            (
+                LastKnownStore::disabled(persist::default_path()),
+                LoadOutcome::Empty,
+            )
+        };
         match load_outcome {
             LoadOutcome::Empty => bootlog::note("last_known.json: no usable store (fresh start)"),
             LoadOutcome::Loaded(n) => {
@@ -882,10 +898,26 @@ mod imp {
         // WP-B（v3 B-1）：stats.jsonl 落盘协调器——与 last_known 同
         // FlushTuning 容错（tmp→rename 原子写、半截行截断修复）。启动即落
         // run_start 生命周期事件（每次运行 2 行之一，缓冲待节流落盘）。
-        let (mut stats_store, stats_load) = volttray_app::stats::StatsStore::load(
-            &volttray_app::stats::default_dir(),
-            FlushTuning::default(),
-        );
+        // 相位二（第 4 项）：experimental_stats=false 时整体停用——不加载、
+        // 不记录、不落盘（store 入口全 no-op）。启动时读取一次，重启生效。
+        let stats_enabled = core
+            .lock()
+            .map(|c| c.config().experimental_stats)
+            .unwrap_or(true);
+        let (mut stats_store, stats_load) = if stats_enabled {
+            volttray_app::stats::StatsStore::load(
+                &volttray_app::stats::default_dir(),
+                FlushTuning::default(),
+            )
+        } else {
+            bootlog::note(
+                "experimental: stats OFF — stats.jsonl disabled (no load, no events, no writes)",
+            );
+            (
+                volttray_app::stats::StatsStore::disabled(&volttray_app::stats::default_dir()),
+                volttray_app::stats::StatsLoadOutcome::Empty,
+            )
+        };
         match stats_load {
             volttray_app::stats::StatsLoadOutcome::Empty => {
                 bootlog::note("stats.jsonl: fresh start")
@@ -976,6 +1008,14 @@ mod imp {
                 HashSet::new()
             };
 
+            // 相位二（第 4 项）：experimental_bluetooth_wired=false 时跳过
+            // HID++ 0xFF 直连槽扫描（蓝牙/有线直连设备不参与发现；接收器
+            // 槽位 1..=6 不受影响）。每轮读一次配置，运行期改配置下一轮
+            // 即生效（与档位热重载同口径）。
+            let bt_wired_scan = core
+                .lock()
+                .map(|c| c.config().experimental_bluetooth_wired)
+                .unwrap_or(false);
             // 重枚举裁决（D-65）：正常态沿用 30s 门控；无设备且连候选通道
             // 都没有时按 30s/60s/120s 退避（仅主机侧枚举、零射频，不违反
             // 零耗电约束）；「立即刷新」/句柄失效置 force → 立即重枚举。
@@ -1112,6 +1152,11 @@ mod imp {
                                 let mut scanned = 0usize;
                                 let mut scan_failures: Vec<SlotScanFailure> = Vec::new();
                                 for slot in SCAN_SLOTS {
+                                    // 相位二（第 4 项）：0xFF 直连槽按实验
+                                    // 开关门控（关闭 = 不扫蓝牙/有线直连）。
+                                    if slot == 0xFF && !bt_wired_scan {
+                                        continue;
+                                    }
                                     if state.slots.iter().any(|s| s.index == slot) {
                                         continue;
                                     }
@@ -1269,6 +1314,11 @@ mod imp {
                             let mut ff_battery_probe_failed = false;
                             let mut dead_slots = DeadSlotScan::new();
                             for slot in SCAN_SLOTS {
+                                // 相位二（第 4 项）：0xFF 直连槽按实验开
+                                // 关门控（关闭 = 不扫蓝牙/有线直连）。
+                                if slot == 0xFF && !bt_wired_scan {
+                                    continue;
+                                }
                                 let mut edge = SlotScanEdge {
                                     ff_battery_probe_failed,
                                     ..SlotScanEdge::default()
@@ -2256,8 +2306,12 @@ mod imp {
         last_reload_warnings: &mut Vec<String>,
     ) {
         if let Some(Ok((cfg, warnings))) = watcher.poll() {
-            if let Ok(c) = core.lock() {
+            if let Ok(mut c) = core.lock() {
                 c.swap_config(cfg);
+                // D-74（相位二第 5 项）：换入即批量重排到期点——档位/实验
+                // 开关变更即时生效（虚拟/休眠设备恒不排程，D-33 不受影响）。
+                // 设置窗口改动经 TOML 落盘同样走本路径，无需单独通知机制。
+                c.retier_all(Instant::now());
             }
             if let Ok(mut o) = observer.lock() {
                 // P2-1：钳制/未知键警告不再静默丢弃（M9 AC3）——
