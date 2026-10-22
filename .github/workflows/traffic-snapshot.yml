@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read # 只读仓库即可（API 走 GITHUB_TOKEN，releases 端点公开可读）
+  issues: write # P0-2：T-14/T-09 时钟到期开单（首月 advisory 只报不开单，到期日满月后才可能走到开单分支）
 
 jobs:
   snapshot:
@@ -102,3 +103,51 @@ jobs:
           path: traffic-snapshot.json
           retention-days: 400
           if-no-files-found: error
+
+      # P0-2（C1 冲突五裁决：时钟自动化不等观察期——观察期 ≥ T-14 到期日，
+      # 到期无执行主体即静默过期）：T-14/T-09 到期检查挂本 workflow 周一跑。
+      # 到期日与责任主体集中登记于 docs/experience/06-release-reconciliation.md
+      # F.1 时钟表（2026-10-22 登记口径：T-14＝v0.3.20 Release 日 2026-10-21
+      # +30 天＝2026-11-20；T-09＝README.en-US.md 合入 main 2026-10-21 +90 天
+      # ＝2027-01-19）。**首月 advisory 只报不开单**（REPORT_ONLY_UNTIL，
+      # 期满按 C-F6 评审是否升自动开单）；开单去重与 N-2 同法：label 精确查。
+      # 时钟表登记日若变（维护者改起算日），同步改下方两个常量。
+      - name: T-14/T-09 clock due check (first-month advisory, report-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          T14_DUE="2026-11-20"
+          T09_DUE="2027-01-19"
+          REPORT_ONLY_UNTIL="2026-11-23"
+          today=$(date -u +%F)
+          reached() { [ "$1" = "$2" ] || [ "$1" \> "$2" ]; return; }
+          echo "今日（UTC）：${today}｜T-14 到期 ${T14_DUE}｜T-09 到期 ${T09_DUE}｜advisory 只报期至 ${REPORT_ONLY_UNTIL}"
+          due=""
+          if reached "$today" "$T14_DUE"; then due="T-14"; fi
+          if reached "$today" "$T09_DUE"; then
+            if [ -n "$due" ]; then due="${due} + T-09"; else due="T-09"; fi
+          fi
+          if [ -z "$due" ]; then
+            echo "[时钟] 无到期项（T-14/T-09 均未到期），本周仅留痕"
+            exit 0
+          fi
+          if [ "$today" \< "$REPORT_ONLY_UNTIL" ]; then
+            echo "[advisory] ${due} 已/即将到期——首月 advisory 只报不开单（P0-2）。请维护者按 06 F.1 时钟表处置并在对账区留痕。"
+            exit 0
+          fi
+          echo "[开单] ${due} 到期且已过 advisory 期，按 N-2 同法开单（label 查重）"
+          gh label create clock-review-due \
+            --color D93F0B \
+            --description "T-14/T-09 时钟到期评审（P0-2）" \
+            --if-not-exists
+          num=$(gh issue list --state open --label clock-review-due \
+            --json number --limit 1 | jq -r '.[0].number // empty')
+          if [ -n "$num" ]; then
+            echo "[P0-2] 到期评审单已存在：#${num}，不重复开"
+            exit 0
+          fi
+          gh issue create --label clock-review-due \
+            --title "${due} 时钟到期评审（自动开单）" \
+            --body "到期时钟：${due}（口径见 docs/experience/06-release-reconciliation.md F.1 时钟表）。处置出口：按时钟表「到期判据与逾期处置」列执行，并在下一次发布对账留痕。"
