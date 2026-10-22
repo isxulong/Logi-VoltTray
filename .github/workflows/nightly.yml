@@ -10,6 +10,8 @@ name: nightly
 #   步级 continue-on-error 不再适用，见 N-2 开单步注记；
 # - 发布对账承载：docs/experience/06-release-reconciliation.md F 节（30 晚
 #   时钟挂常设区，本 workflow 是时钟的数据源）；
+# - P1-5：verify-selfcheck job 每晚 dry-run 自检 verify.sh（--a4 + bash -n），
+#   脚本自身失效当晚暴露并按 N-2 同法开单；
 # - P0-3②：pointer-drift-advisory job（report-only）每晚 grep 已知旧指针
 #   模式 + E/D 编号引用存在性，防指针漂移复发。
 
@@ -175,6 +177,53 @@ jobs:
           gh issue create --label ci-review-due \
             --title "30 晚到期评审：nightly fuzz 无非红（自动开单）" \
             --body "$body"
+
+  # P1-5（C1 冲突三裁决选 A：机械可及的先机械）：门禁脚本自身失效
+  # 如何被发现——本 job 每晚对 verify.sh 做干跑自检：① bash -n 语法
+  # 检查；② 实跑 --a4 独立模式（A4 哈希双算：tomllib 结构路 + awk
+  # 文本路，见 verify.sh a4_check）。失效当晚 job 红、按 N-2 同法
+  # 自动开单——脚本失效不依赖人来发现。ubuntu-latest py3.12 自带
+  # tomllib，双路齐备；无 toml 解析器的环境走 SKIP 降级不红。
+  verify-selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n syntax check
+        run: bash -n verify.sh
+
+      - name: verify.sh --a4 dry-run
+        run: bash verify.sh --a4
+
+      # N-2 同法开单（label 精确查重 + 评论上限 10 条防噪）。
+      - name: N-2 open-or-comment issue (verify-selfcheck-failure)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+        shell: bash
+        run: |
+          gh label create verify-selfcheck-failure \
+            --color B60205 \
+            --description "verify.sh 自检失效自动开单（P1-5）" \
+            --if-not-exists
+          num=$(gh issue list --state open --label verify-selfcheck-failure \
+            --json number --limit 1 | jq -r '.[0].number // empty')
+          if [ -n "$num" ]; then
+            count=$(gh issue view "$num" --json comments --jq '.comments | length')
+            if [ "$count" -ge 10 ]; then
+              echo "[N-2] issue #${num} 评论已达上限（10），本次失效仅计数、不再追加（防噪三件套）"
+            else
+              gh issue comment "$num" \
+                --body "verify.sh 自检失效（bash -n 或 --a4 dry-run）：${RUN_URL}"
+            fi
+          else
+            body=$(printf '触发：verify-selfcheck job（bash -n 语法检查或 --a4 dry-run 失败）\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
+              "$RUN_URL")
+            gh issue create --label verify-selfcheck-failure \
+              --title "verify.sh 自检失效（自动开单）" \
+              --body "$body"
+          fi
 
   # P0-3② 指针漂移防复发 advisory（report-only）：仿 ci.yml actionlint
   # 步 continue-on-error 提示先例（C-F6），红不阻断任何人，仅在 run 页
