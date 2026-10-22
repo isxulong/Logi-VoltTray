@@ -1113,6 +1113,8 @@ mod tests {
             other => panic!("应为读取事件: {other:?}"),
         }
         // 未来新增的事件类型：本版不认识 → None（skip-bad-lines 跳过）。
-        assert!(StatsEvent::parse_line("{\"ts\":1001,\"event\":\"future_event\",\"x\":1}").is_none());
+        assert!(
+            StatsEvent::parse_line("{\"ts\":1001,\"event\":\"future_event\",\"x\":1}").is_none()
+        );
     }
 }
