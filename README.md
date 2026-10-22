@@ -102,7 +102,17 @@ cargo build --release --locked -p volttray-tray
 
 ## 经验知识库
 
-[docs/experience](https://github.com/isxulong/Logi-VoltTray/tree/main/docs/experience) 沉淀了本项目真实迭代中的工程经验教训、协作与流程方法论、发布质量门禁清单和新手（含新加入的 AI）上手指引：想了解某个设计背后的真机教训、发布前该逐条核对什么，或快速上手本项目，从 [docs/experience/README.md](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/README.md) 的文件导航表进入即可。
+[docs/experience](https://github.com/isxulong/Logi-VoltTray/tree/main/docs/experience) 沉淀了本项目真实迭代中的工程经验教训、协作与流程方法论、发布质量门禁清单和新手（含新加入的 AI）上手指引。想快速定位「这次该读哪份」，按下方索引表的「何时调用本条」进入：
+
+| 文档 | 何时调用本条 |
+| --- | --- |
+| [README.md（知识库导航）](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/README.md) | 查 E1–E34 经验条目的一句话索引与编号 |
+| [01 工程经验教训](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/01-engineering-lessons.md) | 真机事故复盘、改代码前查对应教训、报障归因（QPC 下溢 / 死句柄 / 设备休眠等） |
+| [02 协作方法论](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/02-collaboration-playbook.md) | 证据纪律（E7）、红蓝对抗、收口纪律、决策与版本后经验回写机制（E26） |
+| [03 发布质量门禁](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/03-release-quality-gate.md) | 发布前逐条核验；引用测试数等关键数字时的取数纪律（C2） |
+| [04 新手上手指引](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/04-onboarding.md) | 新 AI / 新人首次进入项目；接报障走 §7；按「任务类型 → 必读条目」路由表定位改代码 / 发布 / 移植各自的必读项 |
+| [05 诊断导出字段审计](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/05-diag-export-field-audit.md) | 改诊断导出字段、评估导出 JSON 泄露面时 |
+| [06 发布对账（内部维护区）](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/06-release-reconciliation.md) | 每次 Release 后对账；时钟（T-05/T-09/T-14）与过程度量登记（外部读者可忽略） |
 
 ## 许可证
 
