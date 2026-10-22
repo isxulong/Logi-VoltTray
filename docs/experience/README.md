@@ -43,6 +43,8 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 
 > 对外读者说明：文中 T-xx / N-x / K-x / F-Ax 等编号为内部维护编号（实施令条款与对账机制条款），仅服务项目内部对账，外部读者可忽略。
 
+**AI 上手指南**：仓库根 [AGENTS.md](../../AGENTS.md)（任何 AI 接手本仓库的第一入口：启动序列、接任务判断、范围红线、收口交付）与 [docs/ai-orchestration.md](../ai-orchestration.md)（多智能体调度附录：派单五要素、巡检清单、A/B 类替代规程）。
+
 ## E 编号总索引
 
 | 编号 | 所在文件 | 一句话 |
