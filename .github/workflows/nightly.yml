@@ -9,7 +9,9 @@ name: nightly
 # - 协议测试为真实门禁（PR#6 已合入裁决，失败即红）——0007 原设计的
 #   步级 continue-on-error 不再适用，见 N-2 开单步注记；
 # - 发布对账承载：docs/experience/06-release-reconciliation.md F 节（30 晚
-#   时钟挂常设区，本 workflow 是时钟的数据源）。
+#   时钟挂常设区，本 workflow 是时钟的数据源）；
+# - P0-3②：pointer-drift-advisory job（report-only）每晚 grep 已知旧指针
+#   模式 + E/D 编号引用存在性，防指针漂移复发。
 
 on:
   schedule:
@@ -173,3 +175,72 @@ jobs:
           gh issue create --label ci-review-due \
             --title "30 晚到期评审：nightly fuzz 无非红（自动开单）" \
             --body "$body"
+
+  # P0-3② 指针漂移防复发 advisory（report-only）：仿 ci.yml actionlint
+  # 步 continue-on-error 提示先例（C-F6），红不阻断任何人，仅在 run 页
+  # 留痕，由维护者按 06 对账定性；连续两晚红再人工定性是否真实漂移。
+  # 不建链接可达性检查（C1 稿明确排除）。检查逻辑 2026-10-22 在本地
+  # 快照实测：当前树零命中（旧指针/缺失 E/D 引用均 0），并经注入旧
+  # 指针、E99 假引用反向自证可捕获。检查项：
+  # ① 全仓 grep 已知旧指针模式——对账/F 节曾承载于 03 文档、已整体
+  #    迁移至 06，旧表述（如「03-release-quality-gate.md F 节」「03
+  #    文档 F 节」）复现即报；描述搬迁史的行（含「搬迁/迁移/06」字样）
+  #    不报，已知豁免。
+  # ② E 编号引用存在性——docs/experience、README、README.en-US.md、
+  #    AGENTS.md、volttray/RELEASES.md 中引用的 E 编号，须在 01/02 的
+  #    `## E数字.` 标题或 docs/experience/README.md 映射表（E15 定义于
+  #    04 §8，由映射表收录）有定义。
+  # ③ D 编号引用存在性——引用的 D-NN 须在 volttray/docs/decisions.md
+  #    表中存在（2026-10-22 基线：D-01–D-83）。
+  pointer-drift-advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: old-pointer grep + E/D reference existence (report-only)
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          echo "── ① 已知旧指针模式 ──"
+          # 两段式（同行须同时命中 pat_a 与 pat_b 才算旧指针）：
+          # pat_a/pat_b 分行定义，避免本 job 自身的模式文本自匹配。
+          pat_a='03-release-quality-gate(\.md)?|03 文档|（03'
+          pat_b='F(\.[0-9])? ?节|对账'
+          old_hits=$(grep -rnE "$pat_a" \
+            --include='*.md' --include='*.yml' --include='*.sh' . \
+            | grep -E "$pat_b" \
+            | grep -v '06-release-reconciliation' \
+            | grep -vE '搬迁|迁移|曾承载' || true)
+          if [ -n "$old_hits" ]; then
+            printf '%s\n' "$old_hits"
+            fail=1
+          else
+            echo "（无命中）"
+          fi
+          echo "── ② E 编号引用存在性 ──"
+          defs_E=$( { grep -rhoE '^## E[0-9]+\.' docs/experience/01-engineering-lessons.md docs/experience/02-collaboration-playbook.md | grep -oE 'E[0-9]+' ; \
+            grep -hoE '^\| E[0-9]+ \|' docs/experience/README.md | grep -oE 'E[0-9]+' ; } | sort -u)
+          refs_E=$(grep -rhoE '\bE[0-9]+\b' docs/experience README.md README.en-US.md AGENTS.md volttray/RELEASES.md 2>/dev/null | sort -u)
+          missing_E=$(comm -13 <(printf '%s\n' "$defs_E") <(printf '%s\n' "$refs_E"))
+          echo "定义 $(printf '%s\n' "$defs_E" | wc -l) 条；引用 $(printf '%s\n' "$refs_E" | wc -l) 个编号"
+          if [ -n "$missing_E" ]; then
+            echo "缺失定义：$(printf '%s ' $missing_E)"
+            fail=1
+          else
+            echo "（引用全部有定义）"
+          fi
+          echo "── ③ D 编号引用存在性 ──"
+          defs_D=$(grep -oE '^\| D-[0-9]+' volttray/docs/decisions.md | grep -oE 'D-[0-9]+' | sort -u)
+          refs_D=$(grep -rhoE '\bD-[0-9]+\b' docs/experience README.md README.en-US.md AGENTS.md volttray/RELEASES.md volttray/docs/decisions.md 2>/dev/null | sort -u)
+          missing_D=$(comm -13 <(printf '%s\n' "$defs_D") <(printf '%s\n' "$refs_D"))
+          echo "定义 $(printf '%s\n' "$defs_D" | wc -l) 条；引用 $(printf '%s\n' "$refs_D" | wc -l) 个编号"
+          if [ -n "$missing_D" ]; then
+            echo "缺失定义：$(printf '%s ' $missing_D)"
+            fail=1
+          else
+            echo "（引用全部有定义）"
+          fi
+          echo "── 结果：fail=${fail}（report-only，不阻断）──"
+          exit $fail
