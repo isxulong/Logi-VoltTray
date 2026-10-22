@@ -1082,7 +1082,7 @@ mod tests {
              notifications_enabled = false\nnotification_silent = true\n\
              icon_shape = \"square\"\nicon_background = \"#0A6CFF\"\n\
              icon_font_color = \"#FFD21F\"\nicon_font_family = \"Consolas\"\n\
-             low_threshold = 30\nblink_enabled = false\n",
+             low_threshold = 30\nblink_enabled = false\nexperimental_migrated_v0321 = true\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.autostart);
@@ -1114,7 +1114,9 @@ mod tests {
 
     #[test]
     fn unknown_keys_warn_not_fail() {
-        let (c, w) = Config::parse("evil_key = true\nlow_threshold = 30\n");
+        let (c, w) = Config::parse(
+            "evil_key = true\nlow_threshold = 30\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 30);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].key, "evil_key");
@@ -1122,7 +1124,9 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back_with_warning() {
-        let (c, w) = Config::parse("icon_style = \"neon\"\nicon_shape = \"hex\"\n");
+        let (c, w) = Config::parse(
+            "icon_style = \"neon\"\nicon_shape = \"hex\"\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_style, IconStyle::Auto);
         assert_eq!(c.icon_shape, IconShape::Rounded);
         assert_eq!(w.len(), 2);
@@ -1132,7 +1136,8 @@ mod tests {
     fn out_of_range_values_clamp_with_warning() {
         // M10/M12：越界钳制到边界 + 警告（不重置默认）。
         let (c, w) = Config::parse(
-            "poll_interval_secs = 5\nlow_threshold = 80\nicon_font_family = \"  \"\n",
+            "poll_interval_secs = 5\nlow_threshold = 80\nicon_font_family = \"  \"\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
         assert_eq!(c.low_threshold, LOW_THRESHOLD_MAX);
@@ -1145,7 +1150,10 @@ mod tests {
     #[test]
     fn legacy_keys_migrate() {
         // v0.2.0 双阈值 → v0.3.0 单阈值：warn 值迁移（显式 low_threshold 优先）。
-        let (c, w) = Config::parse("low_threshold_warn = 25\nlow_threshold_critical = 10\n");
+        let (c, w) = Config::parse(
+            "low_threshold_warn = 25\nlow_threshold_critical = 10\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 25);
         assert_eq!(w.len(), 2);
         assert!(w.iter().all(|x| x.key.starts_with("low_threshold_")));
@@ -1160,7 +1168,9 @@ mod tests {
 
     #[test]
     fn legacy_transparent_background_migrates_to_shape() {
-        let (c, w) = Config::parse("icon_background = \"transparent\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"transparent\"\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_shape, IconShape::Transparent);
         // 背景保默认 dark（透明时不渲染背景）。
         assert_eq!(c.icon_background, IconBackground::Dark);
@@ -1169,18 +1179,24 @@ mod tests {
 
     #[test]
     fn icon_color_options_parse_and_fall_back() {
-        let (c, w) = Config::parse("icon_background = \"light\"\nicon_font_color = \"auto\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"light\"\nicon_font_color = \"auto\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.icon_background, IconBackground::Light);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
 
-        let (c, w) =
-            Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
         assert_eq!(w.len(), 2);
 
-        let (c, w) = Config::parse("icon_font_color = \"#ff00aa\"\n");
+        let (c, w) =
+            Config::parse("icon_font_color = \"#ff00aa\"\nexperimental_migrated_v0321 = true\n");
         assert!(w.is_empty());
         assert_eq!(
             c.icon_font_color,
@@ -1202,8 +1218,10 @@ mod tests {
 
     #[test]
     fn comments_and_malformed_lines_tolerated() {
-        let (c, w) =
-            Config::parse("# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n");
+        let (c, w) = Config::parse(
+            "# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 15);
         assert_eq!(w.len(), 2); // section + garbage
     }
@@ -1285,16 +1303,18 @@ mod tests {
         // 平局取更低档：1200 与 600/1800 各差 600 → 取 600。
         assert_eq!(normalize_poll_secs(1200), 600);
         // 解析层：越界与非档位值都产生警告并落位。
-        let (c, w) = Config::parse("poll_interval_secs = 900\n");
+        let (c, w) =
+            Config::parse("poll_interval_secs = 900\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, 600);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.contains("snapped"), "{w:?}");
-        let (c, w) = Config::parse("poll_interval_secs = 5\n");
+        let (c, w) = Config::parse("poll_interval_secs = 5\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.contains("out of range"), "{w:?}");
         // 档位值无警告。
-        let (c, w) = Config::parse("poll_interval_secs = 1800\n");
+        let (c, w) =
+            Config::parse("poll_interval_secs = 1800\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, 1800);
         assert!(w.is_empty(), "{w:?}");
     }
@@ -1305,13 +1325,17 @@ mod tests {
     #[test]
     fn poll_legacy_tiers_migrate_with_warning() {
         for (old, new) in [(60, 300), (900, 600)] {
-            let (c, w) = Config::parse(&format!("poll_interval_secs = {old}\n"));
+            let (c, w) = Config::parse(&format!(
+                "poll_interval_secs = {old}\nexperimental_migrated_v0321 = true\n"
+            ));
             assert_eq!(c.poll_interval_secs, new, "{old} should migrate to {new}");
             assert_eq!(w.len(), 1, "{w:?}");
             assert_eq!(w[0].key, "poll_interval_secs");
         }
         for keep in [300, 600, 1800] {
-            let (c, w) = Config::parse(&format!("poll_interval_secs = {keep}\n"));
+            let (c, w) = Config::parse(&format!(
+                "poll_interval_secs = {keep}\nexperimental_migrated_v0321 = true\n"
+            ));
             assert_eq!(c.poll_interval_secs, keep);
             assert!(w.is_empty(), "{keep} is a valid tier: {w:?}");
         }
@@ -1320,7 +1344,9 @@ mod tests {
     /// D-48：文本/背景缩放键——解析、钳制、往返。
     #[test]
     fn icon_scale_keys_parse_clamp_roundtrip() {
-        let (c, w) = Config::parse("icon_text_scale = 130\nicon_bg_scale = 80\n");
+        let (c, w) = Config::parse(
+            "icon_text_scale = 130\nicon_bg_scale = 80\nexperimental_migrated_v0321 = true\n",
+        );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.icon_text_scale, 130);
         assert_eq!(c.icon_bg_scale, 80);
@@ -1330,20 +1356,22 @@ mod tests {
 
         // 越界钳制 + 警告：文本 200 → 160、10 → 40；背景 130 → 100（几何上限）、
         // 10 → 20（D-57 新边界）。
-        let (c, w) = Config::parse("icon_text_scale = 200\nicon_bg_scale = 130\n");
+        let (c, w) = Config::parse(
+            "icon_text_scale = 200\nicon_bg_scale = 130\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MAX);
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MAX);
         assert_eq!(w.len(), 2);
         assert!(w.iter().any(|x| x.key == "icon_text_scale"));
         assert!(w.iter().any(|x| x.key == "icon_bg_scale"));
-        let (c, w) = Config::parse("icon_text_scale = 10\n");
+        let (c, w) = Config::parse("icon_text_scale = 10\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MIN);
         assert_eq!(w.len(), 1);
-        let (c, w) = Config::parse("icon_bg_scale = 10\n");
+        let (c, w) = Config::parse("icon_bg_scale = 10\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MIN);
         assert_eq!(w.len(), 1);
         // 非整数 / 布尔 → 默认保留 + 警告（v0.3.18：默认 140）。
-        let (c, w) = Config::parse("icon_text_scale = true\n");
+        let (c, w) = Config::parse("icon_text_scale = true\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_DEFAULT);
         assert_eq!(w.len(), 1);
     }
@@ -1425,7 +1453,8 @@ mod tests {
         let (c, w) = Config::parse(
             "icon_font_tiers_enabled = true\n\
              icon_font_tier_thresholds = [15, 45, 80]\n\
-             icon_font_tier_colors = [\"#E81123\", \"#FFD21F\", \"#00CC6A\", \"#0078D7\"]\n",
+             icon_font_tier_colors = [\"#E81123\", \"#FFD21F\", \"#00CC6A\", \"#0078D7\"]\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.icon_font_tiers_enabled);
@@ -1481,18 +1510,22 @@ mod tests {
         // 无效颜色跳过 + 警告；阈值钳制 + 警告；颜色补齐。
         let (c, w) = Config::parse(
             "icon_font_tier_thresholds = [0, 150]\n\
-             icon_font_tier_colors = [\"#12345\", \"#E81123\"]\n",
+             icon_font_tier_colors = [\"#12345\", \"#E81123\"]\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert_eq!(c.icon_font_tier_thresholds, vec![1, 99]);
         assert_eq!(c.icon_font_tier_colors.len(), 3);
         assert!(w.iter().any(|x| x.key == "icon_font_tier_thresholds"));
         assert!(w.iter().any(|x| x.key == "icon_font_tier_colors"));
         // 数组元素类型错误 → 整组保默认 + 警告。
-        let (c, w) = Config::parse("icon_font_tier_thresholds = [20, \"50\"]\n");
+        let (c, w) = Config::parse(
+            "icon_font_tier_thresholds = [20, \"50\"]\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
         assert_eq!(w.len(), 1);
         // 数组值给到标量键 → catch-all 警告；v0.3.5 默认开，「保默认」即开。
-        let (c, w) = Config::parse("icon_font_tiers_enabled = [true]\n");
+        let (c, w) =
+            Config::parse("icon_font_tiers_enabled = [true]\nexperimental_migrated_v0321 = true\n");
         assert!(c.icon_font_tiers_enabled);
         assert_eq!(w.len(), 1);
     }
@@ -1569,17 +1602,96 @@ mod tests {
         assert!(c.icon_font_tiers_enabled);
         assert_eq!(c.icon_font_tier_thresholds, vec![10, 40]);
         // 勾选关 + 固定色 → 自定义：不启用分档、无迁移警告。
-        let (c, w) =
-            Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n");
+        let (c, w) = Config::parse(
+            "icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert!(!c.icon_font_tiers_enabled);
         assert!(w.is_empty(), "{w:?}");
         // 勾选开 → 无迁移警告（本来就在分档模式）。
-        let (c, w) = Config::parse("icon_font_tiers_enabled = true\n");
+        let (c, w) =
+            Config::parse("icon_font_tiers_enabled = true\nexperimental_migrated_v0321 = true\n");
         assert!(c.icon_font_tiers_enabled);
         assert!(w.is_empty(), "{w:?}");
-        // 空配置 = 全新默认：分档开、无警告。
+        // 空文件按存量语义处理（新装配置文件不存在、走 Config::default()
+        // 不经 parse）：分档开；仅触发 experimental 迁移一条警告。
         let (c, w) = Config::parse("");
         assert!(c.icon_font_tiers_enabled);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].key, "experimental_migrated_v0321");
+    }
+
+    /// 相位二（第 4 项）：实验功能键——新装（配置文件不存在，直接走
+    /// `Config::default()`、不经 parse）默认全关、标记恒写；默认值首轮
+    /// 写盘后再解析即稳态（标记在 → 零警告）。
+    #[test]
+    fn experimental_keys_default_off_for_new_install() {
+        let c = Config::default();
+        assert!(!c.experimental_persist_last_known);
+        assert!(!c.experimental_stats);
+        assert!(!c.experimental_per_device_polling);
+        assert!(!c.experimental_bluetooth_wired);
+        // 新装视为已迁移（不落存量迁移路径）。
+        assert!(c.experimental_migrated_v0321);
+        let (back, w) = Config::parse(&c.to_toml());
+        assert_eq!(back, c);
         assert!(w.is_empty(), "{w:?}");
+        // 非法值回退默认（关）+ 键名警告。
+        let (c2, w2) =
+            Config::parse("experimental_stats = \"nope\"\nexperimental_migrated_v0321 = true\n");
+        assert!(!c2.experimental_stats);
+        assert!(w2.iter().any(|x| x.key == "experimental_stats"), "{w2:?}");
+    }
+
+    /// 相位二（第 4 项）：存量配置（无标记键）→ 四键恒迁 true + 迁移警告
+    /// + 标记置位（变更不静默）；迁完幂等；显式写过的键值不被覆盖。
+    #[test]
+    fn experimental_keys_migrate_on_for_existing_config() {
+        let (c, w) = Config::parse("low_threshold = 25\n");
+        assert!(c.experimental_persist_last_known);
+        assert!(c.experimental_stats);
+        assert!(c.experimental_per_device_polling);
+        assert!(c.experimental_bluetooth_wired);
+        assert!(c.experimental_migrated_v0321);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "experimental_migrated_v0321" && x.reason.contains("migrated")),
+            "{w:?}"
+        );
+        // 幂等：迁完写出再读回，不再产生迁移警告，四键保持 true。
+        let (c2, w2) = Config::parse(&c.to_toml());
+        assert!(c2.experimental_migrated_v0321);
+        assert!(c2.experimental_stats);
+        assert!(
+            !w2.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w2:?}"
+        );
+        // 显式 false + 标记 → 保留（用户明确关过的不再被迁移打开）。
+        let (c3, w3) =
+            Config::parse("experimental_migrated_v0321 = true\nexperimental_stats = false\n");
+        assert!(!c3.experimental_stats);
+        assert!(!c3.experimental_persist_last_known);
+        assert!(
+            !w3.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w3:?}"
+        );
+    }
+
+    /// 相位二（第 4 项）：to_toml 恒写 5 键，round-trip 等价。
+    #[test]
+    fn experimental_keys_toml_roundtrip() {
+        let c = Config {
+            experimental_persist_last_known: true,
+            experimental_stats: true,
+            experimental_per_device_polling: true,
+            experimental_bluetooth_wired: false,
+            ..Config::default()
+        };
+        let (back, w) = Config::parse(&c.to_toml());
+        assert_eq!(back, c);
+        assert!(
+            !w.iter().any(|x| x.key.starts_with("experimental")),
+            "{w:?}"
+        );
     }
 }
