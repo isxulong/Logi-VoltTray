@@ -1093,4 +1093,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
     }
+
+    /// 相位二（第 10 项）旧版读新文件兼容：读取事件行携带未来新增的
+    /// 未知字段时仍按读取事件解析（parse_line 容忍额外字段）；未知事件
+    /// 类型行返回 None、被 skip-bad-lines 跳过而不误杀。
+    #[test]
+    fn parse_line_tolerates_unknown_fields_and_event_types() {
+        let line = concat!(
+            "{\"ts\":1000,\"physical_key\":\"k1\",\"display_name\":\"Mouse\",",
+            "\"percent\":80,\"charging\":false,\"source\":\"poll\",",
+            "\"future_field\":1}"
+        );
+        let e = StatsEvent::parse_line(line).expect("未知额外字段应被容忍");
+        match e {
+            StatsEvent::Read(r) => {
+                assert_eq!(r.physical_key, "k1");
+                assert_eq!(r.percent, 80);
+            }
+            other => panic!("应为读取事件: {other:?}"),
+        }
+        // 未来新增的事件类型：本版不认识 → None（skip-bad-lines 跳过）。
+        assert!(StatsEvent::parse_line("{\"ts\":1001,\"event\":\"future_event\",\"x\":1}").is_none());
+    }
 }

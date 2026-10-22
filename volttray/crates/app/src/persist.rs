@@ -610,6 +610,28 @@ mod tests {
         assert_eq!(outcome, LoadOutcome::Empty);
     }
 
+    /// 相位二（第 10 项）旧版读新文件兼容：未来版本写入的未知字段
+    /// （顶层与记录级）被容忍，既有字段完整读回（serde 默认忽略未知
+    /// 字段；version 不匹配仍按损坏处理的红线不变）。
+    #[test]
+    fn load_tolerates_unknown_fields_from_newer_version() {
+        let dir = tmpdir("fwd_compat");
+        let raw = concat!(
+            "{\"version\":1,\"future_top_level\":{\"x\":1},",
+            "\"devices\":[{\"physical_key\":\"k1\",\"display_name\":\"Mouse\",",
+            "\"percent\":80,\"charging\":false,\"last_seen\":1000,",
+            "\"source\":\"unified_battery\",\"future_field\":\"new\"}]}"
+        );
+        fs::write(dir.join(STORE_FILE_NAME), raw).unwrap();
+        let (store, outcome) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
+        assert_eq!(outcome, LoadOutcome::Loaded(1));
+        let records = store.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].physical_key, "k1");
+        assert_eq!(records[0].percent, 80);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn load_round_trip_and_sanitize() {
         let dir = tmpdir("roundtrip");
