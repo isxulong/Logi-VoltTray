@@ -495,10 +495,11 @@ pub struct Config {
     pub icon_bg_scale: u8,
     /// 实验性功能开关组（相位二 · 冲突三裁决，F-A-2 口径）：四项未真机
     /// 验证功能的逐项总闸。**新装默认关**（Default 全 false）；存量配置
-    /// （无 `experimental_migrated_v0321` 标记）解析时恒迁 true 保留原值
-    /// ——默认关只对新装生效，变更不静默（避免「升级后设备从托盘静默
-    /// 消失」的行为突变）。安全性未知、待转正评审逐项证实（不采「零
-    /// 事故」作默认态依据，D 核对单差异 1）。
+    /// （无 `experimental_migrated_v0321` 标记）解析时缺失键迁 true 保留
+    /// 原行为——默认关只对新装生效，变更不静默（避免「升级后设备从托盘
+    /// 静默消失」的行为突变）；显式解析到的键值不被迁移覆盖（C-09：
+    /// 回退→再升级 / 手写存量配置路径下显式 false 保留）。安全性未知、
+    /// 待转正评审逐项证实（不采「零事故」作默认态依据，D 核对单差异 1）。
     /// 重启即显最后已知电量（last_known.json 持久化 + 虚拟条目）。
     pub experimental_persist_last_known: bool,
     /// 耗电统计与导出（stats.jsonl 落盘与导出链路）。
@@ -510,9 +511,10 @@ pub struct Config {
     /// 蓝牙直连与有线设备读取（HID++ 0xFF 直连槽扫描）。
     pub experimental_bluetooth_wired: bool,
     /// v0.3.21 存量迁移标记（先例：icon_text_scale_migrated_v0318）：
-    /// 缺失（v0.3.20 及更早配置）→ 四个 experimental_* 恒迁 true 保留
-    /// 原行为 + 警告；标记存在 → 按文件显式值。解析后恒置 true 并随
-    /// to_toml 写出（幂等）；旧版本读取时按未知键忽略（降级兼容）。
+    /// 缺失（v0.3.20 及更早配置）→ 四个 experimental_* 缺失键迁 true
+    /// 保留原行为 + 警告（显式解析到的键不覆盖，C-09）；标记存在 →
+    /// 按文件显式值。解析后恒置 true 并随 to_toml 写出（幂等）；
+    /// 旧版本读取时按未知键忽略（降级兼容）。
     pub experimental_migrated_v0321: bool,
 }
 
@@ -628,6 +630,12 @@ impl Config {
         let mut saw_tier_thresholds = false;
         let mut saw_text_scale_marker = false;
         let mut saw_experimental_marker = false;
+        // C-09：逐键记录显式出现——迁移只补缺失键、不覆盖显式解析到的键
+        // （回退→再升级 / 手写存量配置路径，显式 false 不得被重置）。
+        let mut saw_experimental_persist = false;
+        let mut saw_experimental_stats = false;
+        let mut saw_experimental_per_device = false;
+        let mut saw_experimental_bluetooth = false;
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -748,15 +756,19 @@ impl Config {
                 }
                 // 相位二（冲突三）：实验功能开关——显式键按文件值。
                 ("experimental_persist_last_known", Value::Bool(b)) => {
+                    saw_experimental_persist = true;
                     cfg.experimental_persist_last_known = *b;
                 }
                 ("experimental_stats", Value::Bool(b)) => {
+                    saw_experimental_stats = true;
                     cfg.experimental_stats = *b;
                 }
                 ("experimental_per_device_polling", Value::Bool(b)) => {
+                    saw_experimental_per_device = true;
                     cfg.experimental_per_device_polling = *b;
                 }
                 ("experimental_bluetooth_wired", Value::Bool(b)) => {
+                    saw_experimental_bluetooth = true;
                     cfg.experimental_bluetooth_wired = *b;
                 }
                 ("experimental_migrated_v0321", Value::Bool(b)) => {
@@ -908,15 +920,26 @@ impl Config {
         // 避免「升级后设备从托盘静默消失」的行为突变（F-A-2 口径；
         // 裁决仅立于「变更不静默」原则——安全性未知、待转正评审逐项
         // 证实，不采「零事故」作默认态依据，D 核对单差异 1）。
+        // C-09：迁移只补缺失键、不覆盖显式解析到的键——「回退→再升级」
+        // （旧版重写丢弃标记，用户按 README 手写补回显式 false）与
+        // 「手写配置视为存量」路径下，显式 false 必须保留。
         if !saw_experimental_marker {
-            cfg.experimental_persist_last_known = true;
-            cfg.experimental_stats = true;
-            cfg.experimental_per_device_polling = true;
-            cfg.experimental_bluetooth_wired = true;
+            if !saw_experimental_persist {
+                cfg.experimental_persist_last_known = true;
+            }
+            if !saw_experimental_stats {
+                cfg.experimental_stats = true;
+            }
+            if !saw_experimental_per_device {
+                cfg.experimental_per_device_polling = true;
+            }
+            if !saw_experimental_bluetooth {
+                cfg.experimental_bluetooth_wired = true;
+            }
             warnings.push(ConfigWarning {
                 key: "experimental_migrated_v0321".into(),
-                reason: "migrated (v0.3.21): experimental features kept ON for existing \
-                         configs; new installs default OFF"
+                reason: "migrated (v0.3.21): missing experimental_* keys filled ON for existing \
+                         configs (explicit values preserved); new installs default OFF"
                     .into(),
             });
             cfg.experimental_migrated_v0321 = true;
@@ -1674,6 +1697,41 @@ mod tests {
         assert!(
             !w3.iter().any(|x| x.key == "experimental_migrated_v0321"),
             "{w3:?}"
+        );
+    }
+
+    /// C-09：迁移只补缺失键、不覆盖显式解析到的键——
+    /// 「回退→再升级」与「手写配置视为存量」路径：v0.3.21 显式 false +
+    /// 标记 → 旧版（v0.3.20）键集重写丢弃标记（用户对被丢弃的
+    /// experimental_* 键按 README 指引手写补回显式 false）→ 再升级
+    /// parse：无标记触发迁移，但显式 false 必须保留，仅缺失键补 true。
+    #[test]
+    fn experimental_migration_preserves_explicit_false_without_marker() {
+        // 模拟旧版键集重写后的文件：标记被丢弃，用户手写补回两个显式
+        // false，其余两个 experimental_* 键缺失。
+        let (c, w) = Config::parse(
+            "low_threshold = 25\nexperimental_stats = false\nexperimental_bluetooth_wired = false\n",
+        );
+        // 显式 false 保留（修复前被无条件重置为 true——本断言红）。
+        assert!(!c.experimental_stats);
+        assert!(!c.experimental_bluetooth_wired);
+        // 缺失键按存量口径补 true。
+        assert!(c.experimental_persist_last_known);
+        assert!(c.experimental_per_device_polling);
+        // 标记置位 + 迁移警告（变更不静默）。
+        assert!(c.experimental_migrated_v0321);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "experimental_migrated_v0321" && x.reason.contains("migrated")),
+            "{w:?}"
+        );
+        // 迁完幂等：写出再读回，显式 false 仍在、不再产生迁移警告。
+        let (c2, w2) = Config::parse(&c.to_toml());
+        assert!(!c2.experimental_stats);
+        assert!(!c2.experimental_bluetooth_wired);
+        assert!(
+            !w2.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w2:?}"
         );
     }
 

@@ -8,6 +8,12 @@
 
 pub const RUN_VALUE_NAME: &str = "LogiVoltTray";
 
+/// HKCU Run 键路径（品牌纪元内冻结契约，C-12：由单测
+/// `run_key_contract_frozen` 锚定语义，CI 绿即契约绿；
+/// release.yml 的文本 grep 仅为辅助告警，合法重构不再被阻断）。
+/// 置于 cfg(windows) 之外：全平台可编译，单测随 CI 全平台可跑。
+pub const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
 // ============================================================================
 // U-7（v0.3.19）路径规范化纯函数（C-2a）——全部置于 cfg(windows) 之外，
 // 非 Windows 平台同样编译、单测随 CI 全平台可跑（C-3）。
@@ -232,15 +238,13 @@ pub fn reconcile(cfg_on: bool, exe: &std::path::Path) -> ReconcileOutcome {
 
 #[cfg(windows)]
 mod imp {
-    use super::RUN_VALUE_NAME;
+    use super::{RUN_KEY, RUN_VALUE_NAME};
     use std::path::Path;
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
         HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE,
     };
-
-    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -421,6 +425,24 @@ mod tests {
     fn entry_matches(entry: &str, exe_path: &std::path::Path) -> bool {
         let (path, _) = extract_entry_path(entry);
         path_matches(path, exe_path)
+    }
+
+    // ===== 发布契约锚定（C-12）=====
+
+    /// 自启注册表路径与值名属品牌纪元内冻结契约：语义由本测试锚定，
+    /// CI 绿即契约绿；release.yml 的文本 grep 仅为辅助告警（合法重构
+    /// 移常量/改写法不再被阻断——移动常量本测试直接编译失败，改动常量
+    /// 值本测试断言失败，两个方向都有信号）。
+    #[test]
+    fn run_key_contract_frozen() {
+        assert_eq!(
+            RUN_KEY, "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "RUN_KEY 漂移：冻结契约变更须同步跟改本断言与 release.yml advisory 文本断言"
+        );
+        assert_eq!(
+            RUN_VALUE_NAME, "LogiVoltTray",
+            "RUN_VALUE_NAME 漂移：冻结契约变更须同步跟改本断言与 release.yml advisory 文本断言"
+        );
     }
 
     // ===== R1~R7 规则集（C-2a）=====

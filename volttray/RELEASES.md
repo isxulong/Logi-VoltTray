@@ -29,6 +29,12 @@
 2. 用户侧处置：退出 N 版，从 Releases 页下载 N-1 的 `volttray-tray.exe`
    覆盖运行即可；配置文件 `config.toml` 向后兼容（旧版读新配置：
    未知键忽略并告警，不拒绝启动）。
+   **已知行为（v0.3.21 ↔ v0.3.20 及更早）**：旧版保存设置时按自身键集
+   重写 `config.toml`，会丢弃 `experimental_*` 开关与
+   `experimental_migrated_v0321` 迁移标记；再升级回新版时按存量口径
+   重迁——显式写回 `config.toml` 的 `experimental_*` 值会被保留
+   （缺失键才补 `true`）。回退期间若在旧版改过设置，原本关掉的
+   实验功能需在升级后按 README「实验性功能」小节重新显式关闭。
 3. **数据文件处置**：`%LOCALAPPDATA%\LogiVoltTray\` 下的
    `last_known.json` 与 `stats.jsonl` 无需删除——旧版读取时对未知字段
    容忍、对坏行跳过（有回归测试锁定）；若确需彻底清零，退出程序后
