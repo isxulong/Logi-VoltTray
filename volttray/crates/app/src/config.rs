@@ -493,6 +493,27 @@ pub struct Config {
     /// 图标背景覆盖度（% 相对位图内切块，D-48/D-57），默认 100，范围
     /// 20..=100（100% = 满出血零边距，已触及位图边界，故上限为 100）。
     pub icon_bg_scale: u8,
+    /// 实验性功能开关组（相位二 · 冲突三裁决，F-A-2 口径）：四项未真机
+    /// 验证功能的逐项总闸。**新装默认关**（Default 全 false）；存量配置
+    /// （无 `experimental_migrated_v0321` 标记）解析时恒迁 true 保留原值
+    /// ——默认关只对新装生效，变更不静默（避免「升级后设备从托盘静默
+    /// 消失」的行为突变）。安全性未知、待转正评审逐项证实（不采「零
+    /// 事故」作默认态依据，D 核对单差异 1）。
+    /// 重启即显最后已知电量（last_known.json 持久化 + 虚拟条目）。
+    pub experimental_persist_last_known: bool,
+    /// 耗电统计与导出（stats.jsonl 落盘与导出链路）。
+    pub experimental_stats: bool,
+    /// 按设备计时轮询——关 = 充电设备不再走 15s 快刷档、与常态设备同
+    /// 按配置档轮询。休眠设备零主动查询（D-33 红线）不受本开关影响，
+    /// 恒保持。
+    pub experimental_per_device_polling: bool,
+    /// 蓝牙直连与有线设备读取（HID++ 0xFF 直连槽扫描）。
+    pub experimental_bluetooth_wired: bool,
+    /// v0.3.21 存量迁移标记（先例：icon_text_scale_migrated_v0318）：
+    /// 缺失（v0.3.20 及更早配置）→ 四个 experimental_* 恒迁 true 保留
+    /// 原行为 + 警告；标记存在 → 按文件显式值。解析后恒置 true 并随
+    /// to_toml 写出（幂等）；旧版本读取时按未知键忽略（降级兼容）。
+    pub experimental_migrated_v0321: bool,
 }
 
 impl Default for Config {
@@ -516,6 +537,13 @@ impl Default for Config {
             icon_text_scale: ICON_TEXT_SCALE_DEFAULT,
             icon_text_scale_migrated_v0318: true,
             icon_bg_scale: 100,
+            // 相位二（冲突三）：实验功能新装默认关（存量配置经
+            // experimental_migrated_v0321 迁移保留 true）。
+            experimental_persist_last_known: false,
+            experimental_stats: false,
+            experimental_per_device_polling: false,
+            experimental_bluetooth_wired: false,
+            experimental_migrated_v0321: true,
         }
     }
 }
@@ -599,6 +627,7 @@ impl Config {
         let mut migrated_warn_threshold: Option<u64> = None;
         let mut saw_tier_thresholds = false;
         let mut saw_text_scale_marker = false;
+        let mut saw_experimental_marker = false;
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -717,6 +746,23 @@ impl Config {
                     saw_text_scale_marker = true;
                     cfg.icon_text_scale_migrated_v0318 = *b;
                 }
+                // 相位二（冲突三）：实验功能开关——显式键按文件值。
+                ("experimental_persist_last_known", Value::Bool(b)) => {
+                    cfg.experimental_persist_last_known = *b;
+                }
+                ("experimental_stats", Value::Bool(b)) => {
+                    cfg.experimental_stats = *b;
+                }
+                ("experimental_per_device_polling", Value::Bool(b)) => {
+                    cfg.experimental_per_device_polling = *b;
+                }
+                ("experimental_bluetooth_wired", Value::Bool(b)) => {
+                    cfg.experimental_bluetooth_wired = *b;
+                }
+                ("experimental_migrated_v0321", Value::Bool(b)) => {
+                    saw_experimental_marker = true;
+                    cfg.experimental_migrated_v0321 = *b;
+                }
                 ("icon_bg_scale", Value::Int(n)) => {
                     // D-57：越界钳制到 [20, 100] + 警告（>100 会溢出位图）。
                     let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
@@ -800,7 +846,12 @@ impl Config {
                     | "icon_bg_scale"
                     | "icon_font_tiers_enabled"
                     | "icon_font_tier_thresholds"
-                    | "icon_font_tier_colors",
+                    | "icon_font_tier_colors"
+                    | "experimental_persist_last_known"
+                    | "experimental_stats"
+                    | "experimental_per_device_polling"
+                    | "experimental_bluetooth_wired"
+                    | "experimental_migrated_v0321",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
                 (other, _) => warn(other, "unknown key; ignored"),
@@ -851,6 +902,25 @@ impl Config {
             }
             cfg.icon_text_scale_migrated_v0318 = true;
         }
+        // v0.3.21（相位二冲突三裁决）：实验功能默认态改造——默认关仅对
+        // 新装生效。存量配置（无本标记，v0.3.20 及更早）四个
+        // experimental_* 恒迁 true 保留原行为（v0.3.16 起无条件开启），
+        // 避免「升级后设备从托盘静默消失」的行为突变（F-A-2 口径；
+        // 裁决仅立于「变更不静默」原则——安全性未知、待转正评审逐项
+        // 证实，不采「零事故」作默认态依据，D 核对单差异 1）。
+        if !saw_experimental_marker {
+            cfg.experimental_persist_last_known = true;
+            cfg.experimental_stats = true;
+            cfg.experimental_per_device_polling = true;
+            cfg.experimental_bluetooth_wired = true;
+            warnings.push(ConfigWarning {
+                key: "experimental_migrated_v0321".into(),
+                reason: "migrated (v0.3.21): experimental features kept ON for existing \
+                         configs; new installs default OFF"
+                    .into(),
+            });
+            cfg.experimental_migrated_v0321 = true;
+        }
         // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
         {
             let (ths, cols, mut tier_warns) = normalize_font_tiers(
@@ -897,7 +967,14 @@ impl Config {
              icon_font_tier_colors = [{}]\n\
              icon_text_scale = {}\n\
              icon_text_scale_migrated_v0318 = {}\n\
-             icon_bg_scale = {}\n",
+             icon_bg_scale = {}\n\
+             # 实验性功能（未真机验证）：新装默认关；存量配置已迁移保留原值。\n\
+             # 逐项转正评审中——验证一项开一项（配置文件手动可改）。\n\
+             experimental_persist_last_known = {}\n\
+             experimental_stats = {}\n\
+             experimental_per_device_polling = {}\n\
+             experimental_bluetooth_wired = {}\n\
+             experimental_migrated_v0321 = {}\n",
             self.autostart,
             self.poll_interval_secs,
             self.icon_style.name(),
@@ -915,6 +992,11 @@ impl Config {
             self.icon_text_scale,
             self.icon_text_scale_migrated_v0318,
             self.icon_bg_scale,
+            self.experimental_persist_last_known,
+            self.experimental_stats,
+            self.experimental_per_device_polling,
+            self.experimental_bluetooth_wired,
+            self.experimental_migrated_v0321,
         )
     }
 
