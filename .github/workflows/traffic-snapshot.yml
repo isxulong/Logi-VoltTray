@@ -1,7 +1,9 @@
 name: traffic-snapshot
 
 # T-09（实施令 P2，2026-10-20）：访问数据周快照——单次快照双抓（C 裁决吸收 A）。
-# - cron 周一 05:43 UTC（与 audit 周检 04:37、nightly 03:17 UTC 全部错峰整点）；
+# - cron 每日 05:43 UTC（C-05：T-14/T-09 时钟检查由周一改每日，覆盖 T-14
+#   裁决截止 2026-11-06 前的零信号窗口；与 audit 周检 04:37、nightly
+#   03:17 UTC 全部错峰整点）；
 # - 双抓一：traffic/views（平台访问数据。官方文档口径：仅返回最近 14 天
 #   （https://docs.github.com/en/rest/metrics/traffic —— "Get the total
 #   number of views and breakdown per day or week for the last 14 days"），
@@ -23,12 +25,15 @@ name: traffic-snapshot
 #   无红类）、不装第三方工具（纯 curl + jq，ubuntu-latest 预装件）。
 on:
   schedule:
-    - cron: "43 5 * * 1"
+    - cron: "43 5 * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: read # 只读仓库即可（API 走 GITHUB_TOKEN，releases 端点公开可读）
-  issues: write # P0-2：T-14/T-09 时钟到期开单（首月 advisory 只报不开单，到期日满月后才可能走到开单分支）
+  # C-05（最小权限）：issues:write 自本 advisory job 移除——到期开单须先在
+  # 06 F.1 登记「时钟评审结论＝同意升级」，评审通过后由维护者在本块恢复
+  #   issues: write
+  # 再行启用；恢复前开单/评论写操作失败自动降级为 run 页留痕（见下方时钟步）。
 
 jobs:
   snapshot:
@@ -105,43 +110,82 @@ jobs:
           if-no-files-found: error
 
       # P0-2（C1 冲突五裁决：时钟自动化不等观察期——观察期 ≥ T-14 到期日，
-      # 到期无执行主体即静默过期）：T-14/T-09 到期检查挂本 workflow 周一跑。
-      # 到期日与责任主体集中登记于 docs/experience/06-release-reconciliation.md
-      # F.1 时钟表（2026-10-22 登记口径：T-14＝v0.3.20 Release 日 2026-10-21
-      # +30 天＝2026-11-20；T-09＝README.en-US.md 合入 main 2026-10-21 +90 天
-      # ＝2027-01-19）。**首月 advisory 只报不开单**（REPORT_ONLY_UNTIL，
-      # 期满按 C-F6 评审是否升自动开单）；开单去重与 N-2 同法：label 精确查。
-      # 时钟表登记日若变（维护者改起算日），同步改下方两个常量。
-      - name: T-14/T-09 clock due check (first-month advisory, report-only)
+      # 到期无执行主体即静默过期）：T-14/T-09 到期检查挂本 workflow 每日跑
+      # （C-05：周一改每日，覆盖 T-14 裁决截止 2026-11-06 前的零信号窗口）。
+      # C-10 单源：到期日不设本地常量，启动时从
+      # docs/experience/06-release-reconciliation.md F.1 时钟表对应行 grep
+      # 解析加粗日期（**YYYY-MM-DD**）——只改 06 跑批日期即跟随，解析失败
+      # ::error 并非 0 退出（时钟失效不得静默）。T-14 口径＝裁决截止
+      # 2026-11-06＋禁止到期自动接受（C-03 签发口径，单一文本以 06 为准）。
+      # **首月 advisory 只报不开单**（REPORT_ONLY_UNTIL）；期满后的处置
+      # 走 C-05 评审判据：仅当 06 F.1 登记「时钟评审结论＝同意升级」才执行
+      # 开单（去重与 N-2 同法：label 精确查），否则仅向对账 issue（label
+      # clock-review-due 的未结单）追加评论，无单可评论时 run 页留痕。
+      # issues:write 已自本 job 移除（见 permissions 注记），评审通过后由
+      # 维护者恢复；恢复前写操作失败自动降级为 run 页留痕、不算红。
+      - name: T-14/T-09 clock due check (daily; first-month advisory, report-only)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -uo pipefail
-          T14_DUE="2026-11-20"
-          T09_DUE="2027-01-19"
+          CLOCK_FILE="docs/experience/06-release-reconciliation.md"
+          # C-10：到期日单源＝06 F.1 时钟表该时钟行的加粗日期（**YYYY-MM-DD**）
+          parse_due() {
+            grep -E "^\| $1 " "$CLOCK_FILE" \
+              | grep -oE '\*\*20[0-9]{2}-[0-9]{2}-[0-9]{2}\*\*' \
+              | head -1 | tr -d '*'
+          }
+          T14_DUE=$(parse_due 'T-14')
+          T09_DUE=$(parse_due 'T-09')
+          if [ -z "$T14_DUE" ] || [ -z "$T09_DUE" ]; then
+            echo "::error::时钟单源解析失败（T14='${T14_DUE}' T09='${T09_DUE}'）——06 F.1 时钟表行或加粗到期日缺失，须人工修复（C-10）"
+            exit 1
+          fi
           REPORT_ONLY_UNTIL="2026-11-23"
           today=$(date -u +%F)
           reached() { [ "$1" = "$2" ] || [ "$1" \> "$2" ]; return; }
-          echo "今日（UTC）：${today}｜T-14 到期 ${T14_DUE}｜T-09 到期 ${T09_DUE}｜advisory 只报期至 ${REPORT_ONLY_UNTIL}"
+          echo "今日（UTC）：${today}｜T-14 到期 ${T14_DUE}（自 06 时钟表解析）｜T-09 到期 ${T09_DUE}（同上）｜advisory 只报期至 ${REPORT_ONLY_UNTIL}"
           due=""
           if reached "$today" "$T14_DUE"; then due="T-14"; fi
           if reached "$today" "$T09_DUE"; then
             if [ -n "$due" ]; then due="${due} + T-09"; else due="T-09"; fi
           fi
           if [ -z "$due" ]; then
-            echo "[时钟] 无到期项（T-14/T-09 均未到期），本周仅留痕"
+            echo "[时钟] 无到期项（T-14/T-09 均未到期），本日仅留痕"
             exit 0
           fi
           if [ "$today" \< "$REPORT_ONLY_UNTIL" ]; then
             echo "[advisory] ${due} 已/即将到期——首月 advisory 只报不开单（P0-2）。请维护者按 06 F.1 时钟表处置并在对账区留痕。"
             exit 0
           fi
-          echo "[开单] ${due} 到期且已过 advisory 期，按 N-2 同法开单（label 查重）"
-          gh label create clock-review-due \
+          # C-05 评审判据：06 F.1 以独立行（行首列表项）登记
+          # 「时钟评审结论＝同意升级」才执行开单——锚定行首防止匹配到
+          # 06 中描述本机制自身的说明文字（机制说明 ≠ 评审结论）。
+          if ! grep -qE '^\s*[-*]\s*(\*\*)?时钟评审结论＝同意升级' "$CLOCK_FILE"; then
+            echo "[评论] ${due} 到期且已过 advisory 期，但 06 未登记「时钟评审结论＝同意升级」（C-05）——不开单，仅向对账 issue 追加评论"
+            num=$(gh issue list --state open --label clock-review-due \
+              --json number --limit 1 2>/dev/null | jq -r '.[0].number // empty' 2>/dev/null || true)
+            if [ -n "$num" ]; then
+              if gh issue comment "$num" \
+                --body "${due} 时钟已到期、评审结论未登记（C-05：仅评论不开单）。处置出口：按 06 F.1 时钟表「到期判据与逾期处置」列执行，并在下一次发布对账留痕。"; then
+                echo "[P0-2] 已向对账 issue #${num} 追加评论"
+              else
+                echo "[降级] issues:write 未启用（C-05：评审通过后由维护者恢复），评论写入失败——请维护者手动在对账区留痕：${due} 已到期、评审结论未登记"
+              fi
+            else
+              echo "[留痕] 无 label=clock-review-due 的未结对账 issue 可评论；请维护者按 06 F.1 处置并在对账区留痕：${due} 已到期、评审结论未登记"
+            fi
+            exit 0
+          fi
+          echo "[开单] ${due} 到期、已过 advisory 期且 06 已登记评审结论＝同意升级，按 N-2 同法开单（label 查重）"
+          if ! gh label create clock-review-due \
             --color D93F0B \
             --description "T-14/T-09 时钟到期评审（P0-2）" \
-            --if-not-exists
+            --if-not-exists; then
+            echo "[降级] issues:write 未启用（C-05：评审结论已登记，请维护者在 permissions 恢复 issues: write 后重跑本 workflow 或手动开单）——${due} 已到期"
+            exit 0
+          fi
           num=$(gh issue list --state open --label clock-review-due \
             --json number --limit 1 | jq -r '.[0].number // empty')
           if [ -n "$num" ]; then

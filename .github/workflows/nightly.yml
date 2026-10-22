@@ -182,8 +182,12 @@ jobs:
   # 如何被发现——本 job 每晚对 verify.sh 做干跑自检：① bash -n 语法
   # 检查；② 实跑 --a4 独立模式（A4 哈希双算：tomllib 结构路 + awk
   # 文本路，见 verify.sh a4_check）。失效当晚 job 红、按 N-2 同法
-  # 自动开单——脚本失效不依赖人来发现。ubuntu-latest py3.12 自带
-  # tomllib，双路齐备；无 toml 解析器的环境走 SKIP 降级不红。
+  # 自动开单——脚本失效不依赖人来发现。
+  # C-06（fail-closed）：SKIP 静默绿已废止——自检的全部存在理由是反
+  # E31「门禁存在≠门禁在跑」，SKIP 绿等于把 E31 请回自检自身。本 job
+  # 以 python≥3.11 为前提断言（tomllib 为标准库），--a4 走 --strict：
+  # python 缺席 / 无 tomllib 即 ::error 并非 0 退出。宣称限定：本 job
+  # 暴露面＝**A4 子集失效当晚暴露**，不宣称覆盖 verify.sh 全部功能失效。
   verify-selfcheck:
     runs-on: ubuntu-latest
     steps:
@@ -192,8 +196,19 @@ jobs:
       - name: bash -n syntax check
         run: bash -n verify.sh
 
-      - name: verify.sh --a4 dry-run
-        run: bash verify.sh --a4
+      # C-06 前提断言：python≥3.11（tomllib 标准库）。不满足即红，
+      # 不让 --a4 走到 SKIP 分支。
+      - name: assert python >= 3.11 (fail-closed precondition)
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          assert sys.version_info >= (3, 11), \
+              f"python {sys.version.split()[0]} < 3.11，tomllib 不可用（C-06 前提断言失败）"
+          print(f"python {sys.version.split()[0]} >= 3.11，C-06 前提满足")
+          PYEOF
+
+      - name: verify.sh --a4 dry-run (fail-closed)
+        run: bash verify.sh --a4 --strict
 
       # N-2 同法开单（label 精确查重 + 评论上限 10 条防噪）。
       - name: N-2 open-or-comment issue (verify-selfcheck-failure)
@@ -241,6 +256,9 @@ jobs:
   #    04 §8，由映射表收录）有定义。
   # ③ D 编号引用存在性——引用的 D-NN 须在 volttray/docs/decisions.md
   #    表中存在（2026-10-22 基线：D-01–D-83）。
+  # ④ 节/编号唯一性（C-02）——03 门禁表的 D 编号（`| D数字` 首列）与
+  #    `## 大写字母.` 节标题不得重复：存在性检查只查「有没有」，双 D8 /
+  #    双 G 节撞号对①–③不可见，唯一性须单独断言。
   pointer-drift-advisory:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -290,6 +308,18 @@ jobs:
             fail=1
           else
             echo "（引用全部有定义）"
+          fi
+          echo "── ④ 节/编号唯一性（03 门禁表，C-02）──"
+          # D 编号唯一：`^| D数字` 首列不得重复（防双 D8 撞号）
+          dup_D=$(grep -oE '^\| D[0-9]+' docs/experience/03-release-quality-gate.md | sort | uniq -d || true)
+          # 节标题唯一：`## 大写字母.` 不得重复（防双 G 节撞号）
+          dup_sec=$(grep -oE '^## [A-Z]\.' docs/experience/03-release-quality-gate.md | sort | uniq -d || true)
+          if [ -n "$dup_D" ] || [ -n "$dup_sec" ]; then
+            [ -n "$dup_D" ] && echo "重复 D 编号：$(printf '%s ' $dup_D)"
+            [ -n "$dup_sec" ] && echo "重复节标题：$(printf '%s ' $dup_sec)"
+            fail=1
+          else
+            echo "（D 编号与节标题均唯一）"
           fi
           echo "── 结果：fail=${fail}（report-only，不阻断）──"
           exit $fail

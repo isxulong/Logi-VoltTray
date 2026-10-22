@@ -9,8 +9,12 @@
 # 对账表见 docs/experience/06-release-reconciliation.md F 节（F.1 常设区 / F.2 本期对账区；人工维护，本脚本只读、不覆盖写）。
 #
 # 用法：bash verify.sh [--quick]        # --quick 跳过交叉编译 check
-#       bash verify.sh --a4             # 只跑 A4 版本一致性哈希双算（不依赖 cargo，
-#                                       # 供 nightly dry-run 自检调用，P1-5）
+#       bash verify.sh --a4 [--strict]  # 只跑 A4 版本一致性哈希双算（不依赖 cargo，
+#                                       # 供 nightly dry-run 自检调用，P1-5）；
+#                                       # --strict＝fail-closed（C-06）：python3 缺席
+#                                       # 或无 tomllib（<3.11 且未装 tomli）时 ::error
+#                                       # 并非 0 退出，不再 SKIP 静默绿。本地默认
+#                                       # 非 strict：缺席仍只提示跳过。
 set -uo pipefail
 
 cd "$(cd "$(dirname "$0")/volttray" && pwd)"
@@ -36,13 +40,18 @@ run() {
 #    路径乙（文本路）：sed 从根 Cargo.toml 抠 [workspace.package] 的
 #    version 行，grep 数 member crates 里 version.workspace = true 的行数
 #    并与 crate 数比对。
-#    「脚本自身失效如何被发现」的自答：本函数经 --a4 形态被 nightly.yml
-#    verify-selfcheck job 每晚 dry-run 实跑（含 bash -n 语法检查），失效当
-#    晚 job 红、按 N-2 同法自动开单——脚本失效不依赖人来发现。
+#    「脚本自身失效如何被发现」的自答：本函数经 --a4 --strict 形态被
+#    nightly.yml verify-selfcheck job 每晚 dry-run 实跑（含 bash -n 语法
+#    检查，C-06 起 fail-closed：SKIP 即 ::error 并非 0 退出），失效当晚
+#    job 红、按 N-2 同法自动开单——脚本失效不依赖人来发现。
 a4_check() {
   local rc=0
   section "A4 版本一致性哈希双算（版本号一处修改、全仓生效）"
   if ! command -v python3 >/dev/null 2>&1; then
+    if [ "${A4_STRICT:-0}" = "1" ]; then
+      printf '::error::python3 不可用，A4 双算无法执行——fail-closed（C-06：SKIP 静默绿已废止）\n'
+      return 1
+    fi
     printf '[提示] python3 不可用，A4 双算跳过（完整门禁以 CI 为准）\n'
     return 0
   fi
@@ -78,6 +87,10 @@ print(version)
 PYEOF
   )
   if [ "$?" -eq 3 ] || [ "${ver_a#SKIP:}" != "$ver_a" ]; then
+    if [ "${A4_STRICT:-0}" = "1" ]; then
+      printf '::error::python3 无 tomllib/tomli（<3.11 且未装 tomli），A4 双算无法执行——fail-closed（C-06：nightly 前提断言 python≥3.11，本分支出现即自检失效）\n'
+      return 1
+    fi
     printf '[提示] python3 无 tomllib/tomli（<3.11 且未装 tomli），A4 双算跳过（完整门禁以 CI / 新版 python 为准）\n'
     return 0
   fi
@@ -111,6 +124,9 @@ PYEOF
 }
 
 if [ "${1:-}" = "--a4" ]; then
+  # --strict（C-06 fail-closed）：SKIP 即 ::error 并非 0 退出，供 nightly
+  # verify-selfcheck 调用；本地手动跑默认非 strict。
+  if [ "${2:-}" = "--strict" ]; then A4_STRICT=1; fi
   a4_check
   exit $?
 fi
