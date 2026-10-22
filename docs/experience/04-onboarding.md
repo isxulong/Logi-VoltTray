@@ -14,8 +14,13 @@ Logi-VoltTray/
 ├── README.md                 # 产品说明（功能 / 快速上手 / 配置 / 构建）
 ├── logi_*.py, red/, tests/   # 早期 Python 参考实现与协议逻辑测试
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
-├── .github/workflows/        # ci.yml（fmt --check + clippy + 测试 + 构建）
-│                             # nightly.yml / bootstrap-lock.yml
+├── .github/workflows/        # ci.yml（windows：fmt --check + clippy + 测试 + 构建；
+│                             #   ubuntu：workspace clippy/test 复核 + actionlint 提示模式）
+│                             # nightly.yml（fuzz 烟测 + 失败自动开单 N-2）
+│                             # bootstrap-lock.yml / audit.yml（cargo audit 周检）
+│                             # release.yml（发布产物构建）
+│                             # traffic-snapshot.yml（访问数据周快照：T-07 门槛
+│                             # 与 T-14/T-09 时钟提醒的数据源）
 ├── docs/
 │   └── experience/           # 本知识库（仓库根级 docs/experience/）
 └── volttray/                 # 现行工程：Rust workspace（5 crates）
@@ -65,9 +70,12 @@ cargo build --release --locked -p volttray-tray
 | --- | --- | --- |
 | `protocol` | 任意平台 | 黄金样例 + proptest，协议解析 / 编码 / 映射全锁 |
 | `device` / `app` | 任意平台 | 纯逻辑单测（状态机、连败裁决、映射、诊断导出降级） |
-| `tray`（cfg windows） | Windows 才有完整功能；非 Windows 平台编译为**占位 stub**（`main.rs` 的 `cfg(not(windows))` 分支：打印「仅支持 Windows」提示并退出），`cargo test --workspace` 能编过但 tray 运行时零覆盖；CI 为 windows-latest，编译与全量测试都在 Windows 跑 | 托盘 / 菜单 / Raw Input 等运行时行为**必须真机验证**——发布说明「未验证项」段的常客 |
+| `tray`（cfg windows） | Windows 才有完整功能；非 Windows 平台编译为**占位 stub**（`main.rs` 的 `cfg(not(windows))` 分支：打印「仅支持 Windows」提示并退出），`cargo test --workspace` 能编过但 tray 运行时零覆盖；CI 为 **windows-latest（编译与全量测试）＋ ubuntu-latest（ci.yml `ubuntu` job：装 libudev-dev 后跑 workspace clippy / test 复核——transport 默认特性把 hidapi 拉入全平台构建的盲区由此暴露）** | 托盘 / 菜单 / Raw Input 等运行时行为**必须真机验证**——发布说明「未验证项」段的常客 |
 
-- 全量测试（v0.3.15 时点）：**230 项**（Windows CI 全量），其中 32 项为 `cfg(windows)` 专属——Linux 侧 `cargo test --workspace` 实测 **198 项**；T6 修复合并后净增 19 项单测（「v0.3.15 tag → 合并提交 `700ccf80`」测试名 diff 静态计数口径）。跨口径换算见 [02 E22](02-collaboration-playbook.md#e22-红蓝对抗编排进阶裁决注入断点防御时序核对取数口径) 取数口径段。
+- 全量测试计数（**口径 + 取数命令**形态，D3 修复：数字随时点漂移，引用前重取、不落历史定值）：
+  - **源码静态口径**：`grep -rc '#\[test\]' volttray/crates --include='*.rs' | awk -F: '{s+=$2} END {print s}'` —— 2026-10-22 实测 **390**（含 `cfg(windows)` 专属与各平台条件编译项；静态计数 ≠ 任何单一平台的运行时测试数）；
+  - **平台实测口径**：目标平台实跑 `cargo test --workspace --locked` 计数——Windows CI（windows-latest）为全量，Linux 侧因 `cfg(windows)` 条件编译而少于全量；引用时写明平台与取数日期；
+  - 每个关键数字须**两条独立取数路径且结果一致**（跨口径换算见 [02 E22](02-collaboration-playbook.md#e22-红蓝对抗编排进阶裁决注入断点防御时序核对取数口径) 取数口径段；门禁 C2：测试数从产物 / 源码实测读取，不从汇报抄）。
 - 测试文化：每个真机事故的修复都伴随「能区分旧行为」的回归测试（例：D-64 的红态证据测试——分档模式 map 无 Default 键，正是真机日志卡点）。
 - 引用测试数时从实测读取，别从汇报抄（E7）。
 

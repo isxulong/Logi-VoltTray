@@ -8,7 +8,7 @@ name: nightly
 #   崩溃与接线退化，不是安全防线；
 # - 协议测试为真实门禁（PR#6 已合入裁决，失败即红）——0007 原设计的
 #   步级 continue-on-error 不再适用，见 N-2 开单步注记；
-# - 发布对账承载：docs/experience/03-release-quality-gate.md F 节（30 晚
+# - 发布对账承载：docs/experience/06-release-reconciliation.md F 节（30 晚
 #   时钟挂常设区，本 workflow 是时钟的数据源）。
 
 on:
