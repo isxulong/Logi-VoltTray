@@ -73,6 +73,26 @@ jobs:
           cd target/release
           sha256sum volttray-tray.exe | tee volttray-tray.exe.sha256.txt
 
+      # 相位二（第 3 项）：发布契约断言——资产名/数量/sha256 格式/自启
+      # 注册表路径静态断言，拦截 U-7/D-83 类「发布与验证脱节」失效；
+      # 资产名 volttray-tray.exe 在品牌纪元内冻结（更名即红）。
+      - name: release-contract assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ① 资产存在性与名称冻结
+          test -f target/release/volttray-tray.exe || { echo "::error::EXE 缺失或名称漂移（volttray-tray.exe 品牌纪元内冻结）"; exit 1; }
+          test -f target/release/volttray-tray.exe.sha256.txt || { echo "::error::sha256 校验文件缺失"; exit 1; }
+          # ② sha256 文件格式：64 位小写 hex + 两空格 + 冻结文件名
+          grep -Eq '^[0-9a-f]{64}  volttray-tray\.exe$' target/release/volttray-tray.exe.sha256.txt \
+            || { echo "::error::sha256 文件格式不符（应：64hex  two-spaces  volttray-tray.exe）"; exit 1; }
+          # ③ 自启注册表路径与值名静态断言（HKCU Run 键冻结）
+          grep -qF 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' crates/app/src/autostart.rs \
+            || { echo "::error::自启注册表路径漂移（autostart.rs RUN_KEY）"; exit 1; }
+          grep -qF '"LogiVoltTray"' crates/app/src/autostart.rs \
+            || { echo "::error::自启值名漂移（autostart.rs RUN_VALUE_NAME）"; exit 1; }
+          echo "release-contract 全部断言通过"
+
       # T-05：注入最近一次 nightly 状态到 Release 说明（gh CLI 为 runner
       # 预装件，C-F4）。先落兜底文案再尝试覆盖，保证 body 文件必然存在；
       # 步级 continue-on-error + 脚本内 || true——发布时刻 API 不可用
