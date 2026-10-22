@@ -54,6 +54,21 @@ jobs:
           set -o pipefail
           cargo test --workspace --locked 2>&1 | tee ../test.log
 
+      # 相位二（第 7 项）：门禁健康断言——协议冻结对照基线（red/）与
+      # golden 向量目录存在且非空，防目录漂移致冻结门禁空转（RED_DIR
+      # 指错类问题已于 v0.3.17 修复，此处为持续健康检查）。
+      - name: gate health (vectors present)
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d red || { echo "::error::red/ 对照基线目录缺失"; exit 1; }
+          test -d volttray/fixtures/golden || { echo "::error::golden 向量目录缺失"; exit 1; }
+          n=$(find volttray/fixtures/golden -type f | wc -l)
+          [ "$n" -gt 0 ] || { echo "::error::golden 向量目录为空"; exit 1; }
+          echo "golden 向量文件数：$n"
+          echo "向量目录最近提交时间：$(git log -1 --format='%ci' -- red volttray/fixtures/golden)"
+
       # v0.3.17（一轮 P0-④）：协议冻结门禁纳入 CI（Python 单侧，仓库根
       # 执行；tests/_winstub.py 提供 hid 桩，windows runner 自带 python）
       - name: protocol freeze (python unittest)
@@ -122,6 +137,22 @@ jobs:
           set -o pipefail
           cargo test --workspace --locked 2>&1 | tee ../test-ubuntu.log
 
+      # 相位二（第 2 项）：windows-target 构建门禁——tray crate 的
+      # cfg(windows) 代码（settings/bootlog 等模块）在 Linux check 中
+      # 不参与编译（D-75 类「从未在 Windows 编译过」盲区）；ubuntu job
+      # 补 mingw 交叉 check，把该盲区从 windows runner 首编译前移。
+      - name: install mingw cross toolchain
+        run: sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: rustup target add x86_64-pc-windows-gnu
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: cargo check (windows target)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --workspace --locked --target x86_64-pc-windows-gnu 2>&1 | tee ../check-windows-target.log
+
       - name: upload logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -130,6 +161,7 @@ jobs:
           path: |
             clippy-ubuntu.log
             test-ubuntu.log
+            check-windows-target.log
           if-no-files-found: ignore
           retention-days: 7
 

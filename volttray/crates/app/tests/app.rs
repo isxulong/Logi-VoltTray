@@ -24,7 +24,11 @@ fn watcher_detects_mtime_change() {
 
     // 确保 mtime 前进（部分文件系统粒度为秒级）。
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "low_threshold = 33\n").expect("rewrite");
+    std::fs::write(
+        &path,
+        "low_threshold = 33\nexperimental_migrated_v0321 = true\n",
+    )
+    .expect("rewrite");
 
     let loaded = watcher.poll().expect("change detected").expect("load ok");
     assert_eq!(loaded.0.low_threshold, 33);
@@ -39,7 +43,11 @@ fn watcher_survives_invalid_rewrite() {
     let path = temp_config("watch_bad", "low_threshold = 30\n");
     let mut watcher = ConfigWatcher::new(path.clone());
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "low_threshold = \"abc\"\nunknown_key = 1\n").expect("rewrite");
+    std::fs::write(
+        &path,
+        "low_threshold = \"abc\"\nunknown_key = 1\nexperimental_migrated_v0321 = true\n",
+    )
+    .expect("rewrite");
     let (cfg, warnings) = watcher.poll().expect("change").expect("load ok");
     assert_eq!(
         cfg,

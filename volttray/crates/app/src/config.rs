@@ -493,6 +493,29 @@ pub struct Config {
     /// 图标背景覆盖度（% 相对位图内切块，D-48/D-57），默认 100，范围
     /// 20..=100（100% = 满出血零边距，已触及位图边界，故上限为 100）。
     pub icon_bg_scale: u8,
+    /// 实验性功能开关组（相位二 · 冲突三裁决，F-A-2 口径）：四项未真机
+    /// 验证功能的逐项总闸。**新装默认关**（Default 全 false）；存量配置
+    /// （无 `experimental_migrated_v0321` 标记）解析时缺失键迁 true 保留
+    /// 原行为——默认关只对新装生效，变更不静默（避免「升级后设备从托盘
+    /// 静默消失」的行为突变）；显式解析到的键值不被迁移覆盖（C-09：
+    /// 回退→再升级 / 手写存量配置路径下显式 false 保留）。安全性未知、
+    /// 待转正评审逐项证实（不采「零事故」作默认态依据，D 核对单差异 1）。
+    /// 重启即显最后已知电量（last_known.json 持久化 + 虚拟条目）。
+    pub experimental_persist_last_known: bool,
+    /// 耗电统计与导出（stats.jsonl 落盘与导出链路）。
+    pub experimental_stats: bool,
+    /// 按设备计时轮询——关 = 充电设备不再走 15s 快刷档、与常态设备同
+    /// 按配置档轮询。休眠设备零主动查询（D-33 红线）不受本开关影响，
+    /// 恒保持。
+    pub experimental_per_device_polling: bool,
+    /// 蓝牙直连与有线设备读取（HID++ 0xFF 直连槽扫描）。
+    pub experimental_bluetooth_wired: bool,
+    /// v0.3.21 存量迁移标记（先例：icon_text_scale_migrated_v0318）：
+    /// 缺失（v0.3.20 及更早配置）→ 四个 experimental_* 缺失键迁 true
+    /// 保留原行为 + 警告（显式解析到的键不覆盖，C-09）；标记存在 →
+    /// 按文件显式值。解析后恒置 true 并随 to_toml 写出（幂等）；
+    /// 旧版本读取时按未知键忽略（降级兼容）。
+    pub experimental_migrated_v0321: bool,
 }
 
 impl Default for Config {
@@ -516,6 +539,13 @@ impl Default for Config {
             icon_text_scale: ICON_TEXT_SCALE_DEFAULT,
             icon_text_scale_migrated_v0318: true,
             icon_bg_scale: 100,
+            // 相位二（冲突三）：实验功能新装默认关（存量配置经
+            // experimental_migrated_v0321 迁移保留 true）。
+            experimental_persist_last_known: false,
+            experimental_stats: false,
+            experimental_per_device_polling: false,
+            experimental_bluetooth_wired: false,
+            experimental_migrated_v0321: true,
         }
     }
 }
@@ -599,6 +629,13 @@ impl Config {
         let mut migrated_warn_threshold: Option<u64> = None;
         let mut saw_tier_thresholds = false;
         let mut saw_text_scale_marker = false;
+        let mut saw_experimental_marker = false;
+        // C-09：逐键记录显式出现——迁移只补缺失键、不覆盖显式解析到的键
+        // （回退→再升级 / 手写存量配置路径，显式 false 不得被重置）。
+        let mut saw_experimental_persist = false;
+        let mut saw_experimental_stats = false;
+        let mut saw_experimental_per_device = false;
+        let mut saw_experimental_bluetooth = false;
 
         for raw_line in text.trim_start_matches('\u{FEFF}').lines() {
             let line = strip_comment(raw_line).trim();
@@ -717,6 +754,27 @@ impl Config {
                     saw_text_scale_marker = true;
                     cfg.icon_text_scale_migrated_v0318 = *b;
                 }
+                // 相位二（冲突三）：实验功能开关——显式键按文件值。
+                ("experimental_persist_last_known", Value::Bool(b)) => {
+                    saw_experimental_persist = true;
+                    cfg.experimental_persist_last_known = *b;
+                }
+                ("experimental_stats", Value::Bool(b)) => {
+                    saw_experimental_stats = true;
+                    cfg.experimental_stats = *b;
+                }
+                ("experimental_per_device_polling", Value::Bool(b)) => {
+                    saw_experimental_per_device = true;
+                    cfg.experimental_per_device_polling = *b;
+                }
+                ("experimental_bluetooth_wired", Value::Bool(b)) => {
+                    saw_experimental_bluetooth = true;
+                    cfg.experimental_bluetooth_wired = *b;
+                }
+                ("experimental_migrated_v0321", Value::Bool(b)) => {
+                    saw_experimental_marker = true;
+                    cfg.experimental_migrated_v0321 = *b;
+                }
                 ("icon_bg_scale", Value::Int(n)) => {
                     // D-57：越界钳制到 [20, 100] + 警告（>100 会溢出位图）。
                     let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
@@ -800,7 +858,12 @@ impl Config {
                     | "icon_bg_scale"
                     | "icon_font_tiers_enabled"
                     | "icon_font_tier_thresholds"
-                    | "icon_font_tier_colors",
+                    | "icon_font_tier_colors"
+                    | "experimental_persist_last_known"
+                    | "experimental_stats"
+                    | "experimental_per_device_polling"
+                    | "experimental_bluetooth_wired"
+                    | "experimental_migrated_v0321",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
                 (other, _) => warn(other, "unknown key; ignored"),
@@ -851,6 +914,36 @@ impl Config {
             }
             cfg.icon_text_scale_migrated_v0318 = true;
         }
+        // v0.3.21（相位二冲突三裁决）：实验功能默认态改造——默认关仅对
+        // 新装生效。存量配置（无本标记，v0.3.20 及更早）四个
+        // experimental_* 恒迁 true 保留原行为（v0.3.16 起无条件开启），
+        // 避免「升级后设备从托盘静默消失」的行为突变（F-A-2 口径；
+        // 裁决仅立于「变更不静默」原则——安全性未知、待转正评审逐项
+        // 证实，不采「零事故」作默认态依据，D 核对单差异 1）。
+        // C-09：迁移只补缺失键、不覆盖显式解析到的键——「回退→再升级」
+        // （旧版重写丢弃标记，用户按 README 手写补回显式 false）与
+        // 「手写配置视为存量」路径下，显式 false 必须保留。
+        if !saw_experimental_marker {
+            if !saw_experimental_persist {
+                cfg.experimental_persist_last_known = true;
+            }
+            if !saw_experimental_stats {
+                cfg.experimental_stats = true;
+            }
+            if !saw_experimental_per_device {
+                cfg.experimental_per_device_polling = true;
+            }
+            if !saw_experimental_bluetooth {
+                cfg.experimental_bluetooth_wired = true;
+            }
+            warnings.push(ConfigWarning {
+                key: "experimental_migrated_v0321".into(),
+                reason: "migrated (v0.3.21): missing experimental_* keys filled ON for existing \
+                         configs (explicit values preserved); new installs default OFF"
+                    .into(),
+            });
+            cfg.experimental_migrated_v0321 = true;
+        }
         // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
         {
             let (ths, cols, mut tier_warns) = normalize_font_tiers(
@@ -897,7 +990,14 @@ impl Config {
              icon_font_tier_colors = [{}]\n\
              icon_text_scale = {}\n\
              icon_text_scale_migrated_v0318 = {}\n\
-             icon_bg_scale = {}\n",
+             icon_bg_scale = {}\n\
+             # 实验性功能（未真机验证）：新装默认关；存量配置已迁移保留原值。\n\
+             # 逐项转正评审中——验证一项开一项（配置文件手动可改）。\n\
+             experimental_persist_last_known = {}\n\
+             experimental_stats = {}\n\
+             experimental_per_device_polling = {}\n\
+             experimental_bluetooth_wired = {}\n\
+             experimental_migrated_v0321 = {}\n",
             self.autostart,
             self.poll_interval_secs,
             self.icon_style.name(),
@@ -915,6 +1015,11 @@ impl Config {
             self.icon_text_scale,
             self.icon_text_scale_migrated_v0318,
             self.icon_bg_scale,
+            self.experimental_persist_last_known,
+            self.experimental_stats,
+            self.experimental_per_device_polling,
+            self.experimental_bluetooth_wired,
+            self.experimental_migrated_v0321,
         )
     }
 
@@ -1000,7 +1105,7 @@ mod tests {
              notifications_enabled = false\nnotification_silent = true\n\
              icon_shape = \"square\"\nicon_background = \"#0A6CFF\"\n\
              icon_font_color = \"#FFD21F\"\nicon_font_family = \"Consolas\"\n\
-             low_threshold = 30\nblink_enabled = false\n",
+             low_threshold = 30\nblink_enabled = false\nexperimental_migrated_v0321 = true\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.autostart);
@@ -1032,7 +1137,9 @@ mod tests {
 
     #[test]
     fn unknown_keys_warn_not_fail() {
-        let (c, w) = Config::parse("evil_key = true\nlow_threshold = 30\n");
+        let (c, w) = Config::parse(
+            "evil_key = true\nlow_threshold = 30\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 30);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].key, "evil_key");
@@ -1040,7 +1147,9 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back_with_warning() {
-        let (c, w) = Config::parse("icon_style = \"neon\"\nicon_shape = \"hex\"\n");
+        let (c, w) = Config::parse(
+            "icon_style = \"neon\"\nicon_shape = \"hex\"\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_style, IconStyle::Auto);
         assert_eq!(c.icon_shape, IconShape::Rounded);
         assert_eq!(w.len(), 2);
@@ -1050,7 +1159,8 @@ mod tests {
     fn out_of_range_values_clamp_with_warning() {
         // M10/M12：越界钳制到边界 + 警告（不重置默认）。
         let (c, w) = Config::parse(
-            "poll_interval_secs = 5\nlow_threshold = 80\nicon_font_family = \"  \"\n",
+            "poll_interval_secs = 5\nlow_threshold = 80\nicon_font_family = \"  \"\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
         assert_eq!(c.low_threshold, LOW_THRESHOLD_MAX);
@@ -1063,7 +1173,10 @@ mod tests {
     #[test]
     fn legacy_keys_migrate() {
         // v0.2.0 双阈值 → v0.3.0 单阈值：warn 值迁移（显式 low_threshold 优先）。
-        let (c, w) = Config::parse("low_threshold_warn = 25\nlow_threshold_critical = 10\n");
+        let (c, w) = Config::parse(
+            "low_threshold_warn = 25\nlow_threshold_critical = 10\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 25);
         assert_eq!(w.len(), 2);
         assert!(w.iter().all(|x| x.key.starts_with("low_threshold_")));
@@ -1078,7 +1191,9 @@ mod tests {
 
     #[test]
     fn legacy_transparent_background_migrates_to_shape() {
-        let (c, w) = Config::parse("icon_background = \"transparent\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"transparent\"\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_shape, IconShape::Transparent);
         // 背景保默认 dark（透明时不渲染背景）。
         assert_eq!(c.icon_background, IconBackground::Dark);
@@ -1087,18 +1202,24 @@ mod tests {
 
     #[test]
     fn icon_color_options_parse_and_fall_back() {
-        let (c, w) = Config::parse("icon_background = \"light\"\nicon_font_color = \"auto\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"light\"\nicon_font_color = \"auto\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.icon_background, IconBackground::Light);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
 
-        let (c, w) =
-            Config::parse("icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n");
+        let (c, w) = Config::parse(
+            "icon_background = \"midnight\"\nicon_font_color = \"#12345\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_background, IconBackground::Dark);
         assert_eq!(c.icon_font_color, IconFontColor::Auto);
         assert_eq!(w.len(), 2);
 
-        let (c, w) = Config::parse("icon_font_color = \"#ff00aa\"\n");
+        let (c, w) =
+            Config::parse("icon_font_color = \"#ff00aa\"\nexperimental_migrated_v0321 = true\n");
         assert!(w.is_empty());
         assert_eq!(
             c.icon_font_color,
@@ -1120,8 +1241,10 @@ mod tests {
 
     #[test]
     fn comments_and_malformed_lines_tolerated() {
-        let (c, w) =
-            Config::parse("# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n");
+        let (c, w) = Config::parse(
+            "# comment\n\nlow_threshold = 15 # inline\n[section]\ngarbage line\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.low_threshold, 15);
         assert_eq!(w.len(), 2); // section + garbage
     }
@@ -1203,16 +1326,18 @@ mod tests {
         // 平局取更低档：1200 与 600/1800 各差 600 → 取 600。
         assert_eq!(normalize_poll_secs(1200), 600);
         // 解析层：越界与非档位值都产生警告并落位。
-        let (c, w) = Config::parse("poll_interval_secs = 900\n");
+        let (c, w) =
+            Config::parse("poll_interval_secs = 900\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, 600);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.contains("snapped"), "{w:?}");
-        let (c, w) = Config::parse("poll_interval_secs = 5\n");
+        let (c, w) = Config::parse("poll_interval_secs = 5\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, POLL_MIN_SECS);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.contains("out of range"), "{w:?}");
         // 档位值无警告。
-        let (c, w) = Config::parse("poll_interval_secs = 1800\n");
+        let (c, w) =
+            Config::parse("poll_interval_secs = 1800\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.poll_interval_secs, 1800);
         assert!(w.is_empty(), "{w:?}");
     }
@@ -1223,13 +1348,17 @@ mod tests {
     #[test]
     fn poll_legacy_tiers_migrate_with_warning() {
         for (old, new) in [(60, 300), (900, 600)] {
-            let (c, w) = Config::parse(&format!("poll_interval_secs = {old}\n"));
+            let (c, w) = Config::parse(&format!(
+                "poll_interval_secs = {old}\nexperimental_migrated_v0321 = true\n"
+            ));
             assert_eq!(c.poll_interval_secs, new, "{old} should migrate to {new}");
             assert_eq!(w.len(), 1, "{w:?}");
             assert_eq!(w[0].key, "poll_interval_secs");
         }
         for keep in [300, 600, 1800] {
-            let (c, w) = Config::parse(&format!("poll_interval_secs = {keep}\n"));
+            let (c, w) = Config::parse(&format!(
+                "poll_interval_secs = {keep}\nexperimental_migrated_v0321 = true\n"
+            ));
             assert_eq!(c.poll_interval_secs, keep);
             assert!(w.is_empty(), "{keep} is a valid tier: {w:?}");
         }
@@ -1238,7 +1367,9 @@ mod tests {
     /// D-48：文本/背景缩放键——解析、钳制、往返。
     #[test]
     fn icon_scale_keys_parse_clamp_roundtrip() {
-        let (c, w) = Config::parse("icon_text_scale = 130\nicon_bg_scale = 80\n");
+        let (c, w) = Config::parse(
+            "icon_text_scale = 130\nicon_bg_scale = 80\nexperimental_migrated_v0321 = true\n",
+        );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.icon_text_scale, 130);
         assert_eq!(c.icon_bg_scale, 80);
@@ -1248,20 +1379,22 @@ mod tests {
 
         // 越界钳制 + 警告：文本 200 → 160、10 → 40；背景 130 → 100（几何上限）、
         // 10 → 20（D-57 新边界）。
-        let (c, w) = Config::parse("icon_text_scale = 200\nicon_bg_scale = 130\n");
+        let (c, w) = Config::parse(
+            "icon_text_scale = 200\nicon_bg_scale = 130\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MAX);
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MAX);
         assert_eq!(w.len(), 2);
         assert!(w.iter().any(|x| x.key == "icon_text_scale"));
         assert!(w.iter().any(|x| x.key == "icon_bg_scale"));
-        let (c, w) = Config::parse("icon_text_scale = 10\n");
+        let (c, w) = Config::parse("icon_text_scale = 10\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_MIN);
         assert_eq!(w.len(), 1);
-        let (c, w) = Config::parse("icon_bg_scale = 10\n");
+        let (c, w) = Config::parse("icon_bg_scale = 10\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_bg_scale, ICON_BG_SCALE_MIN);
         assert_eq!(w.len(), 1);
         // 非整数 / 布尔 → 默认保留 + 警告（v0.3.18：默认 140）。
-        let (c, w) = Config::parse("icon_text_scale = true\n");
+        let (c, w) = Config::parse("icon_text_scale = true\nexperimental_migrated_v0321 = true\n");
         assert_eq!(c.icon_text_scale, ICON_TEXT_SCALE_DEFAULT);
         assert_eq!(w.len(), 1);
     }
@@ -1343,7 +1476,8 @@ mod tests {
         let (c, w) = Config::parse(
             "icon_font_tiers_enabled = true\n\
              icon_font_tier_thresholds = [15, 45, 80]\n\
-             icon_font_tier_colors = [\"#E81123\", \"#FFD21F\", \"#00CC6A\", \"#0078D7\"]\n",
+             icon_font_tier_colors = [\"#E81123\", \"#FFD21F\", \"#00CC6A\", \"#0078D7\"]\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert!(w.is_empty(), "{w:?}");
         assert!(c.icon_font_tiers_enabled);
@@ -1399,18 +1533,22 @@ mod tests {
         // 无效颜色跳过 + 警告；阈值钳制 + 警告；颜色补齐。
         let (c, w) = Config::parse(
             "icon_font_tier_thresholds = [0, 150]\n\
-             icon_font_tier_colors = [\"#12345\", \"#E81123\"]\n",
+             icon_font_tier_colors = [\"#12345\", \"#E81123\"]\n\
+             experimental_migrated_v0321 = true\n",
         );
         assert_eq!(c.icon_font_tier_thresholds, vec![1, 99]);
         assert_eq!(c.icon_font_tier_colors.len(), 3);
         assert!(w.iter().any(|x| x.key == "icon_font_tier_thresholds"));
         assert!(w.iter().any(|x| x.key == "icon_font_tier_colors"));
         // 数组元素类型错误 → 整组保默认 + 警告。
-        let (c, w) = Config::parse("icon_font_tier_thresholds = [20, \"50\"]\n");
+        let (c, w) = Config::parse(
+            "icon_font_tier_thresholds = [20, \"50\"]\nexperimental_migrated_v0321 = true\n",
+        );
         assert_eq!(c.icon_font_tier_thresholds, vec![20, 50]);
         assert_eq!(w.len(), 1);
         // 数组值给到标量键 → catch-all 警告；v0.3.5 默认开，「保默认」即开。
-        let (c, w) = Config::parse("icon_font_tiers_enabled = [true]\n");
+        let (c, w) =
+            Config::parse("icon_font_tiers_enabled = [true]\nexperimental_migrated_v0321 = true\n");
         assert!(c.icon_font_tiers_enabled);
         assert_eq!(w.len(), 1);
     }
@@ -1487,17 +1625,131 @@ mod tests {
         assert!(c.icon_font_tiers_enabled);
         assert_eq!(c.icon_font_tier_thresholds, vec![10, 40]);
         // 勾选关 + 固定色 → 自定义：不启用分档、无迁移警告。
-        let (c, w) =
-            Config::parse("icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n");
+        let (c, w) = Config::parse(
+            "icon_font_tiers_enabled = false\nicon_font_color = \"#FF0000\"\n\
+             experimental_migrated_v0321 = true\n",
+        );
         assert!(!c.icon_font_tiers_enabled);
         assert!(w.is_empty(), "{w:?}");
         // 勾选开 → 无迁移警告（本来就在分档模式）。
-        let (c, w) = Config::parse("icon_font_tiers_enabled = true\n");
+        let (c, w) =
+            Config::parse("icon_font_tiers_enabled = true\nexperimental_migrated_v0321 = true\n");
         assert!(c.icon_font_tiers_enabled);
         assert!(w.is_empty(), "{w:?}");
-        // 空配置 = 全新默认：分档开、无警告。
+        // 空文件按存量语义处理（新装配置文件不存在、走 Config::default()
+        // 不经 parse）：分档开；仅触发 experimental 迁移一条警告。
         let (c, w) = Config::parse("");
         assert!(c.icon_font_tiers_enabled);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].key, "experimental_migrated_v0321");
+    }
+
+    /// 相位二（第 4 项）：实验功能键——新装（配置文件不存在，直接走
+    /// `Config::default()`、不经 parse）默认全关、标记恒写；默认值首轮
+    /// 写盘后再解析即稳态（标记在 → 零警告）。
+    #[test]
+    fn experimental_keys_default_off_for_new_install() {
+        let c = Config::default();
+        assert!(!c.experimental_persist_last_known);
+        assert!(!c.experimental_stats);
+        assert!(!c.experimental_per_device_polling);
+        assert!(!c.experimental_bluetooth_wired);
+        // 新装视为已迁移（不落存量迁移路径）。
+        assert!(c.experimental_migrated_v0321);
+        let (back, w) = Config::parse(&c.to_toml());
+        assert_eq!(back, c);
         assert!(w.is_empty(), "{w:?}");
+        // 非法值回退默认（关）+ 键名警告。
+        let (c2, w2) =
+            Config::parse("experimental_stats = \"nope\"\nexperimental_migrated_v0321 = true\n");
+        assert!(!c2.experimental_stats);
+        assert!(w2.iter().any(|x| x.key == "experimental_stats"), "{w2:?}");
+    }
+
+    /// 相位二（第 4 项）：存量配置（无标记键）→ 四键恒迁 true + 迁移警告
+    /// + 标记置位（变更不静默）；迁完幂等；显式写过的键值不被覆盖。
+    #[test]
+    fn experimental_keys_migrate_on_for_existing_config() {
+        let (c, w) = Config::parse("low_threshold = 25\n");
+        assert!(c.experimental_persist_last_known);
+        assert!(c.experimental_stats);
+        assert!(c.experimental_per_device_polling);
+        assert!(c.experimental_bluetooth_wired);
+        assert!(c.experimental_migrated_v0321);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "experimental_migrated_v0321" && x.reason.contains("migrated")),
+            "{w:?}"
+        );
+        // 幂等：迁完写出再读回，不再产生迁移警告，四键保持 true。
+        let (c2, w2) = Config::parse(&c.to_toml());
+        assert!(c2.experimental_migrated_v0321);
+        assert!(c2.experimental_stats);
+        assert!(
+            !w2.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w2:?}"
+        );
+        // 显式 false + 标记 → 保留（用户明确关过的不再被迁移打开）。
+        let (c3, w3) =
+            Config::parse("experimental_migrated_v0321 = true\nexperimental_stats = false\n");
+        assert!(!c3.experimental_stats);
+        assert!(!c3.experimental_persist_last_known);
+        assert!(
+            !w3.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w3:?}"
+        );
+    }
+
+    /// C-09：迁移只补缺失键、不覆盖显式解析到的键——
+    /// 「回退→再升级」与「手写配置视为存量」路径：v0.3.21 显式 false +
+    /// 标记 → 旧版（v0.3.20）键集重写丢弃标记（用户对被丢弃的
+    /// experimental_* 键按 README 指引手写补回显式 false）→ 再升级
+    /// parse：无标记触发迁移，但显式 false 必须保留，仅缺失键补 true。
+    #[test]
+    fn experimental_migration_preserves_explicit_false_without_marker() {
+        // 模拟旧版键集重写后的文件：标记被丢弃，用户手写补回两个显式
+        // false，其余两个 experimental_* 键缺失。
+        let (c, w) = Config::parse(
+            "low_threshold = 25\nexperimental_stats = false\nexperimental_bluetooth_wired = false\n",
+        );
+        // 显式 false 保留（修复前被无条件重置为 true——本断言红）。
+        assert!(!c.experimental_stats);
+        assert!(!c.experimental_bluetooth_wired);
+        // 缺失键按存量口径补 true。
+        assert!(c.experimental_persist_last_known);
+        assert!(c.experimental_per_device_polling);
+        // 标记置位 + 迁移警告（变更不静默）。
+        assert!(c.experimental_migrated_v0321);
+        assert!(
+            w.iter()
+                .any(|x| x.key == "experimental_migrated_v0321" && x.reason.contains("migrated")),
+            "{w:?}"
+        );
+        // 迁完幂等：写出再读回，显式 false 仍在、不再产生迁移警告。
+        let (c2, w2) = Config::parse(&c.to_toml());
+        assert!(!c2.experimental_stats);
+        assert!(!c2.experimental_bluetooth_wired);
+        assert!(
+            !w2.iter().any(|x| x.key == "experimental_migrated_v0321"),
+            "{w2:?}"
+        );
+    }
+
+    /// 相位二（第 4 项）：to_toml 恒写 5 键，round-trip 等价。
+    #[test]
+    fn experimental_keys_toml_roundtrip() {
+        let c = Config {
+            experimental_persist_last_known: true,
+            experimental_stats: true,
+            experimental_per_device_polling: true,
+            experimental_bluetooth_wired: false,
+            ..Config::default()
+        };
+        let (back, w) = Config::parse(&c.to_toml());
+        assert_eq!(back, c);
+        assert!(
+            !w.iter().any(|x| x.key.starts_with("experimental")),
+            "{w:?}"
+        );
     }
 }

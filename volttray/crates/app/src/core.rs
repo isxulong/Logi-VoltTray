@@ -126,11 +126,15 @@ impl DeviceEntry {
     /// WP-C（v3 C-1）：本设备当前轮询档——Charging 15s /
     /// Normal 配置档；休眠与虚拟条目不排程（None）。Disconnected
     /// 归 Normal 档（重枚举前的兜底节奏，实际槽位已随通道移除）。
+    /// 相位二（第 4 项）：experimental_per_device_polling=false 时充电
+    /// 设备不再走 15s 快档、统一按配置档——每设备分档轮询本身是实验
+    /// 特性，关闭即退回单档节奏；D-33 休眠零查询不受影响（上面的
+    /// Sleeping → None 分支恒保持，与实验开关无关）。
     pub fn tier_interval(&self, cfg: &Config) -> Option<Duration> {
         if self.is_virtual || self.device.state == DeviceState::Sleeping {
             return None;
         }
-        if self.device.battery.is_some_and(|b| b.charging) {
+        if cfg.experimental_per_device_polling && self.device.battery.is_some_and(|b| b.charging) {
             Some(POLL_CHARGING)
         } else {
             Some(Duration::from_secs(cfg.poll_interval_secs))
@@ -231,6 +235,22 @@ impl AppCore {
     pub fn swap_config(&self, next: Config) {
         if let Ok(mut guard) = self.config.write() {
             *guard = next;
+        }
+    }
+
+    /// D-74（相位二第 5 项）：配置换入后批量重排到期点——轮询档位/实验
+    /// 开关变更即时生效，不再等各设备自然到期才按新节奏走。规则：
+    /// - 虚拟条目与休眠设备恒 None（不排程——D-33 休眠零查询红线不受
+    ///   重排影响，与 tier_interval 同口径）；
+    /// - 在线设备一律 now + 新档间隔（换入瞬间全体对齐到新节奏，不保留
+    ///   剩余时间——语义简单、无饿死风险；最长等待 = 新档一个周期）。
+    ///
+    /// 调用点：配置热重载（watcher.poll() → swap_config 之后）。设置
+    /// 窗口改动经 TOML 落盘 → mtime 热重载进入同一路径，无需单独通知。
+    pub fn retier_all(&mut self, now: Instant) {
+        let cfg = self.config();
+        for e in &mut self.entries {
+            e.next_due = e.tier_interval(&cfg).map(|d| now + d);
         }
     }
 
@@ -1118,6 +1138,7 @@ mod tests {
     fn gray_threshold_anchors_to_device_tier() {
         let mut core = AppCore::new(Arc::new(RwLock::new(Config {
             poll_interval_secs: 300,
+            experimental_per_device_polling: true,
             ..Config::default()
         })));
         core.upsert_device(dev("a", 1));
@@ -1128,7 +1149,11 @@ mod tests {
         );
         core.record_success("a", reading(30, true), Instant::now()); // 充电档 15s
         assert_eq!(core.gray_threshold_for(&core.entries()[0]), GRAY_AFTER);
-        core.swap_config(Config::default()); // 1800s 档（充电中仍按充电档）
+        // 1800s 档（充电中仍按充电档）。
+        core.swap_config(Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        });
         assert_eq!(core.gray_threshold_for(&core.entries()[0]), GRAY_AFTER);
         let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
         core2.upsert_device(dev("b", 2));
@@ -1236,7 +1261,10 @@ mod tests {
     /// 排到默认档 1800s；充电读数排到充电档 15s。
     #[test]
     fn next_due_switches_when_charging() {
-        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        })));
         let now = Instant::now();
         core.upsert_device(dev("a", 1));
         // 未轮询（next_due=None）的非休眠真实设备立即到期：自愈口径，
@@ -1988,7 +2016,10 @@ mod tests {
     /// 已在 30s 豁免窗内也不放行——30s 提前量会破坏 15s±2s 节拍。
     #[test]
     fn wp_c_charging_tier_15s_cadence() {
-        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        })));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(60, true), t0);
@@ -2013,7 +2044,10 @@ mod tests {
     /// next_due 立即跳到常规档 1800s。
     #[test]
     fn wp_c_unplug_perceived_within_15s() {
-        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        })));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(70, true), t0);
@@ -2033,7 +2067,10 @@ mod tests {
     /// next_poll_due = 全设备最近到期点（此处即 a 的 15s 到期点）。
     #[test]
     fn wp_c_per_device_independence() {
-        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        })));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
         core.upsert_device(dev("b", 2));
@@ -2135,5 +2172,65 @@ mod tests {
         assert_eq!(snap.devices.len(), 2);
         assert_eq!(snap.default_device, Some(1));
         assert!(snap.devices[1].percent.is_some());
+    }
+
+    /// D-74（相位二第 5 项）：retier_all 换入新配置后全体在线设备按新档
+    /// 即时重排；休眠/虚拟设备恒 None（D-33 零查询红线不受重排影响）。
+    #[test]
+    fn retier_all_reschedules_online_devices_immediately() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), t0);
+        core.record_success("b", reading(60, false), t0);
+        // 换入 600s 档并重排 → 两台在线设备到期点 = t1 + 600s。
+        let t1 = t0 + Duration::from_secs(10);
+        core.swap_config(Config {
+            poll_interval_secs: 600,
+            ..Config::default()
+        });
+        core.retier_all(t1);
+        assert_eq!(
+            core.entries[0].next_due,
+            Some(t1 + Duration::from_secs(600))
+        );
+        assert_eq!(
+            core.entries[1].next_due,
+            Some(t1 + Duration::from_secs(600))
+        );
+        // 休眠设备：重排后恒 None（不排程、零查询）。
+        core.entries[0].device.set_state(DeviceState::Sleeping);
+        core.retier_all(t1);
+        assert_eq!(core.entries[0].next_due, None);
+        assert_eq!(
+            core.entries[1].next_due,
+            Some(t1 + Duration::from_secs(600))
+        );
+    }
+
+    /// 相位二（第 4 项）：experimental_per_device_polling 门控——开时充电
+    /// 设备 15s 快档，关时退回配置档；休眠恒 None 与开关无关（D-33）。
+    #[test]
+    fn tier_interval_respects_experimental_per_device_polling() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, true), now); // 充电中
+        let cfg_on = Config {
+            experimental_per_device_polling: true,
+            ..Config::default()
+        };
+        assert_eq!(core.entries[0].tier_interval(&cfg_on), Some(POLL_CHARGING));
+        // 新装默认（关）：充电设备退回配置档。
+        let cfg_off = Config::default();
+        assert_eq!(
+            core.entries[0].tier_interval(&cfg_off),
+            Some(Duration::from_secs(cfg_off.poll_interval_secs))
+        );
+        // 休眠恒 None，与开关无关。
+        core.entries[0].device.set_state(DeviceState::Sleeping);
+        assert_eq!(core.entries[0].tier_interval(&cfg_on), None);
+        assert_eq!(core.entries[0].tier_interval(&cfg_off), None);
     }
 }

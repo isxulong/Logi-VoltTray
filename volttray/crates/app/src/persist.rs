@@ -153,6 +153,10 @@ pub struct LastKnownStore {
     last_fsync: Option<Instant>,
     /// 回退键冲突集合（R5-I-01）：永不入库、不使用存量记录。
     conflicted: HashSet<String>,
+    /// 实验开关（experimental_persist_last_known）关闭态：false 时全部
+    /// 读写在入口即 no-op——不加载存量、不播种虚拟条目、不落盘（相位二
+    /// 第 4 项：实验功能新装默认关，关闭即彻底停用而非静默继续）。
+    enabled: bool,
 }
 
 impl LastKnownStore {
@@ -174,7 +178,22 @@ impl LastKnownStore {
             writes_since_fsync: 0,
             last_fsync: None,
             conflicted: HashSet::new(),
+            enabled: true,
         }
+    }
+
+    /// 实验开关关闭构造（相位二第 4 项）：空库 + enabled=false，
+    /// records()/note_reading()/set_conflicted()/remove()/flush 全部
+    /// no-op；调用方跳过 load（不读存量、不触发 .bak 改名副作用）。
+    pub fn disabled(path: PathBuf) -> Self {
+        let mut s = Self::with_tuning(path, FlushTuning::default());
+        s.enabled = false;
+        s
+    }
+
+    /// 实验开关状态（诊断导出 / 测试断言用）。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn path(&self) -> &Path {
@@ -183,6 +202,9 @@ impl LastKnownStore {
 
     /// 当前内存记录（虚拟条目播种 / 调试导出用）。
     pub fn records(&self) -> Vec<PersistedDevice> {
+        if !self.enabled {
+            return Vec::new();
+        }
         let mut v: Vec<_> = self.records.values().cloned().collect();
         v.sort_by(|a, b| a.physical_key.cmp(&b.physical_key));
         v
@@ -269,7 +291,7 @@ impl LastKnownStore {
         wall_secs: u64,
         now: Instant,
     ) -> bool {
-        if physical_key.is_empty() || self.conflicted.contains(physical_key) {
+        if !self.enabled || physical_key.is_empty() || self.conflicted.contains(physical_key) {
             return false;
         }
         let name = truncate_name(display_name);
@@ -311,6 +333,9 @@ impl LastKnownStore {
     /// 该键并**不再使用其存量记录**）。返回被即时清除的存量记录键
     /// （调用方据此清虚拟条目）。冲突解除（集合收缩）时恢复可写。
     pub fn set_conflicted(&mut self, keys: HashSet<String>) -> Vec<String> {
+        if !self.enabled {
+            return Vec::new();
+        }
         let mut removed = Vec::new();
         for k in keys.difference(&self.conflicted) {
             if self.records.remove(k).is_some() | self.persisted.remove(k).is_some() {
@@ -325,6 +350,9 @@ impl LastKnownStore {
 
     /// 移除记录（LRU 淘汰同步 / 用户移除路径；返回实际移除的键）。
     pub fn remove(&mut self, keys: &[String]) -> Vec<String> {
+        if !self.enabled {
+            return Vec::new();
+        }
         let mut removed = Vec::new();
         for k in keys {
             if self.records.remove(k).is_some() | self.persisted.remove(k).is_some() {
@@ -343,6 +371,9 @@ impl LastKnownStore {
     /// - 落盘后 writes_since_fsync>0 且距上次 fsync ≥5min → fsync。
     pub fn flush_if_due(&mut self, now: Instant) -> io::Result<FlushOutcome> {
         let mut outcome = FlushOutcome::default();
+        if !self.enabled {
+            return Ok(outcome);
+        }
         if !self.dirty_since.is_empty() {
             let global_ok = self
                 .last_flush
@@ -383,6 +414,9 @@ impl LastKnownStore {
 
     /// 退出路径：强制落盘全部 dirty + fsync（v3「fsync 退出时执行」）。
     pub fn shutdown_flush(&mut self, now: Instant) -> io::Result<FlushOutcome> {
+        if !self.enabled {
+            return Ok(FlushOutcome::default());
+        }
         let keys: Vec<String> = self.dirty_since.keys().cloned().collect();
         let mut outcome = if keys.is_empty() {
             FlushOutcome::default()
@@ -574,6 +608,28 @@ mod tests {
         let dir = tmpdir("empty");
         let (_store, outcome) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
         assert_eq!(outcome, LoadOutcome::Empty);
+    }
+
+    /// 相位二（第 10 项）旧版读新文件兼容：未来版本写入的未知字段
+    /// （顶层与记录级）被容忍，既有字段完整读回（serde 默认忽略未知
+    /// 字段；version 不匹配仍按损坏处理的红线不变）。
+    #[test]
+    fn load_tolerates_unknown_fields_from_newer_version() {
+        let dir = tmpdir("fwd_compat");
+        let raw = concat!(
+            "{\"version\":1,\"future_top_level\":{\"x\":1},",
+            "\"devices\":[{\"physical_key\":\"k1\",\"display_name\":\"Mouse\",",
+            "\"percent\":80,\"charging\":false,\"last_seen\":1000,",
+            "\"source\":\"unified_battery\",\"future_field\":\"new\"}]}"
+        );
+        fs::write(dir.join(STORE_FILE_NAME), raw).unwrap();
+        let (store, outcome) = LastKnownStore::load(dir.join(STORE_FILE_NAME), fast());
+        assert_eq!(outcome, LoadOutcome::Loaded(1));
+        let records = store.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].physical_key, "k1");
+        assert_eq!(records[0].percent, 80);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

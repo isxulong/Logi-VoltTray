@@ -210,6 +210,8 @@ const IDC_LOW_RANGE: i32 = 2069;
 /// R-8（v0.3.17 真机终审）：放大预览的独立标签；v0.3.18（U-3）不再标注
 /// 倍数（用户只看布局，实际大小以任务栏为准），标签文案固定「预览」。
 const IDC_LBL_PREVIEW_BIG: i32 = 2070;
+/// 实验性功能标注（相位二第 4 项：设置页显式标注默认态与生效口径）。
+const IDC_EXPERIMENTAL_HINT: i32 = 2071;
 
 /// v0.3.18（U-3/U-5）：放大预览画布边长（逻辑像素）——4×(192) 略大，
 /// 收敛到 144（96dpi 下恰为 3×）；画布与源位图（托盘档位尺寸）推得
@@ -225,8 +227,9 @@ const L_CLIENT_W: i32 = 500;
 const L_CARD_H: i32 = 104;
 /// 展开态客户区逻辑高（v0.3.17 R-9：提示行 32→44，+12；
 /// v0.3.18 U-6：对比度警告状态行删除，842→816 = 「恢复全部默认」
-/// 按钮底边 796 + 20 下边距）。
-const L_EXPANDED_H: i32 = 816;
+/// 按钮底边 796 + 20 下边距；相位二第 4 项：底部追加实验性功能
+/// 标注行，816→854 = 标注底边 834 + 20 下边距）。
+const L_EXPANDED_H: i32 = 854;
 /// 收起分档卡后回收的逻辑高度（卡片 104 + 间距 8）。
 const TIER_DELTA: i32 = L_CARD_H + 8;
 /// 收起态客户区逻辑高。
@@ -243,6 +246,10 @@ const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个�
 /// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断；
 /// v0.3.17 R-9 追加保活扫描说明后升为三行）。
 const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关。";
+/// 实验性功能标注（相位二第 4 项）：如实说明默认态、存量口径、验证
+/// 状态与生效方式——不以「零事故」暗示已验证（冲突三裁决：安全性
+/// 未知、待逐项转正评审）。
+const EXPERIMENTAL_HINT_TEXT: &str = "实验性功能（配置文件 experimental_* 键）：新装默认关闭，既有配置保留原值；未真机验证。持久化/统计开关改动重启后生效。";
 /// 分档说明示例（v0.3.6 规范偏差修正：按当前档数/阈值实时拼写，替代静态常量）。
 /// 例：thresholds = [20, 50] →「阈值 1–99 严格递增；电量 ≤ 数值归入对应档（20/50 → 0–20 / 21–50 / 51–100）」。
 fn tier_hint_dynamic(thresholds: &[u8]) -> String {
@@ -266,7 +273,7 @@ fn tier_hint_dynamic(thresholds: &[u8]) -> String {
 
 /// 展开态下方控件坐标表：(id, x, y, w, h)（逻辑像素）。
 /// 收起分档卡时整组上移 TIER_DELTA；提示语宽度在 relayout 中按实测宽覆盖。
-const BELOW: [(i32, i32, i32, i32, i32); 25] = [
+const BELOW: [(i32, i32, i32, i32, i32); 26] = [
     (IDC_LBL_TEXT, 16, 278, 64, 20),
     (IDC_TEXT_SLIDER, 88, 274, 196, 26),
     (IDC_TEXT_VAL, 292, 278, 44, 20),
@@ -295,6 +302,9 @@ const BELOW: [(i32, i32, i32, i32, i32); 25] = [
     (IDC_RESET_LOW, 344, 728, 48, 24),
     (IDC_LOW_RANGE, 400, 734, 84, 14),
     (IDC_RESET_ALL, 16, 768, 120, 28),
+    // 相位二（第 4 项）：实验性功能标注（两行高，宽度 relayout 按
+    // cw-32 覆盖；新装默认关/存量保留/未验证/重启生效口径）。
+    (IDC_EXPERIMENTAL_HINT, 16, 806, 468, 28),
 ];
 
 /// 色彩 token（规范裁决 6：浅/深两套；存储为 COLORREF 0x00BBGGRR，
@@ -784,6 +794,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let hint = id == IDC_TIER_HINT
                 || id == IDC_COVER_HINT
                 || id == IDC_INTERVAL_HINT
+                || id == IDC_EXPERIMENTAL_HINT
                 || id == IDC_TEXT_RANGE
                 || id == IDC_BG_RANGE
                 || id == IDC_LOW_RANGE;
@@ -1557,6 +1568,12 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                     WINDOW_EX_STYLE(0),
                     Some(INTERVAL_HINT_TEXT),
                 ),
+                IDC_EXPERIMENTAL_HINT => (
+                    "STATIC",
+                    ws(0),
+                    WINDOW_EX_STYLE(0),
+                    Some(EXPERIMENTAL_HINT_TEXT),
+                ),
                 IDC_BLINK => (
                     "BUTTON",
                     ws(BS_AUTOCHECKBOX),
@@ -1583,7 +1600,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
             };
         let font = match id {
             IDC_SEC_REFRESH | IDC_SEC_LOW => f_title,
-            IDC_COVER_HINT | IDC_INTERVAL_HINT => f_hint,
+            IDC_COVER_HINT | IDC_INTERVAL_HINT | IDC_EXPERIMENTAL_HINT => f_hint,
             IDC_TEXT_RANGE | IDC_BG_RANGE | IDC_LOW_RANGE => f_hint,
             _ => f_base,
         };
@@ -1767,6 +1784,7 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     for &(id, x, y, w, h) in BELOW.iter() {
         let w2 = match id {
             IDC_COVER_HINT | IDC_INTERVAL_HINT => ctx.cw.get() - 104,
+            IDC_EXPERIMENTAL_HINT => ctx.cw.get() - 32,
             IDC_TEXT_RANGE | IDC_BG_RANGE | IDC_LOW_RANGE => ctx.cw.get() - 416,
             _ => w,
         };

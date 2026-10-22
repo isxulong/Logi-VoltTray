@@ -289,6 +289,10 @@ pub struct StatsStore {
     /// 水位提示闩锁：本轮 current 文件生命周期内只提示一次（轮转后
     /// 复位，避免每次落盘重复 toast）。
     rotation_warned: bool,
+    /// 实验开关（experimental_stats）关闭态：false 时全部记录与落盘
+    /// 在入口即 no-op（相位二第 4 项：实验功能新装默认关，关闭即彻底
+    /// 停用而非静默继续）。
+    enabled: bool,
 }
 
 impl StatsStore {
@@ -313,7 +317,22 @@ impl StatsStore {
             conflicted: HashSet::new(),
             rotation_notice: false,
             rotation_warned: false,
+            enabled: true,
         }
+    }
+
+    /// 实验开关关闭构造（相位二第 4 项）：空缓冲 + enabled=false，
+    /// note_*/set_conflicted/flush 全部 no-op；调用方跳过 load
+    /// （不做尾部修复等磁盘副作用）。
+    pub fn disabled(dir: &Path) -> Self {
+        let mut s = Self::with_tuning(dir, FlushTuning::default());
+        s.enabled = false;
+        s
+    }
+
+    /// 实验开关状态（诊断导出 / 测试断言用）。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// 启动加载：清理同目录孤儿 `.tmp`（WP-A 同款兜底），校验主文件
@@ -339,11 +358,17 @@ impl StatsStore {
 
     /// 同步回退键冲突集合（冲突键不记录统计；调用方每轮刷新）。
     pub fn set_conflicted(&mut self, keys: HashSet<String>) {
+        if !self.enabled {
+            return;
+        }
         self.conflicted = keys;
     }
 
     /// 取走轮转提示信号（GUI 每次 pump 轮询一次；true → toast 一次）。
     pub fn take_rotation_notice(&mut self) -> bool {
+        if !self.enabled {
+            return false;
+        }
         std::mem::take(&mut self.rotation_notice)
     }
 
@@ -363,7 +388,7 @@ impl StatsStore {
         ts: i64,
         now: Instant,
     ) -> bool {
-        if self.conflicted.contains(physical_key) {
+        if !self.enabled || self.conflicted.contains(physical_key) {
             return false;
         }
         let changed = match self.last_recorded.get(physical_key) {
@@ -416,6 +441,9 @@ impl StatsStore {
 
     /// 缓冲一行事件并标 dirty。
     fn push_event(&mut self, ev: StatsEvent, now: Instant) {
+        if !self.enabled {
+            return;
+        }
         let line = ev.to_json_line();
         self.buf_bytes += line.len() as u64 + 1; // +1 换行符
         self.buf.push(line);
@@ -426,6 +454,9 @@ impl StatsStore {
     /// fsync 定时（节拍参数整体继承 WP-A FlushTuning）。
     pub fn flush_if_due(&mut self, now: Instant, ts: i64) -> io::Result<StatsFlushOutcome> {
         let mut outcome = StatsFlushOutcome::default();
+        if !self.enabled {
+            return Ok(outcome);
+        }
         if !self.buf.is_empty() {
             let global_ok = self
                 .last_flush
@@ -452,6 +483,9 @@ impl StatsStore {
 
     /// 退出路径（含 WM_ENDSESSION 承接）：强制落盘全部缓冲 + fsync。
     pub fn shutdown_flush(&mut self, now: Instant, ts: i64) -> io::Result<StatsFlushOutcome> {
+        if !self.enabled {
+            return Ok(StatsFlushOutcome::default());
+        }
         let mut outcome = if self.buf.is_empty() {
             StatsFlushOutcome::default()
         } else {
@@ -1058,5 +1092,29 @@ mod tests {
         assert_eq!(events.len(), 2);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
+    }
+
+    /// 相位二（第 10 项）旧版读新文件兼容：读取事件行携带未来新增的
+    /// 未知字段时仍按读取事件解析（parse_line 容忍额外字段）；未知事件
+    /// 类型行返回 None、被 skip-bad-lines 跳过而不误杀。
+    #[test]
+    fn parse_line_tolerates_unknown_fields_and_event_types() {
+        let line = concat!(
+            "{\"ts\":1000,\"physical_key\":\"k1\",\"display_name\":\"Mouse\",",
+            "\"percent\":80,\"charging\":false,\"source\":\"poll\",",
+            "\"future_field\":1}"
+        );
+        let e = StatsEvent::parse_line(line).expect("未知额外字段应被容忍");
+        match e {
+            StatsEvent::Read(r) => {
+                assert_eq!(r.physical_key, "k1");
+                assert_eq!(r.percent, 80);
+            }
+            other => panic!("应为读取事件: {other:?}"),
+        }
+        // 未来新增的事件类型：本版不认识 → None（skip-bad-lines 跳过）。
+        assert!(
+            StatsEvent::parse_line("{\"ts\":1001,\"event\":\"future_event\",\"x\":1}").is_none()
+        );
     }
 }

@@ -1,5 +1,46 @@
 # 发布说明
 
+## 发版 runbook（相位二成文）
+
+每次发版按此顺序执行，任一步红即停：
+
+1. **版本提交**：版本号升级为独立 chore 提交（workspace `Cargo.toml` +
+   `Cargo.lock` 同步），tag 指向该提交（门禁 A1–A4）。
+2. **CI 门禁**：push main 触发 ci.yml，windows + ubuntu 双 job 全绿，
+   且 green run 的 head_sha 就是发布提交（B1）。
+3. **打 tag 发布**：`git tag -a vX.Y.Z <chore-sha> && git push origin vX.Y.Z`，
+   tag message 即 Release 说明主体（面向用户：能干什么 / 修了什么 /
+   要注意什么；未验证项分级单列；含 SmartScreen 披露段与英文摘要）。
+4. **发布流水线**：release.yml 自动跑——ci-gate（复用 CI 全门禁）→
+   verify-tag-on-main（tag 必须在 main 上）→ build-release（构建 +
+   sha256 + release-contract 发布契约断言）→ 上传 EXE 与 sha256 到
+   Release。契约断言红 = 发布失败，不人工跳过。
+5. **发布后核验**：独立下载 Release 附件算 sha256 三方比对（C1）；
+   Releases 页长期保留最近三个版本（N / N-1 / N-2），更老版本不删
+   tag、仅可不列预发布。
+6. **对账**：按 docs/experience/06 发布对账表逐条刷新状态。
+
+## 回退到 N-1（标准段）
+
+发现本版阻断性问题时：
+
+1. 在 GitHub Releases 把 N 版标记为 pre-release（不删——保留证据链），
+   N-1 版自动回到 `/releases/latest`。
+2. 用户侧处置：退出 N 版，从 Releases 页下载 N-1 的 `volttray-tray.exe`
+   覆盖运行即可；配置文件 `config.toml` 向后兼容（旧版读新配置：
+   未知键忽略并告警，不拒绝启动）。
+   **已知行为（v0.3.21 ↔ v0.3.20 及更早）**：旧版保存设置时按自身键集
+   重写 `config.toml`，会丢弃 `experimental_*` 开关与
+   `experimental_migrated_v0321` 迁移标记；再升级回新版时按存量口径
+   重迁——显式写回 `config.toml` 的 `experimental_*` 值会被保留
+   （缺失键才补 `true`）。回退期间若在旧版改过设置，原本关掉的
+   实验功能需在升级后按 README「实验性功能」小节重新显式关闭。
+3. **数据文件处置**：`%LOCALAPPDATA%\LogiVoltTray\` 下的
+   `last_known.json` 与 `stats.jsonl` 无需删除——旧版读取时对未知字段
+   容忍、对坏行跳过（有回归测试锁定）；若确需彻底清零，退出程序后
+   手动删除该目录下这两个文件即可，不影响配置。
+4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
+
 ## v0.3.20
 
 红蓝对抗（R1）系列收官版：两项用户向修复 + 托盘菜单两项新增 + 工程质量体系全面升级。（本节说明与 [GitHub Release v0.3.20](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.20) 正文一致。）
