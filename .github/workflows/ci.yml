@@ -138,3 +138,49 @@ jobs:
       - name: actionlint (advisory mode)
         uses: raven-actions/actionlint@v2
         continue-on-error: true
+
+  # P2-7 红线守卫（C1 冲突一裁决：红线核验先 advisory——静态模式检查
+  # report-only 挂 CI，不阻断；统计口径与升级条件登记于
+  # docs/experience/03-release-quality-gate.md「红线守卫（advisory）」节）。
+  # 检查对象：volttray/crates 内删除类调用（std::fs::remove_file /
+  # remove_dir / remove_dir_all，红线 E20「绝不自动删除用户文件」）：
+  # ① 裸调用——未以 `let _ =` 兜底形态出现；
+  # ② 用户路径命中——删除调用同行参数含 config_dir / data_dir /
+  #    home_dir / 用户 等用户文件路径特征。
+  # 基线（2026-10-22 本地实测）：54 处删除类调用，全部 `let _ =` 兜底，
+  # ①② 均 0 命中。「拦截 v0.3.9 类 P1」为未验证的候选收益（C1 稿原文
+  # 口径，不写成实测）。
+  redline-guard-advisory:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # grep -a：tray/src/main.rs 含会被 grep 误判为二进制的字节序列，
+      # 不加 -a 会漏 8 处（2026-10-22 实测教训，已计入统计口径）。
+      - name: deletion-call static pattern check (report-only)
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          hits=$(grep -ran 'remove_file\|remove_dir' volttray/crates --include='*.rs' || true)
+          total=$(printf '%s\n' "$hits" | grep -c .)
+          bare=$(printf '%s\n' "$hits" | grep -v 'let _ =' || true)
+          userpath=$(printf '%s\n' "$hits" | grep -iE 'config_dir|data_dir|home_dir|用户' || true)
+          echo "删除类调用总数：${total}（基线 54，2026-10-22 实测）"
+          if [ -n "$bare" ]; then
+            echo "── ① 裸调用（无 let _ = 兜底）──"
+            printf '%s\n' "$bare"
+            fail=1
+          else
+            echo "① 裸调用：0 命中"
+          fi
+          if [ -n "$userpath" ]; then
+            echo "── ② 删除调用命中用户文件路径特征 ──"
+            printf '%s\n' "$userpath"
+            fail=1
+          else
+            echo "② 用户路径命中：0 命中"
+          fi
+          echo "── 结果：fail=${fail}（report-only，不阻断；命中后人工复核，多行续行属已知误报源）──"
+          exit $fail
