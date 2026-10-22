@@ -124,6 +124,15 @@ cargo build --release --locked -p volttray-tray
 
 **边界**：排查动作同样受红线约束——不要在软件侧为排查增加对休眠设备的主动探测（红线 1 / D-33）。
 
+**任务类型 → 必读条目路由表（P1-4：报障雏形扩到改代码 / 发布 / 移植；不加 per-entry front-matter——F-B1-6 的双源同步点漂移论证成立）**：
+
+| 任务类型 | 动手前必读 |
+| --- | --- |
+| 用户报障（设备识别不到 / 托盘 ?） | 本节第一～三步 + [01 E1–E4 对应条目](01-engineering-lessons.md) + [05 诊断导出字段审计](05-diag-export-field-audit.md)（按字段读诊断） |
+| 改代码（protocol / transport / device / app / tray 任一 crate） | §2 分层原则 + §6 红线清单 + `volttray/docs/decisions.md` 相关 D 条目（§9 导航）+ [01](01-engineering-lessons.md) 对应事故教训；触及 `cfg(windows)` 代码先过门禁 B5（本地交叉验证）；protocol 行为改动重跑 `gen_golden.py`（§3） |
+| 发布版本 | §5 发布流程 + [03 发布质量门禁](03-release-quality-gate.md) 逐条核验 + 发布后 [06 对账 / 经验回写](06-release-reconciliation.md)（E26：回写审查顺手抽查最老 1 条 E 条目，结果一句话记入对账区） |
+| 移植 / 新平台适配 | §2 仓库结构（`cfg(windows)` 边界与 tray 占位 stub 形态）+ §4 测试与验证分层（各层能在哪跑）+ §6 红线清单 + decisions.md 平台相关条目（D-01 工具链 / D-33 Raw Input 等） |
+
 ## 8. 项目确立的长期原则（E15，可直接复用的决策模式）
 
 - **零代价红线模式**：为产品确立「不得以牺牲 X 为代价」的硬约束（本项目 X = 鼠标电池），所有方案先过红线再谈功能。红线要写成可执行的否定句，并配可观测性证明未被触碰。
