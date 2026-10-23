@@ -62,7 +62,7 @@
 
 ### 下载与安装注意
 
-本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（信誉随签名下载积累、逐步消除拦截；代码签名采购决策跟踪中）。唯一分发形态为 Rust EXE。
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（已决策不采购代码签名证书、SmartScreen 拦截为已接受状态——2026-10-23 决策；继续保留未签名提示与 sha256 核验指引，单源见 docs/experience/06 发布对账常设区）。唯一分发形态为 Rust EXE。
 
 下载后核验（可选但推荐）：每个 Release 附 `volttray-tray.exe.sha256.txt`。PowerShell 一行核对：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`，输出的 Hash 应与同目录 .sha256.txt 文件内首列一致。
 
