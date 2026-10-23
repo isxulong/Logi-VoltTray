@@ -1093,6 +1093,18 @@ impl Config {
         was
     }
 
+    /// v0.3.22（D-86；质检复核 P1-1）：展示判定与闩锁结算拆成两段——
+    /// 先按取走前状态判定是否应弹提示，再无条件结算一次闩锁。返回
+    /// `(是否应弹提示, 闩锁是否被本次取走)`；闩锁被取走时调用方负责
+    /// 落盘。配置加载后的首个 v0.3.22 启动必须调用本函数一次（即使
+    /// 不弹提示），否则首启 due()=false 的用户闩锁残留，此后任一次
+    /// 「关掉一项再重启」都会迟到补弹。
+    pub fn settle_default_on_notice(&mut self) -> (bool, bool) {
+        let due = self.default_on_notice_due();
+        let taken = self.take_default_on_notice();
+        (due, taken)
+    }
+
     /// 默认配置路径：%APPDATA%\LogiVoltTray\config.toml（无 APPDATA 时退回当前目录）。
     pub fn default_path() -> PathBuf {
         let base = std::env::var_os("APPDATA")
@@ -1872,6 +1884,35 @@ mod tests {
         assert!(!c2.default_on_notice_due());
         // take 幂等：闩锁已取走时再取返回 false。
         assert!(!c2.take_default_on_notice());
+    }
+
+    /// 质检复核 P1-1 回归（v0.3.22）：闩锁结算与展示判定分离——
+    /// ①首启 due()=false（四键全开）时闩锁仍被无条件取走，二次启动
+    /// 不再结算；②闩锁取走后「关掉一项再重启」不弹 toast（修复前
+    /// 闩锁残留导致迟到补弹，本断言红）。
+    #[test]
+    fn default_on_notice_settle_unconditional_on_first_startup() {
+        // ① 首启即 due()=false：标记在 ∧ 四键全开 ∧ 闩锁在。
+        let (mut c, _) = Config::parse(
+            "experimental_migrated_v0321 = true\nexperimental_persist_last_known = true\n\
+             experimental_stats = true\nexperimental_per_device_polling = true\n\
+             experimental_bluetooth_wired = true\nui_default_on_notice_v0322 = true\n",
+        );
+        assert!(!c.default_on_notice_due(), "前置：四键全开不触发提示");
+        let (due, taken) = c.settle_default_on_notice();
+        assert!(!due, "四键全开不弹 toast");
+        assert!(taken, "首启无论是否弹提示都应取走闩锁");
+        assert!(!c.ui_default_on_notice_v0322);
+        // 落盘 → 二次启动（重读文件）：闩锁已消，不再重复结算。
+        let (mut c2, _) = Config::parse(&c.to_toml());
+        let (due2, taken2) = c2.settle_default_on_notice();
+        assert!(!due2);
+        assert!(!taken2, "二次启动闩锁已取走，无重复结算");
+        // ② 此后「关掉一项再重启」：闩锁已取走 → 不触发迟到提示。
+        c2.experimental_stats = false;
+        let (due3, taken3) = c2.settle_default_on_notice();
+        assert!(!due3, "闩锁取走后关掉一项不再补弹");
+        assert!(!taken3);
     }
 
     /// D-87（测试清单「闸门收起不改使能」配置层断言）：闸门展开态

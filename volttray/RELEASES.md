@@ -61,8 +61,8 @@
 1. **「精细化设置（试验功能，已开启 N/4 项）」闸门**：设置窗口底部新增复选框（复用既有复选框链路），计数常驻动态显示（收起态也可见）；勾选展开「实验室（试验功能）」分组框，取消收起。收起仅隐藏选项、不改使能——已开启的功能继续生效（闸门只管可见性，D-87）。
 2. **实验室分组四项白话开关**：「重启后记住电量」「耗电统计与导出」「充电时加快刷新（15 秒）」「蓝牙与有线设备直连读取」，各配一行说明，不复现 `experimental_*` 键名；四项统一「保存后重启生效」。
 3. **「全部恢复默认（开启）」一键对齐**：仅把四项置为开启，不动其它任何配置（区别于设置页既有「恢复默认」的全量重置）。
-4. **「立即重启」按钮**：非模态；复用既有启动路径（spawn 当前 EXE，随后走既有优雅退出序列：IO 关停 + 关机钩子应答 + 退出消息循环），排程代码零改动、非热生效（护 D-74）。hint 行在四项有改动时动态显示「已修改，重启后生效」。
-5. **Q3 一次性 toast**：走既有 WinRT 通知通道（D-63），提示后取走闩锁并落盘，二次启动不重复。
+4. **「立即重启」按钮**：非模态；复用既有启动路径（spawn 当前 EXE 并注入 `LOGIVOLTTRAY_RESTART_CHILD` 环境标记，子实例轮询等待旧实例退出释放单实例互斥体（≤5 秒）后再进入主流程——修复与单实例检测的竞态；等待超时弹「重启失败」明确提示并以非零码退出，不静默消失），随后走既有优雅退出序列（IO 关停 + 关机钩子应答 + 退出消息循环），排程代码零改动、非热生效（护 D-74）。hint 行在四项有改动时动态显示「已修改，重启后生效」。
+5. **Q3 一次性 toast**：走既有 WinRT 通知通道（D-63）；展示判定与闩锁结算分离——配置加载后无论本轮是否实际弹提示都结算一次闩锁并落盘（首个 v0.3.22 启动即取走，避免日后「关掉一项再重启」迟到补弹），是否弹 toast 由取走前的判定决定，提示后二次启动不重复。
 
 ### 回退已知行为
 
@@ -77,8 +77,8 @@
 ### 工程与质量（开发者向摘要）
 
 - **BT 准入核对（代码定位证据）**：默认开启项中「蓝牙与有线设备直连读取」仅放开既有白名单扫描，未扩大设备标识范围——枚举仍限定 VID=0x046D（Logitech，`crates/protocol/src/lib.rs` `LOGITECH_VID`）∧ usage page ∈ {0xFF00, 0xFF43}（HID++ 厂商页，`crates/transport/src/hid_impl.rs` `HIDPP_USAGE_PAGES`）∧ usage ∈ {1, 2}（短/长报文口；充电状态 LED 等非 HID++ 接口不触碰）。扫描频次不变：重枚举沿用 30 秒门控下限（`crates/app/src/reconnect.rs` `REENUM_INTERVAL`），无设备且无候选通道时 30/60/120 秒退避（仅主机侧枚举、零射频）。`experimental_bluetooth_wired=false` 时 0xFF 槽（直连通道）跳过、接收器槽位 1..=6 不受影响（`crates/tray/src/main.rs` `bt_wired_scan` 门，逐轮读取配置）。D-65 诊断链路覆盖 BT 通道扫描失败：HidApi 初始化失败与逐通道 open 失败落入最近一次枚举快照（`EnumSnapshot.error` 与 `channels[]` open 结果），随「导出诊断信息…」可见；无设备退避跃迁双写 bootlog 与诊断事件流。
-- **测试清单（逐条）**：Default 四键 true（`experimental_keys_default_on_for_new_install`）；显式 false 保留（`experimental_migration_preserves_explicit_false_without_marker`，沿用既有）；GUI 保存只写显式值、ui 键不触碰试验键（`ui_key_save_does_not_touch_experimental_keys`）；闸门收起不改使能（`gate_expansion_does_not_change_enablement`）；Q3 toast 三态触发 + 闩锁一次性（`default_on_notice_three_states_and_latch`：标记在 ∧ 至少一键 false 触发／四键全 true 不触发／无标记不触发，take-and-clear 二次不重复）；「立即重启」单次消费语义（`restart_request_sets_then_consumes_once`，main.rs；排程路径 D-74 零触碰为代码审阅项）；D-33 休眠零主动查询回归（`zero_queries_while_sleeping`、`wake_probe_candidate_admits_only_sleeping`，沿用既有）；TOML 往返（`experimental_keys_toml_roundtrip`）；闸门计数与 hint 动态文案（`fine_tune_gate_text_spells_count`、`lab_hint_text_marks_dirty`）。
-- **限制如实说明**：本版开发环境无 Rust 工具链，cargo test / fmt / clippy 以 CI（PR 检查，windows + ubuntu 双 job）为准；tray 层 Windows 真机行为（闸门布局、立即重启端到端、toast 实际弹出）待真机验证。
+- **测试清单（逐条）**：Default 四键 true（`experimental_keys_default_on_for_new_install`）；显式 false 保留（`experimental_migration_preserves_explicit_false_without_marker`，沿用既有）；GUI 保存只写显式值、ui 键不触碰试验键（`ui_key_save_does_not_touch_experimental_keys`）；闸门收起不改使能（`gate_expansion_does_not_change_enablement`）；Q3 toast 三态触发 + 闩锁一次性（`default_on_notice_three_states_and_latch`：标记在 ∧ 至少一键 false 触发／四键全 true 不触发／无标记不触发，take-and-clear 二次不重复）；闩锁结算与展示判定分离（`default_on_notice_settle_unconditional_on_first_startup`：首启 due()=false 时闩锁仍被取走、二次启动不再结算、取走后「关掉一项再重启」不补弹——质检复核 P1-1 回归）；「立即重启」单次消费语义（`restart_request_sets_then_consumes_once`，main.rs；排程路径 D-74 零触碰为代码审阅项）；「立即重启」spawn 注入子实例环境标记（`restart_spawn_carries_child_env_marker`，main.rs）；「立即重启」子实例等待互斥体释放→成功接管／超时→明确失败（`restart_child_waits_then_takes_over_or_times_out`，single.rs——质检复核 P0-1 回归）；D-33 休眠零主动查询回归（`zero_queries_while_sleeping`、`wake_probe_candidate_admits_only_sleeping`，沿用既有）；TOML 往返（`experimental_keys_toml_roundtrip`）；闸门计数与 hint 动态文案（`fine_tune_gate_text_spells_count`、`lab_hint_text_marks_dirty`）。
+- **限制如实说明**：本版开发环境无 Rust 工具链，cargo test / fmt / clippy 以 CI（PR 检查，windows + ubuntu 双 job）为准；tray 层 Windows 真机行为（闸门布局、立即重启端到端、toast 实际弹出）待真机验证。「立即重启」的跨进程同步（环境标记 → 等待互斥体释放 → 接管／超时失败提示）为代码层同步机制＋单测断言保障（single.rs），真机连点重启成功率随用户实测回报，开发环境未做亦不虚报真机连点验证。
 
 ## v0.3.21
 
