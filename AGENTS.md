@@ -56,7 +56,7 @@
 | `docs/experience/03-release-quality-gate.md` | 发布质量门禁清单，发布前逐条核验 |
 | `docs/experience/05-diag-export-field-audit.md` | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
 | `docs/experience/06-release-reconciliation.md` | 发布对账机制与本期对账表（内部维护区） |
-| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 ~ D-83 决策记录，改代码前必读相关条目 |
+| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 ~ D-84 决策记录，改代码前必读相关条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | `CONTRIBUTING.md` | 提交规范、PR 自检清单与行为红线 |
 | `SECURITY.md` | 安全问题报告渠道、范围声明与供应链 |
