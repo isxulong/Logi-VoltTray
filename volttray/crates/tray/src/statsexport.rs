@@ -70,6 +70,7 @@ const DLG_RIGHT_MARGIN: i32 = 24;
 /// 失败（拿不到 DC 等）按「存在」处理，避免误杀合法字体。
 fn font_available(face: &str) -> bool {
     struct Hit(bool);
+    // SAFETY(E9): 字体枚举回调：LOGFONTW 指针由系统在回调期间保证有效、仅读取；lparam 还原的 Hit 指针由调用方保证存活至枚举结束。
     unsafe extern "system" fn enum_proc(
         _lpelf: *const LOGFONTW,
         _lpntme: *const TEXTMETRICW,
@@ -87,6 +88,7 @@ fn font_available(face: &str) -> bool {
     let n = (face_w.len() - 1).min(lf.lfFaceName.len() - 1);
     lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
     let mut hit = Hit(false);
+    // SAFETY(E9): GetDC(None) 取得的 DC 用毕 ReleaseDC；LOGFONTW 按值构造、字体名保持 NUL 结尾。
     unsafe {
         let hdc = GetDC(None);
         if hdc.is_invalid() {
@@ -118,12 +120,14 @@ fn create_ui_font() -> (HFONT, bool) {
             };
             let n = (face_w.len() - 1).min(lf.lfFaceName.len() - 1);
             lf.lfFaceName[..n].copy_from_slice(&face_w[..n]);
+            // SAFETY(E9): lf 按值构造；CreateFontIndirectW 返回无效句柄时不使用，有效句柄移交调用方持有。
             let font = unsafe { CreateFontIndirectW(&lf) };
             if !font.is_invalid() {
                 return (font, true);
             }
         }
     }
+    // SAFETY(E9): GetStockObject 返回系统库存 GDI 对象句柄，不销毁、不转移所有权。
     let stock = unsafe { GetStockObject(DEFAULT_GUI_FONT) };
     (HFONT(stock.0), false)
 }
@@ -133,6 +137,7 @@ fn create_ui_font() -> (HFONT, bool) {
 fn measure_text_width(text: &str, font: HFONT) -> i32 {
     let text_w = wide(text);
     let text_w = &text_w[..text_w.len() - 1];
+    // SAFETY(E9): GetDC/ReleaseDC 配对；SelectObject 选入字体后恢复原对象；文本长度显式传入。
     unsafe {
         let hdc = GetDC(None);
         if hdc.is_invalid() {
@@ -157,6 +162,7 @@ struct DialogState {
     result: Option<ExportOptions>,
 }
 
+// SAFETY(E9): 对话框过程回调：用户数据指针在 WM_INITDIALOG 建立、对话框销毁前有效；其余消息先判空再解引用。
 unsafe extern "system" fn export_dlg_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -201,6 +207,7 @@ unsafe extern "system" fn export_dlg_wndproc(
 /// （零落盘、零派发）。进度提示（v3 P2-③）：对话框内静态文案告知
 /// 「后台执行、完成弹窗」，渲染期间 UI 不被阻塞（派往 IO 线程）。
 pub fn pick_export_options() -> Option<ExportOptions> {
+    // SAFETY(E9): 对话框创建按 Win32 契约（模块句柄/资源模板有效）；控件句柄均为本对话框有效子窗口；失败路径返回 None 不留半成品。
     unsafe {
         let hinst = match windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
             Ok(h) => windows::Win32::Foundation::HINSTANCE(h.0),
@@ -385,6 +392,7 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
         crate::bootlog::note("stats export cancelled at options dialog");
         return;
     };
+    // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
     let local = unsafe { GetLocalTime() };
     let default_name = volttray_app::stats_export_filename_local(LocalTimeParts {
         year: local.wYear,
@@ -420,6 +428,7 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
 pub(crate) static ENDSESSION_HOOK: Mutex<Option<(mpsc::Sender<IoCmd>, mpsc::Receiver<()>)>> =
     Mutex::new(None);
 
+// SAFETY(E9): 窗口过程回调：WM_ENDSESSION 路径经 ENDSESSION_HOOK 互斥锁取通道句柄，无锁外共享可变状态。
 unsafe extern "system" fn endsession_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -456,6 +465,7 @@ pub fn install_endsession_window(cmd_tx: mpsc::Sender<IoCmd>, ack_rx: mpsc::Rece
     if let Ok(mut slot) = ENDSESSION_HOOK.lock() {
         *slot = Some((cmd_tx, ack_rx));
     }
+    // SAFETY(E9): message-only 窗口创建按 Win32 契约；类名缓冲 NUL 结尾且存活至调用返回；失败路径留痕并安全退出。
     unsafe {
         let hinst = match windows::Win32::System::LibraryLoader::GetModuleHandleW(None) {
             Ok(h) => windows::Win32::Foundation::HINSTANCE(h.0),

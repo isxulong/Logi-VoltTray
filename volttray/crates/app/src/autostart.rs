@@ -255,6 +255,7 @@ mod imp {
     ) -> Result<HKEY, String> {
         let sub = wide(RUN_KEY);
         let mut hkey = HKEY::default();
+        // SAFETY(E9): sub 为 NUL 结尾宽字符缓冲且调用期间存活；hkey 仅在 RegOpenKeyExW 成功返回后视为已初始化使用。
         unsafe {
             let r = RegOpenKeyExW(
                 HKEY_CURRENT_USER,
@@ -283,6 +284,7 @@ mod imp {
         let name = wide(RUN_VALUE_NAME);
         let mut ty = REG_VALUE_TYPE(0);
         let mut size = 0u32;
+        // SAFETY(E9): hkey 为 open_run_key 取得的有效句柄；name 缓冲 NUL 结尾且存活；长度/缓冲区输出参数按 RegQueryValueExW 契约传入。
         unsafe {
             let r = RegQueryValueExW(
                 hkey,
@@ -348,8 +350,10 @@ mod imp {
         let hkey = open_run_key(KEY_SET_VALUE)?;
         let value = wide(&super::build_run_value(exe_path, args));
         let bytes: &[u8] =
+            // SAFETY(E9): value 为含 NUL 的 u16 缓冲，from_raw_parts 的字节长度 = len*2 不越界；切片仅用于紧随的 RegSetValueExW，不悬垂。
             unsafe { std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2) };
         let name = wide(RUN_VALUE_NAME);
+        // SAFETY(E9): hkey 有效且具 KEY_SET_VALUE 权限；bytes 指针/长度来自上方存活切片，name 缓冲 NUL 结尾。
         unsafe {
             let r = RegSetValueExW(
                 hkey,
@@ -369,6 +373,7 @@ mod imp {
     pub fn disable() -> Result<(), String> {
         let hkey = open_run_key(KEY_SET_VALUE)?;
         let name = wide(RUN_VALUE_NAME);
+        // SAFETY(E9): hkey 为有效句柄、name 缓冲 NUL 结尾；RegCloseKey 在句柄最后一次使用之后调用，错误码 2（值不存在）按幂等成功处理。
         unsafe {
             let r = RegDeleteValueW(hkey, PCWSTR::from_raw(name.as_ptr()));
             let _ = RegCloseKey(hkey);

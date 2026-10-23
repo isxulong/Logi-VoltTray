@@ -34,12 +34,14 @@ pub struct RawInputSink {
 
 impl Drop for RawInputSink {
     fn drop(&mut self) {
+        // SAFETY(E9): hwnd 为 install() 创建并由本结构独占拥有的 message-only 窗口；Drop 仅执行一次销毁。
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd);
         }
     }
 }
 
+// SAFETY(E9): Win32 窗口过程回调：仅处理本类窗口消息；经 GWLP_USERDATA 取回的状态指针由 install() 建立、窗口存活期内有效，销毁路径不再解引用。
 unsafe extern "system" fn sink_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -53,6 +55,7 @@ unsafe extern "system" fn sink_wndproc(
 /// 安装被动监听：创建 message-only 窗口并注册鼠标 Raw Input（INPUTSINK）。
 /// 失败返回 None——被动唤醒退化为「仅正常轮询节奏」（绝不主动保活）。
 pub fn install() -> Option<RawInputSink> {
+    // SAFETY(E9): 窗口类注册与 message-only 窗口创建按 Win32 契约；类名缓冲 NUL 结尾且存活至调用返回；任一步失败即时清理并返回 None。
     unsafe {
         let hmodule = GetModuleHandleW(None).ok()?;
         let hinst = HINSTANCE(hmodule.0);
@@ -113,6 +116,7 @@ pub fn install() -> Option<RawInputSink> {
 /// 只读不写：GetRawInputData / GetRawInputDeviceInfoW 均为纯接收侧查询，
 /// 不产生任何 HID++ 射线流量。
 pub fn is_logitech_mouse_input(lparam: LPARAM) -> bool {
+    // SAFETY(E9): buf 以 u64 数组保证 RAWINPUT 要求的自然对齐；size 先以缓冲容量初始化，仅在 GetRawInputData 成功且返回长度不逾容量时解析。
     unsafe {
         // 对齐缓冲（RAWINPUT 要求指针自然对齐；鼠标报文 ≤128B 足够）。
         let mut buf = [0u64; 16];
@@ -164,6 +168,7 @@ pub fn is_logitech_mouse_input(lparam: LPARAM) -> bool {
 /// 回退全量装填并记 channel_map_miss，不影响唤醒功能本身。
 #[cfg(windows)]
 pub fn device_path(lparam: LPARAM) -> Option<String> {
+    // SAFETY(E9): 两阶段查询：先取所需长度、再按长度分配缓冲；仅在返回成功且长度一致时读取设备路径字符串。
     unsafe {
         let mut hsize: u32 = 0;
         if GetRawInputData(

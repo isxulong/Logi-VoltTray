@@ -49,6 +49,7 @@ pub enum RestartAcquire {
 /// 尝试创建并持有单实例互斥体：成功返回 `Some(句柄)`；已存在（旧实例
 /// 仍持有）返回 `None`，不发激活事件——是否激活由调用方按场景决定。
 fn try_acquire() -> Result<Option<HANDLE>, String> {
+    // SAFETY(E9): name 为 NUL 结尾宽字符缓冲、存活至调用返回；互斥体句柄成功时移交调用方持有，已存在路径不重复持有。
     unsafe {
         let name = wide(MUTEX_NAME);
         let mutex = CreateMutexW(None, true, PCWSTR::from_raw(name.as_ptr()))
@@ -65,6 +66,7 @@ pub fn acquire() -> Result<SingleInstance, String> {
     match try_acquire()? {
         Some(h) => Ok(SingleInstance::First(h)),
         None => {
+            // SAFETY(E9): ev_name 为 NUL 结尾宽字符缓冲、存活至调用返回；事件句柄用毕 CloseHandle，失败仅退化激活通知。
             unsafe {
                 let ev_name = wide(EVENT_NAME);
                 if let Ok(ev) = CreateEventW(None, false, false, PCWSTR::from_raw(ev_name.as_ptr()))
@@ -108,6 +110,7 @@ mod tests {
     use super::*;
 
     fn close_raw(raw: isize) {
+        // SAFETY(E9): raw 为测试自持有的有效句柄值；CloseHandle 失败忽略，不影响测试断言。
         unsafe {
             let _ = CloseHandle(HANDLE(raw as *mut core::ffi::c_void));
         }

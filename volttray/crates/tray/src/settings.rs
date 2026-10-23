@@ -527,6 +527,7 @@ impl Ctx {
         if v != 0 {
             HFONT(v as *mut core::ffi::c_void)
         } else {
+            // SAFETY(E9): GetStockObject 返回系统拥有的库存 GDI 对象句柄，不销毁、不转移所有权。
             unsafe { HFONT(GetStockObject(DEFAULT_GUI_FONT).0) }
         }
     }
@@ -609,6 +610,7 @@ pub fn open_settings(
     let existing = SETTINGS_HWND.load(Ordering::SeqCst);
     if existing != 0 {
         let hwnd = HWND(existing as *mut core::ffi::c_void);
+        // SAFETY(E9): hwnd 由 SETTINGS_HWND 原子值还原；先经 IsWindow 校验存活再置前台，校验失败路径不再触碰该句柄。
         unsafe {
             if IsWindow(Some(hwnd)).as_bool() {
                 let _ = SetForegroundWindow(hwnd);
@@ -626,6 +628,7 @@ pub fn open_settings(
                  可在下方「外观」分区重新调整字体、颜色、形状与大小。"
             ));
             let caption = wide("LogiVoltTray");
+            // SAFETY(E9): text/caption 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活。
             unsafe {
                 let _ = MessageBoxW(
                     None,
@@ -637,6 +640,7 @@ pub fn open_settings(
         }
     }
 
+    // SAFETY(E9): icc 按值初始化且 dwSize 等于结构体实际大小，符合 InitCommonControlsEx 契约。
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -759,6 +763,7 @@ pub fn open_settings(
     }
 }
 
+// SAFETY(E9): 窗口过程回调：lparam 在 WM_CREATE 按 CREATESTRUCTW 契约解引用；GWLP_USERDATA 的 Ctx 指针在窗口存活期内有效、由 GUI 线程独占访问。
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let ctx = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Ctx;
     match msg {
@@ -1012,10 +1017,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 // ---------------------------------------------------------------------------
 
 /// 取回子类化前保存的原窗口过程（挂在控件 GWLP_USERDATA 上）。
+// SAFETY(E9): 仅在已被 subclass() 子类化的控件上调用；GWLP_USERDATA 存的是原窗口过程地址，transmute 方向与写入时一致。
 unsafe fn prev_proc(hwnd: HWND) -> WNDPROC {
     std::mem::transmute::<isize, WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))
 }
 
+// SAFETY(E9): prev 为 prev_proc 取得的有效原窗口过程；参数原样转交 CallWindowProcW，符合其调用契约。
 unsafe fn call_prev(
     prev: WNDPROC,
     hwnd: HWND,
@@ -1036,6 +1043,7 @@ fn wheel_delta(wparam: WPARAM) -> i16 {
 }
 
 /// 滑块滚轮：上滚增加、下滚减少（D-54，规范裁决 5）；步进 5 并转发 WM_HSCROLL。
+// SAFETY(E9): 子类窗口过程回调：仅处理滚轮/滚动消息，其余一律经 call_prev 交还原窗口过程，不吞消息。
 unsafe extern "system" fn trackbar_wheel_proc(
     hwnd: HWND,
     msg: u32,
@@ -1066,6 +1074,7 @@ unsafe extern "system" fn trackbar_wheel_proc(
 }
 
 /// 阈值数字框：滚轮 ±1、↑/↓ 键 ±1（1–99），写入文本触发 EN_CHANGE 交父窗口校验。
+// SAFETY(E9): 子类窗口过程回调：仅处理滚轮/按键消息，其余一律经 call_prev 交还原窗口过程，不吞消息。
 unsafe extern "system" fn edit_wheel_proc(
     hwnd: HWND,
     msg: u32,
@@ -1098,6 +1107,7 @@ unsafe extern "system" fn edit_wheel_proc(
 }
 
 /// owner-draw 按钮悬停态：进入/离开时请求重绘（hover 由 WM_DRAWITEM 即时判定）。
+// SAFETY(E9): 子类窗口过程回调：仅处理鼠标移动/离开消息，其余一律经 call_prev 交还原窗口过程，不吞消息。
 unsafe extern "system" fn button_hover_proc(
     hwnd: HWND,
     msg: u32,
@@ -1120,6 +1130,7 @@ unsafe extern "system" fn button_hover_proc(
 }
 
 /// GWLP_WNDPROC 子类化（原过程存 GWLP_USERDATA）。
+// SAFETY(E9): hwnd 非空已校验；先把原过程地址存入 GWLP_USERDATA 再替换 GWLP_WNDPROC，保证任一时刻都可取回有效原过程。
 unsafe fn subclass(hwnd: HWND, proc_: WNDPROC) {
     if hwnd.0.is_null() {
         return;
@@ -1133,6 +1144,7 @@ unsafe fn subclass(hwnd: HWND, proc_: WNDPROC) {
 // 控件创建与布局
 // ---------------------------------------------------------------------------
 
+// SAFETY(E9): class/title 宽字符缓冲 NUL 结尾且存活至 CreateWindowExW 返回；句柄无效时返回 None，不产生半初始化控件。
 #[allow(clippy::too_many_arguments)] // 裸 Win32 控件创建包装，参数即 CreateWindowExW 实参集。
 unsafe fn create_ctl(
     parent: HWND,
@@ -1180,6 +1192,7 @@ fn ws(extra: u32) -> WINDOW_STYLE {
 }
 
 /// Segoe UI 字体（pt_x10 = 磅 ×10；失败返回 None 由库存字体兜底）。
+// SAFETY(E9): LOGFONTW 按值构造；字体名拷入定长数组且保持 NUL 结尾（长度已静态约束）；失败返回 None 由库存字体兜底。
 unsafe fn make_font(dpi: u32, pt_x10: i32, weight: i32) -> Option<HFONT> {
     let face = wide("Segoe UI"); // 含 NUL，len = 11 ≤ 32
     let mut name = [0u16; 32];
@@ -1206,6 +1219,7 @@ fn icon_resource() -> PCWSTR {
 }
 
 /// 实测文本宽度（按所选字体，逻辑像素）。
+// SAFETY(E9): GetDC 取得的 HDC 用毕 ReleaseDC 归还；SelectObject 选入字体后恢复原对象；文本长度显式传入、不依赖 NUL 终止。
 unsafe fn text_width(hwnd: HWND, font: HFONT, s: &str) -> i32 {
     let v: Vec<u16> = s.encode_utf16().collect();
     let hdc = GetDC(Some(hwnd));
@@ -1284,6 +1298,7 @@ fn swatch_bgra(c: RgbColor, border: u32, w: i32, h: i32) -> Vec<u8> {
     v
 }
 
+// SAFETY(E9): 全部子控件经 create_ctl 创建并登记于 ctx；任一创建失败即返回，不留下半初始化界面状态。
 unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
     let hinst = match GetModuleHandleW(None) {
         Ok(h) => HINSTANCE(h.0),
@@ -1912,6 +1927,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
 }
 
 /// tooltip 增删/更新文本（add=true 走 TTM_ADDTOOLW，否则 TTM_UPDATETIPTEXTW）。
+// SAFETY(E9): tip/tool 句柄非空已校验；TOOLINFOW 按值初始化且 cbSize 正确，文本缓冲 NUL 结尾、存活至 SendMessageW 同步返回。
 unsafe fn tip_tool(tip: HWND, owner: HWND, tool: HWND, text: &str, add: bool) {
     if tip.0.is_null() || tool.0.is_null() {
         return;
@@ -1977,6 +1993,7 @@ const LAB_CHILDREN: [i32; 12] = [
 ];
 
 /// 布局刷新：分档卡展开/收起 → 下方控件上移 TIER_DELTA，窗口高度同步收缩。
+// SAFETY(E9): 仅对本窗口已登记子控件调用 SetWindowPos；坐标全部来自 BELOW 常量表与 TIER_DELTA 推算，无外部输入。
 unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     ctx.expanded.set(expanded);
     let dy = if expanded { 0 } else { -TIER_DELTA };
@@ -2053,6 +2070,7 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     let _ = InvalidateRect(Some(hwnd), None, true);
 }
 
+// SAFETY(E9): GetDC(None) 取得的屏幕 DC 用毕 ReleaseDC；LOGFONTW 按值构造，枚举回调 font_enum 仅在其调用期间收集结果。
 unsafe fn enum_fonts() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let hdc: HDC = GetDC(None);
@@ -2086,6 +2104,7 @@ unsafe fn enum_fonts() -> Vec<String> {
     out
 }
 
+// SAFETY(E9): 字体枚举回调：lpelf 由系统在回调期间保证有效，仅读取不留存；lparam 还原的收集器指针由 enum_fonts 保证存活至枚举结束。
 unsafe extern "system" fn font_enum(
     lpelf: *const LOGFONTW,
     _lpntme: *const TEXTMETRICW,
@@ -2103,26 +2122,31 @@ unsafe extern "system" fn font_enum(
 
 fn add_string(combo: HWND, text: &str) {
     let v = wide(text);
+    // SAFETY(E9): v 为 NUL 结尾宽字符缓冲，SendMessageW(CB_ADDSTRING) 同步返回前存活；combo 为本窗口有效句柄。
     unsafe {
         SendMessageW!(combo, CB_ADDSTRING, WPARAM(0), LPARAM(v.as_ptr() as isize));
     }
 }
 
 fn combo_sel(combo: HWND) -> i32 {
+    // SAFETY(E9): combo 为本窗口有效句柄；SendMessageW(CB_GETCURSEL) 仅传值参数、同步返回。
     unsafe { SendMessageW!(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)) as i32 }
 }
 
 fn combo_set_sel(combo: HWND, idx: i32) {
+    // SAFETY(E9): combo 为本窗口有效句柄；CB_SETCURSEL 索引经 max(0) 钳制，仅传值参数。
     unsafe {
         SendMessageW!(combo, CB_SETCURSEL, WPARAM(idx.max(0) as usize), LPARAM(0));
     }
 }
 
 fn combo_count(combo: HWND) -> i32 {
+    // SAFETY(E9): combo 为本窗口有效句柄；SendMessageW(CB_GETCOUNT) 仅传值参数、同步返回。
     unsafe { SendMessageW!(combo, CB_GETCOUNT, WPARAM(0), LPARAM(0)) as i32 }
 }
 
 fn combo_current_text(combo: HWND) -> String {
+    // SAFETY(E9): combo 有效句柄；索引取自 CB_GETCURSEL，负值提前返回，不越界读取。
     unsafe {
         let idx = combo_sel(combo);
         if idx < 0 {
@@ -2145,6 +2169,7 @@ fn combo_current_text(combo: HWND) -> String {
 
 fn combo_find_exact(combo: HWND, text: &str) -> i32 {
     let v = wide(text);
+    // SAFETY(E9): v 为 NUL 结尾宽字符缓冲、存活至 SendMessageW 同步返回；wParam 按 CB_FINDSTRINGEXACT 契约传 -1。
     unsafe {
         SendMessageW!(
             combo,
@@ -2155,6 +2180,7 @@ fn combo_find_exact(combo: HWND, text: &str) -> i32 {
     }
 }
 
+// SAFETY(E9): buf 定长 64 元素，GetWindowTextW 按容量截断并返回实际拷贝长度；仅按返回长度切片读取，不越界。
 unsafe fn edit_text(hwnd: HWND) -> String {
     let mut buf = [0u16; 64];
     let n = GetWindowTextW(hwnd, &mut buf);
@@ -2163,6 +2189,7 @@ unsafe fn edit_text(hwnd: HWND) -> String {
 
 fn set_text(ctx: &Ctx, id: i32, text: &str) {
     let v = wide(text);
+    // SAFETY(E9): v 为 NUL 结尾宽字符缓冲、存活至 SetWindowTextW 返回；GetDlgItem 失败得空句柄，由 API 安全忽略。
     unsafe {
         let hwnd = GetDlgItem(Some(settings_hwnd()), id).unwrap_or_default();
         let _ = SetWindowTextW(hwnd, PCWSTR(v.as_ptr()));
@@ -2175,10 +2202,12 @@ fn settings_hwnd() -> HWND {
 }
 
 fn ctl(hwnd: HWND, id: i32) -> HWND {
+    // SAFETY(E9): hwnd 为调用方持有的有效窗口句柄；GetDlgItem 为纯查询，不产生所有权转移。
     unsafe { GetDlgItem(Some(hwnd), id).unwrap_or_default() }
 }
 
 /// 显示/隐藏控件。
+// SAFETY(E9): 控件句柄经 ctl() 取自有效父窗口；ShowWindow 仅传值参数。
 unsafe fn show_ctl(hwnd: HWND, id: i32, show: bool) {
     let _ = ShowWindow(ctl(hwnd, id), if show { SW_SHOW } else { SW_HIDE });
 }
@@ -2186,6 +2215,7 @@ unsafe fn show_ctl(hwnd: HWND, id: i32, show: bool) {
 /// 呼出系统取色对话框（CC_FULLOPEN 展开完整色轮 + 自定义色区）。
 /// 返回 None = 用户取消。模态期间不持有任何配置借用（WM_ACTIVATE 同步会重入）。
 /// v0.3.5 #1（D-52）：COLORREF ↔ #RRGGBB 统一走 config 的唯一转换函数对。
+// SAFETY(E9): CHOOSECOLORW 按契约初始化（lStructSize 正确、lpCustColors 指向容量足够的存活缓冲）；模态期间不持有任何配置借用。
 unsafe fn pick_color(owner: HWND, initial: RgbColor) -> Option<RgbColor> {
     let mut custom = CUSTOM_COLORS.lock().unwrap_or_else(|e| e.into_inner());
     let mut cc = CHOOSECOLORW {
@@ -2231,6 +2261,7 @@ fn tier_dot_bgra(c: RgbColor) -> Vec<u8> {
 
 /// 把直 alpha BGRA 打成**预乘 32bpp DIB**（HBITMAP）。SS_BITMAP 控件只对
 /// 32bpp DIB 按 alpha 混合；预乘公式 (v*a+127)/255 与图标渲染路径一致。
+// SAFETY(E9): bgra 长度由调用方按 w*h*4 保证；CreateDIBSection 位图 bits 写入不越出源切片范围。
 unsafe fn bgra_dib_premultiplied(bgra: &[u8], w: i32, h: i32) -> HBITMAP {
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -2262,6 +2293,7 @@ unsafe fn bgra_dib_premultiplied(bgra: &[u8], w: i32, h: i32) -> HBITMAP {
 }
 
 /// 把分档颜色画到色点控件（SS_BITMAP）。
+// SAFETY(E9): dot 为有效 SS_BITMAP 控件句柄；旧位图句柄取回后 DeleteObject，不泄漏、不双删。
 unsafe fn draw_dot(hwnd: HWND, id: i32, color: RgbColor) {
     let bgra = tier_dot_bgra(color);
     let dot = ctl(hwnd, id);
@@ -2280,6 +2312,7 @@ unsafe fn draw_dot(hwnd: HWND, id: i32, color: RgbColor) {
 }
 
 /// 把颜色画到 swatch 控件（SS_BITMAP，40×24）。
+// SAFETY(E9): target 为有效 SS_BITMAP 控件句柄；旧位图句柄取回后 DeleteObject，不泄漏、不双删。
 unsafe fn draw_swatch(ctx: &Ctx, hwnd: HWND, id: i32, color: RgbColor) {
     let bgra = swatch_bgra(color, ctx.theme.border, 40, 24);
     let target = ctl(hwnd, id);
@@ -2298,6 +2331,7 @@ unsafe fn draw_swatch(ctx: &Ctx, hwnd: HWND, id: i32, color: RgbColor) {
 }
 
 /// owner-draw 按钮绘制（D-58：底色 = 按下 > 悬停 > 窗口；1px 边框；居中文本）。
+// SAFETY(E9): dis 由 WM_DRAWITEM 传入、系统保证在消息处理期间有效；临时 GDI 对象用毕销毁，选入对象恢复原状。
 unsafe fn draw_owner_button(ctx: &Ctx, dis: &DRAWITEMSTRUCT) {
     let t = ctx.theme;
     let pressed = dis.itemState.0 & ODS_SELECTED.0 != 0;
@@ -2402,6 +2436,7 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
         bgra[i * 4 + 2] = mix(rgba[i * 4], checker.0); // R
         bgra[i * 4 + 3] = 255;
     }
+    // SAFETY(E9): 预览绘制所用 HDC/位图均为本路径创建并于块尾释放；源/目标矩形由控件尺寸推算，不越界读写。
     unsafe {
         // v0.3.18（U-3）：放大预览画布收敛为 144 逻辑像素（96dpi 下恰为 3×）。
         // 放大倍率由画布与源位图尺寸推得（整数最近邻、居中贴入），不写死；
@@ -2465,6 +2500,7 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
 fn sync_controls(hwnd: HWND, ctx: &Ctx) {
     ctx.syncing.set(true);
     let cfg = ctx.cfg.borrow();
+    // SAFETY(E9): 全部控件句柄经 ctl() 取自有效设置窗口；cfg 借用限于块内读取，无重入修改。
     unsafe {
         let shape = ctl(hwnd, IDC_SHAPE);
         combo_set_sel(
@@ -2671,6 +2707,7 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
 }
 
 /// 「选色…」按钮与分档色点点击：先取初始色（短借用）→ 呼出模态取色 → 回写。
+// SAFETY(E9): 初始色在短借用内取出后即释放 cfg 借用再进模态取色；回写重新借用，不跨模态持有引用。
 unsafe fn handle_color_pick(hwnd: HWND, ctx: &Ctx, id: i32) {
     let initial = {
         let cfg = ctx.cfg.borrow();
@@ -2734,6 +2771,7 @@ fn set_tier_error(hwnd: HWND, ctx: &Ctx, i: usize, msg: Option<&str>) {
         errs[i] = msg.is_some();
     }
     set_text(ctx, IDC_TIER_ERR, msg.unwrap_or(""));
+    // SAFETY(E9): hwnd 为有效设置窗口句柄；InvalidateRect 仅传值参数。
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
@@ -2750,6 +2788,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             || id == IDC_FONT_PICK
             || (IDC_TIER_DOT0..IDC_TIER_DOT0 + 5).contains(&id))
     {
+        // SAFETY(E9): 转调 handle_color_pick，其不安全不变量见该函数注释；此处传入的窗口句柄与控件 id 均有效。
         unsafe { handle_color_pick(hwnd, ctx, id) };
         return;
     }
@@ -2859,6 +2898,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         // 卡内右侧红色提示，不占状态行；即时生效模式无确定按钮可禁用，见 D-60）。
         id if change && (IDC_TIER_TH0..IDC_TIER_TH0 + 4).contains(&id) => {
             let i = (id - IDC_TIER_TH0) as usize;
+            // SAFETY(E9): 转调 edit_text（不变量见其注释：定长缓冲截断读取）；控件句柄经 ctl() 取自有效父窗口。
             let text = unsafe { edit_text(ctl(hwnd, id)) };
             if text.is_empty() {
                 set_tier_error(hwnd, ctx, i, None); // 输入中间态
@@ -2898,6 +2938,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         IDC_BLINK if clicked => {
             let checked =
+                // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
                 unsafe { SendMessageW!(ctl(hwnd, IDC_BLINK), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
             cfg.blink_enabled = checked == BST_CHECKED.0 as isize;
             touched = true;
@@ -2934,6 +2975,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         // 「闸门态变化才重排」分支检测并调 relayout（窗口高度随实验室
         // 分组增减 EXP_GATE_DELTA，同一 relayout 路径），否则重排永不触发。
         IDC_FINE_TUNE_GATE if clicked => {
+            // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
             let checked = unsafe {
                 SendMessageW!(
                     ctl(hwnd, IDC_FINE_TUNE_GATE),
@@ -2948,6 +2990,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         // v0.3.22（D-88）：四项试验功能开关——保存后重启生效（非热生效）。
         IDC_LAB_PERSIST if clicked => {
+            // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
             let checked = unsafe {
                 SendMessageW!(
                     ctl(hwnd, IDC_LAB_PERSIST),
@@ -2960,6 +3003,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             touched = true;
         }
         IDC_LAB_STATS if clicked => {
+            // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
             let checked = unsafe {
                 SendMessageW!(ctl(hwnd, IDC_LAB_STATS), BM_GETCHECK, WPARAM(0), LPARAM(0))
             };
@@ -2967,6 +3011,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             touched = true;
         }
         IDC_LAB_POLLING if clicked => {
+            // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
             let checked = unsafe {
                 SendMessageW!(
                     ctl(hwnd, IDC_LAB_POLLING),
@@ -2980,6 +3025,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         }
         IDC_LAB_BT if clicked => {
             let checked =
+                // SAFETY(E9): 控件句柄经 ctl() 取自有效窗口；BM_GETCHECK 仅传值参数，返回值与 BST_CHECKED 比较。
                 unsafe { SendMessageW!(ctl(hwnd, IDC_LAB_BT), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
             cfg.experimental_bluetooth_wired = checked == BST_CHECKED.0 as isize;
             touched = true;

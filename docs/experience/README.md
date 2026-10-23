@@ -40,6 +40,7 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | [04-onboarding.md](04-onboarding.md) | 新 AI 上手指引：项目结构、构建、测试、发布流程、红线清单、报障排查入口、长期原则、文档导航、已知文档滞后点、术语表 | E15 + 仓库-specific 指引 |
 | [05-diag-export-field-audit.md](05-diag-export-field-audit.md) | 诊断导出字段审计（T-02b）：导出 JSON 全字段的内容来源 / 泄露面评估 / redact 规则覆盖逐字段登记，含回归测试守护 | T-02b 审计产物 |
 | [06-release-reconciliation.md](06-release-reconciliation.md) | 发布对账（内部维护区）：对账机制、常设核验项（F.1）与本期对账表（F.2），自 03 F 节整体搬迁 | 内部维护（T/N/K/F-Ax 编号） |
+| [07-unsafe-ledger.md](07-unsafe-ledger.md) | unsafe 台账（红蓝对抗改进项 E9 产物）：全仓 97 处 unsafe 逐块 SAFETY 注释登记、计数口径与发布对账复核规则 | 红蓝对抗整改产物 |
 
 > 对外读者说明：文中 T-xx / N-x / K-x / F-Ax 等编号为内部维护编号（实施令条款与对账机制条款），仅服务项目内部对账，外部读者可忽略。
 

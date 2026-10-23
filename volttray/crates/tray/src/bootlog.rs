@@ -56,6 +56,7 @@ fn format_local_time(st: &SYSTEMTIME) -> String {
 }
 
 fn now_str() -> String {
+    // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
     let st = unsafe { GetLocalTime() };
     format_local_time(&st)
 }
@@ -191,6 +192,7 @@ pub fn path_str() -> String {
 pub fn fatal_box(title: &str, body: &str) {
     let text = wide(&format!("{body}\n\n详细日志：{}", path_str()));
     let caption = wide(title);
+    // SAFETY(E9): text/caption 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数均为值类型。
     unsafe {
         let _ = MessageBoxW(
             None,
@@ -205,6 +207,7 @@ pub fn fatal_box(title: &str, body: &str) {
 pub fn already_running_box() {
     let text = wide("LogiVoltTray 已在运行。\n\n本程序是托盘应用，没有主窗口：请查看任务栏右下角通知区域（可能收进了溢出箭头「^」里），右键图标可打开设置或退出。");
     let caption = wide("LogiVoltTray 已在运行");
+    // SAFETY(E9): text/caption 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数均为值类型。
     unsafe {
         let _ = MessageBoxW(
             None,
@@ -218,11 +221,13 @@ pub fn already_running_box() {
 /// panic hook（B-5）：所有 panic 落日志；仅主（GUI）线程弹窗后由
 /// main 的 catch_unwind 收尾退出。
 pub fn install_panic_hook() {
+    // SAFETY(E9): GetCurrentThreadId 无参、返回线程 id 值，无指针契约。
     let main_tid = unsafe { GetCurrentThreadId() };
     let _ = MAIN_TID.set(main_tid);
     std::panic::set_hook(Box::new(move |info| {
         write_line(&format!("PANIC: {info}"));
         flush_log();
+        // SAFETY(E9): GetCurrentThreadId 无参、返回线程 id 值，无指针契约；仅与 MAIN_TID 记录值比较。
         let cur = unsafe { GetCurrentThreadId() };
         let on_main = MAIN_TID.get().is_some_and(|m| *m == cur);
         if on_main {

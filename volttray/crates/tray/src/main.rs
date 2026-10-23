@@ -183,6 +183,7 @@ mod imp {
     impl GuiSink {
         fn send(&self, msg: GuiMsg) {
             let _ = self.tx.send(msg);
+            // SAFETY(E9): tid 为 GUI 线程启动时记录的本进程线程 id；PostThreadMessageW 仅投递值类型消息号，失败忽略不产生悬垂。
             unsafe {
                 let _ = PostThreadMessageW(self.tid, WM_APP_GUI, WPARAM(0), LPARAM(0));
             }
@@ -384,6 +385,7 @@ mod imp {
             let days = era * 146097 + doe - 719468;
             days * 1440 + st.wHour as i64 * 60 + st.wMinute as i64
         }
+        // SAFETY(E9): GetLocalTime / GetSystemTime 均无参、返回 POD SYSTEMTIME 值，无指针契约。
         let (local, utc) = unsafe {
             (
                 GetLocalTime(),
@@ -2523,6 +2525,7 @@ mod imp {
             }
         };
 
+        // SAFETY(E9): 仅向 SetProcessDpiAwarenessContext 传常量 DPI_AWARENESS_CONTEXT 值，进程启动早期单线程调用。
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
@@ -2700,6 +2703,7 @@ mod imp {
             // 更新被无限推迟。tid 取的是本（GUI）线程 id。
             let gui_sink = GuiSink {
                 tx: gui_tx,
+                // SAFETY(E9): GetCurrentThreadId 无参、返回本（GUI）线程 id 值，无指针契约。
                 tid: unsafe { GetCurrentThreadId() },
             };
             let channel_map_miss_io = channel_map_miss.clone();
@@ -2727,6 +2731,7 @@ mod imp {
 
         // 4. 图标缓存（v0.3.15 P1-2：懒渲染 + 小容量 LRU，不再启动全量
         //    预渲染；v0.3.0：形状/背景/字色/字体 + 低电提亮档，M9/M11）+ 托盘。
+        // SAFETY(E9): GetDpiForSystem 无参、返回 u32 值，无指针契约。
         let dpi = unsafe { GetDpiForSystem() };
         let dark = system_dark_theme();
         let mut cache = cache_from_config(&cfg, dpi_bucket_size(dpi), dark);
@@ -2850,6 +2855,7 @@ mod imp {
         //    闪烁相位仍只由本程序 500ms 定时器的真实 tick 翻转）。
         bootlog::stage("message-pump");
         let mut msg = MSG::default();
+        // SAFETY(E9): msg 为本线程栈上 MSG；GetMessageW 等按 Win32 消息循环契约使用，定时器与窗口句柄均属本线程。
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 // 只响应本程序的 500ms 闪烁定时器（按 timer id + 线程定时器
@@ -2919,6 +2925,7 @@ mod imp {
     /// v0.3.15（P2-1②）：闪烁定时器随激活态惰性 arm / 停闪即 kill。
     /// arm 失败（返回 0）退化为不闪烁并留痕——与 v0.3.14 的降级口径一致。
     fn sync_blink_timer(blink_timer: &mut usize, want: bool) {
+        // SAFETY(E9): SetTimer/KillTimer 以 hwnd=None 作用于本 GUI 线程消息队列；timer id 由 blink_timer 独占管理，arm 失败退化为不闪烁。
         unsafe {
             if want && *blink_timer == 0 {
                 *blink_timer = SetTimer(None, 0, 500, None);
@@ -2979,6 +2986,7 @@ mod imp {
                     let _ = rx.recv_timeout(Duration::from_secs(2));
                 }
             }
+            // SAFETY(E9): PostQuitMessage 仅向本线程消息队列投递退出码，无指针参数。
             unsafe {
                 PostQuitMessage(0);
             }
@@ -3006,6 +3014,7 @@ mod imp {
                     // 成功列文件 / 失败给原因 / 部分成功如实分列）。
                     let title = wide("LogiVoltTray 耗电统计导出");
                     let body = wide(&text);
+                    // SAFETY(E9): body/title 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数为值类型。
                     unsafe {
                         MessageBoxW(
                             None,
@@ -3100,6 +3109,7 @@ mod imp {
 
         // DPI / 主题 / 渲染输入任一变化 → 重建图标缓存
         //（rebuild 内部判等，输入未变时零开销）。
+        // SAFETY(E9): GetDpiForSystem 无参、返回 u32 值，无指针契约。
         let dpi = unsafe { GetDpiForSystem() };
         let size = dpi_bucket_size(dpi);
         let dark = system_dark_theme();
@@ -3261,6 +3271,7 @@ mod imp {
                 // 浏览器待 Windows 实测；此处仅常量 URL，零网络代码路径）。
                 let url = wide("https://github.com/isxulong/Logi-VoltTray/releases/latest");
                 let verb = wide("open");
+                // SAFETY(E9): url/verb 为 NUL 结尾宽字符常量缓冲，ShellExecuteW 同步调用期间存活；仅打开常量 URL，无注入面。
                 let _ = unsafe {
                     ShellExecuteW(
                         None,
@@ -3318,6 +3329,7 @@ mod imp {
                         let _ = rx.recv_timeout(Duration::from_secs(2));
                     }
                 }
+                // SAFETY(E9): PostQuitMessage 仅向本线程消息队列投递退出码，无指针参数。
                 unsafe { PostQuitMessage(0) };
             } else if let Some((_, dev_id)) = ids.device_rows.iter().find(|(mid, _)| *mid == e.id) {
                 state.pinned = Some(dev_id.clone());
@@ -3548,6 +3560,7 @@ mod imp {
         let def_ext = wide(def_ext);
         // windows 0.62 的 OPENFILENAMEW（x86_64 变体）不实现 Default——
         // 含裸指针字段，需 zeroed 后逐字段赋值。
+        // SAFETY(E9): OPENFILENAMEW 含裸指针字段不实现 Default，zeroed 后立即逐字段赋值且先写 lStructSize；后续赋值覆盖全部被引用成员。
         let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
         ofn.lpstrFile = PWSTR(file_buf.as_mut_ptr());
@@ -3556,8 +3569,10 @@ mod imp {
         ofn.nFilterIndex = 1;
         ofn.lpstrDefExt = PCWSTR(def_ext.as_ptr());
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
+        // SAFETY(E9): ofn 已按契约初始化（lStructSize 正确、lpstrFile/nMaxFile 与 file_buf 容量配对）；file_buf 在调用期间存活。
         let ok = unsafe { GetSaveFileNameW(&mut ofn) };
         if !ok.as_bool() {
+            // SAFETY(E9): CommDlgExtendedError 无参、返回错误码值；仅在 GetSaveFileNameW 返回失败后调用。
             let err = unsafe { CommDlgExtendedError() };
             if err.0 != 0 {
                 bootlog::note(&format!(
@@ -3672,6 +3687,7 @@ mod imp {
         // 格式化纯逻辑在 app 层跨平台可测）；JSON 内 exported_at 字段
         // 保留 unix 秒不动（程序消费）。同名碰撞由对话框
         // OFN_OVERWRITEPROMPT 覆盖前确认兜底（见 diag_export.rs 论证）。
+        // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
         let local = unsafe { GetLocalTime() };
         let default_name = diag_export_filename_local(LocalTimeParts {
             year: local.wYear,
@@ -3697,6 +3713,7 @@ mod imp {
         };
         let text = wide(&msg);
         let title = wide("LogiVoltTray 诊断");
+        // SAFETY(E9): text/title 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数为值类型。
         unsafe {
             MessageBoxW(
                 None,

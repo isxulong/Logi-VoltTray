@@ -55,6 +55,7 @@ mod imp {
 
     pub fn set_process_aumid() -> Result<(), String> {
         let id = wide(AUMID);
+        // SAFETY(E9): id 为 wide() 生成的 NUL 结尾 UTF-16 缓冲，调用期间存活；PCWSTR 仅借用其指针，不转移所有权。
         unsafe { SetCurrentProcessExplicitAppUserModelID(PCWSTR::from_raw(id.as_ptr())) }
             .map_err(|e| format!("SetCurrentProcessExplicitAppUserModelID failed: {e}"))
     }
@@ -68,6 +69,7 @@ mod imp {
         if let Some(dir) = link_path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {e}"))?;
         }
+        // SAFETY(E9): COM 以 COINIT_APARTMENTTHREADED 在本线程初始化（S_FALSE 亦接受）；COM 接口指针由 windows crate RAII 持有，不跨线程传递。
         unsafe {
             // S_FALSE（已初始化）也视为成功。
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

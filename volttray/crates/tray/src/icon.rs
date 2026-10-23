@@ -209,6 +209,7 @@ fn wide(s: &str) -> Vec<u16> {
 pub fn system_dark_theme() -> bool {
     let sub = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     let name = wide("AppsUseLightTheme");
+    // SAFETY(E9): sub/name 为 NUL 结尾宽字符缓冲且调用期间存活；hkey 仅在打开成功后读取，用毕关闭。
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(
@@ -577,6 +578,7 @@ pub fn render_text_bitmap(
     let text_w: Vec<u16> = text.encode_utf16().collect();
     let face_w = wide(face);
 
+    // SAFETY(E9): hdc 由 CreateCompatibleDC 创建并于块内 DeleteDC 释放；选入的 GDI 对象用毕恢复/销毁，缓冲生命周期覆盖全部绘制调用。
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {
@@ -788,6 +790,7 @@ pub fn rgba_to_hicon(rgba: &[u8], size: u32) -> Result<isize, FrameError> {
             actual: rgba.len(),
         });
     }
+    // SAFETY(E9): hdc 由 CreateCompatibleDC 创建并于块内 DeleteDC 释放；位图/缓冲区生命周期覆盖全部 GDI 调用，失败路径提前返回不悬垂。
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.is_invalid() {

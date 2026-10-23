@@ -18,6 +18,7 @@ pub fn fmt_hhmm(unix_secs: u64) -> String {
         dwLowDateTime: (ticks & 0xFFFF_FFFF) as u32,
         dwHighDateTime: (ticks >> 32) as u32,
     };
+    // SAFETY(E9): ft/lft 均为栈上 POD FILETIME；仅在 FileTimeToLocalFileTime 成功时读取 lft。
     unsafe {
         let mut lft = FILETIME::default();
         if FileTimeToLocalFileTime(&ft, &mut lft).is_err() {
