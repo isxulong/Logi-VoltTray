@@ -147,6 +147,11 @@ static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
 /// ChooseColorW 自定义颜色槽（进程级持久；comdlg32 要求可写指针）。
 static CUSTOM_COLORS: Mutex<[COLORREF; 16]> = Mutex::new([COLORREF(0); 16]);
 
+/// v0.3.22（D-88）：四项试验功能的进程级基线快照——进程内首次打开设置
+/// 窗口时记录一次，用于 hint 行「已修改，重启后生效」动态判定（窗口
+/// 反复开关不重置；进程重启才复位）。
+static LAB_BASELINE: Mutex<Option<[bool; 4]>> = Mutex::new(None);
+
 // —— 控件 ID（v0.3.5：删除 HEX 框/分档勾选/分组恢复按钮，新增 swatch 与行内重置）——
 const IDC_SHAPE: i32 = 2001;
 const IDC_BG: i32 = 2002;
@@ -210,8 +215,33 @@ const IDC_LOW_RANGE: i32 = 2069;
 /// R-8（v0.3.17 真机终审）：放大预览的独立标签；v0.3.18（U-3）不再标注
 /// 倍数（用户只看布局，实际大小以任务栏为准），标签文案固定「预览」。
 const IDC_LBL_PREVIEW_BIG: i32 = 2070;
-/// 实验性功能标注（相位二第 4 项：设置页显式标注默认态与生效口径）。
+/// 实验室 hint 行（v0.3.22 D-87/D-88：终版口径 + 动态「已修改」判定）。
 const IDC_EXPERIMENTAL_HINT: i32 = 2071;
+/// v0.3.22（D-87）：「精细化设置」闸门复选框（实验室入口；复用
+/// IDC_BLINK 的 BS_AUTOCHECKBOX 链路；计数常驻动态显示，收起态可见）。
+const IDC_FINE_TUNE_GATE: i32 = 2072;
+/// 闸门旁小字（收起仅隐藏选项，已开启的功能继续生效——收起≠关闭）。
+const IDC_GATE_NOTE: i32 = 2073;
+/// 实验室分组框（BS_GROUPBOX；标题「实验室（试验功能）」，D-87）。
+const IDC_LAB_GROUP: i32 = 2074;
+/// 实验室四项复选框（白话标签，不复现 experimental_* 键名，D-87）。
+const IDC_LAB_PERSIST: i32 = 2075;
+const IDC_LAB_STATS: i32 = 2076;
+const IDC_LAB_POLLING: i32 = 2077;
+const IDC_LAB_BT: i32 = 2078;
+/// 四项各自的一行说明。
+const IDC_LAB_PERSIST_DESC: i32 = 2079;
+const IDC_LAB_STATS_DESC: i32 = 2080;
+const IDC_LAB_POLLING_DESC: i32 = 2081;
+const IDC_LAB_BT_DESC: i32 = 2082;
+/// 实验室内「全部恢复默认（开启）」链接式按钮（一键对齐，D-86；
+/// 复用 IDC_RESET_ALL 的 owner-draw 模式，仅作用于四键）。
+const IDC_LAB_RESET: i32 = 2083;
+/// 「立即重启」非模态按钮（D-88：复用 current_exe 启动路径 spawn 新
+/// 进程 + 优雅退出；排程代码零改动，非热生效）。
+const IDC_LAB_RESTART: i32 = 2084;
+/// BS_GROUPBOX = 0x07（BUTTON 分组框样式；crate 未导出该常量，本地取位值）。
+const BS_GROUPBOX_STYLE: u32 = 0x0007;
 
 /// v0.3.18（U-3/U-5）：放大预览画布边长（逻辑像素）——4×(192) 略大，
 /// 收敛到 144（96dpi 下恰为 3×）；画布与源位图（托盘档位尺寸）推得
@@ -234,6 +264,10 @@ const L_EXPANDED_H: i32 = 854;
 const TIER_DELTA: i32 = L_CARD_H + 8;
 /// 收起态客户区逻辑高。
 const L_COLLAPSED_H: i32 = L_EXPANDED_H - TIER_DELTA;
+/// v0.3.22（D-87）：实验室分组展开时追加的客户区逻辑高——窗口高度沿用
+/// 分档卡同一 relayout 路径（L_EXPANDED_H / L_COLLAPSED_H + 本增量），
+/// 不引入新窗口机制。实验室分组 852..1136 + 20 下边距 = 1156 - 854。
+const EXP_GATE_DELTA: i32 = 302;
 
 /// 分档卡提示语宽度实测样本（裁决 3：按 5 档最长示例反推窗口最小宽；
 /// 实际显示文本由 `tier_hint_dynamic` 按当前档数/阈值实时拼写，v0.3.6）。
@@ -246,10 +280,15 @@ const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个�
 /// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断；
 /// v0.3.17 R-9 追加保活扫描说明后升为三行）。
 const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关。";
-/// 实验性功能标注（相位二第 4 项）：如实说明默认态、存量口径、验证
-/// 状态与生效方式——不以「零事故」暗示已验证（冲突三裁决：安全性
-/// 未知、待逐项转正评审）。
-const EXPERIMENTAL_HINT_TEXT: &str = "实验性功能（配置文件 experimental_* 键）：新装默认关闭，既有配置保留原值；未真机验证。持久化/统计开关改动重启后生效。";
+/// v0.3.22（D-87/D-88）：实验室 hint 终版文案——如实说明可逐项关闭、
+/// 尚未完成全量真机验证、反馈渠道与生效方式（不承诺「零事故」）。
+const LAB_HINT_TEXT: &str = "实验室（试验功能）：可逐项关闭；尚未完成全量真机验证，如遇异常请关闭对应功能并通过 Issues 反馈。改动保存后重启生效，可点『立即重启』立即应用。";
+/// 四项有未保存改动时追加的行（D-88：改动保存后需重启方完全生效）。
+const LAB_DIRTY_TEXT: &str = "已修改，重启后生效。";
+/// 闸门旁小字（D-87：收起仅隐藏选项，已开启的功能继续生效——收起≠关闭）。
+const GATE_NOTE_TEXT: &str = "收起仅隐藏选项，已开启的功能继续生效";
+/// 实验室分组框标题（D-87：组名统一「实验室（试验功能）」）。
+const LAB_GROUP_TITLE: &str = "实验室（试验功能）";
 /// 分档说明示例（v0.3.6 规范偏差修正：按当前档数/阈值实时拼写，替代静态常量）。
 /// 例：thresholds = [20, 50] →「阈值 1–99 严格递增；电量 ≤ 数值归入对应档（20/50 → 0–20 / 21–50 / 51–100）」。
 fn tier_hint_dynamic(thresholds: &[u8]) -> String {
@@ -271,9 +310,62 @@ fn tier_hint_dynamic(thresholds: &[u8]) -> String {
     )
 }
 
+/// 闸门复选框文案（D-87）：入口行用「精细化设置」交互语义 + 常驻计数。
+fn fine_tune_gate_text(enabled: usize) -> String {
+    format!("精细化设置（试验功能，已开启 {enabled}/4 项）")
+}
+
+/// 实验室 hint 动态拼写（D-88）：四项有未保存改动时追加「已修改，重启后生效」。
+fn lab_hint_text(dirty: bool) -> String {
+    if dirty {
+        format!("{LAB_HINT_TEXT}\n{LAB_DIRTY_TEXT}")
+    } else {
+        LAB_HINT_TEXT.to_string()
+    }
+}
+
+/// 四项是否有未保存改动（D-88）：与进程内首次打开设置窗口时的基线比对。
+fn lab_dirty(ctx: &Ctx) -> bool {
+    let base = LAB_BASELINE.lock().ok().and_then(|g| *g);
+    let Some(base) = base else { return false };
+    let cfg = ctx.cfg.borrow();
+    [
+        cfg.experimental_persist_last_known,
+        cfg.experimental_stats,
+        cfg.experimental_per_device_polling,
+        cfg.experimental_bluetooth_wired,
+    ] != base
+}
+
+/// 实验室四项白话标签与一行说明（D-87：不复现 experimental_* 键名）。
+/// 文案与实现口径一致：persist=记住上次电量、stats=耗电统计可导出、
+/// per_device_polling=充电时 15 秒快档、bluetooth_wired=蓝牙/有线直连。
+static LAB_ITEMS: [(i32, &str, &str); 4] = [
+    (
+        IDC_LAB_PERSIST,
+        "重启后记住电量",
+        "记住设备最后一次电量：设备断开后仍显示上次读数，重启软件也不清空。",
+    ),
+    (
+        IDC_LAB_STATS,
+        "耗电统计与导出",
+        "在后台记录设备的耗电与充电历史，可在托盘菜单导出为文件查看（历史文件按大小轮转保留）。",
+    ),
+    (
+        IDC_LAB_POLLING,
+        "充电时加快刷新（15 秒）",
+        "设备充电时按 15 秒间隔刷新电量，比常规间隔更及时；其余情况仍按常规间隔。",
+    ),
+    (
+        IDC_LAB_BT,
+        "蓝牙与有线设备直连读取",
+        "直接发现并读取蓝牙或有线直连的设备（不经接收器）；关闭后只识别接收器连接的设备。",
+    ),
+];
+
 /// 展开态下方控件坐标表：(id, x, y, w, h)（逻辑像素）。
 /// 收起分档卡时整组上移 TIER_DELTA；提示语宽度在 relayout 中按实测宽覆盖。
-const BELOW: [(i32, i32, i32, i32, i32); 26] = [
+const BELOW: [(i32, i32, i32, i32, i32); 39] = [
     (IDC_LBL_TEXT, 16, 278, 64, 20),
     (IDC_TEXT_SLIDER, 88, 274, 196, 26),
     (IDC_TEXT_VAL, 292, 278, 44, 20),
@@ -302,9 +394,23 @@ const BELOW: [(i32, i32, i32, i32, i32); 26] = [
     (IDC_RESET_LOW, 344, 728, 48, 24),
     (IDC_LOW_RANGE, 400, 734, 84, 14),
     (IDC_RESET_ALL, 16, 768, 120, 28),
-    // 相位二（第 4 项）：实验性功能标注（两行高，宽度 relayout 按
-    // cw-32 覆盖；新装默认关/存量保留/未验证/重启生效口径）。
-    (IDC_EXPERIMENTAL_HINT, 16, 806, 468, 28),
+    // v0.3.22（D-87）：精细化设置闸门（常驻可见；计数动态显示）+ 闸门小字。
+    (IDC_FINE_TUNE_GATE, 16, 802, 320, 20),
+    (IDC_GATE_NOTE, 16, 824, 468, 14),
+    // v0.3.22（D-87/D-88）：实验室分组框与四项（收起即隐藏；闸门只管可见性
+    // 不管使能——收起≠关闭）。hint 移入组内，随组一并显隐。
+    (IDC_LAB_GROUP, 16, 852, 468, 284),
+    (IDC_LAB_PERSIST, 28, 878, 420, 20),
+    (IDC_LAB_PERSIST_DESC, 44, 898, 424, 14),
+    (IDC_LAB_STATS, 28, 920, 420, 20),
+    (IDC_LAB_STATS_DESC, 44, 940, 424, 14),
+    (IDC_LAB_POLLING, 28, 962, 420, 20),
+    (IDC_LAB_POLLING_DESC, 44, 982, 424, 14),
+    (IDC_LAB_BT, 28, 1004, 420, 20),
+    (IDC_LAB_BT_DESC, 44, 1024, 424, 14),
+    (IDC_EXPERIMENTAL_HINT, 28, 1048, 440, 44),
+    (IDC_LAB_RESET, 28, 1100, 168, 24),
+    (IDC_LAB_RESTART, 204, 1100, 104, 24),
 ];
 
 /// 色彩 token（规范裁决 6：浅/深两套；存储为 COLORREF 0x00BBGGRR，
@@ -389,6 +495,9 @@ struct Ctx {
     cw: Cell<i32>,
     /// 分档卡是否展开（驱动 relayout）。
     expanded: Cell<bool>,
+    /// v0.3.22（D-87）：实验室闸门是否展开（驱动 relayout；收起仅隐藏
+    /// 选项，不改四项使能——收起≠关闭）。
+    gate_expanded: Cell<bool>,
     /// 阈值数字框非法标记（v0.3.6 F2：WM_PAINT 据此画 1px 错误色描边）。
     tier_err: RefCell<[bool; 4]>,
     /// 最近一次自定义字体颜色（v0.3.6：自动→自定义→自动往返保留用户已选色）。
@@ -473,6 +582,11 @@ fn settings_applied_note(prev: &Config, next: &Config) -> String {
     cmp!(icon_font_color);
     cmp!(icon_text_scale);
     cmp!(icon_bg_scale);
+    cmp!(experimental_persist_last_known);
+    cmp!(experimental_stats);
+    cmp!(experimental_per_device_polling);
+    cmp!(experimental_bluetooth_wired);
+    cmp!(ui_fine_tune_expanded);
     if parts.is_empty() {
         "settings applied (no tracked key changed)".to_string()
     } else {
@@ -581,6 +695,20 @@ pub fn open_settings(
                 b: 0xFF,
             },
         };
+        // v0.3.22（D-88）：四项基线快照——进程内首次打开设置窗口时记录
+        // 一次，用于 hint 行「已修改，重启后生效」动态判定。
+        if let Ok(mut slot) = LAB_BASELINE.lock() {
+            if slot.is_none() {
+                if let Ok(c) = arc.read() {
+                    *slot = Some([
+                        c.experimental_persist_last_known,
+                        c.experimental_stats,
+                        c.experimental_per_device_polling,
+                        c.experimental_bluetooth_wired,
+                    ]);
+                }
+            }
+        }
         let ctx = Box::new(Ctx {
             cfg: RefCell::new(arc.read().map(|c| c.clone()).unwrap_or_default()),
             arc: arc.clone(),
@@ -593,6 +721,7 @@ pub fn open_settings(
             dpi: Cell::new(96),
             cw: Cell::new(L_CLIENT_W),
             expanded: Cell::new(true),
+            gate_expanded: Cell::new(false),
             tier_err: RefCell::new([false; 4]),
             last_custom_font: Cell::new(initial_custom),
             f_base: Cell::new(0),
@@ -795,6 +924,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 || id == IDC_COVER_HINT
                 || id == IDC_INTERVAL_HINT
                 || id == IDC_EXPERIMENTAL_HINT
+                || id == IDC_GATE_NOTE
+                || id == IDC_LAB_PERSIST_DESC
+                || id == IDC_LAB_STATS_DESC
+                || id == IDC_LAB_POLLING_DESC
+                || id == IDC_LAB_BT_DESC
                 || id == IDC_TEXT_RANGE
                 || id == IDC_BG_RANGE
                 || id == IDC_LOW_RANGE;
@@ -1568,12 +1702,7 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                     WINDOW_EX_STYLE(0),
                     Some(INTERVAL_HINT_TEXT),
                 ),
-                IDC_EXPERIMENTAL_HINT => (
-                    "STATIC",
-                    ws(0),
-                    WINDOW_EX_STYLE(0),
-                    Some(EXPERIMENTAL_HINT_TEXT),
-                ),
+                IDC_EXPERIMENTAL_HINT => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(LAB_HINT_TEXT)),
                 IDC_BLINK => (
                     "BUTTON",
                     ws(BS_AUTOCHECKBOX),
@@ -1596,11 +1725,63 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
                 IDC_TEXT_RANGE => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(&text_range)),
                 IDC_BG_RANGE => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(&bg_range)),
                 IDC_LOW_RANGE => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(&low_range)),
+                // v0.3.22（D-87）：精细化设置闸门——复用 IDC_BLINK 的
+                // BS_AUTOCHECKBOX 链路；计数由 sync_controls 动态回填。
+                IDC_FINE_TUNE_GATE => (
+                    "BUTTON",
+                    ws(BS_AUTOCHECKBOX),
+                    WINDOW_EX_STYLE(0),
+                    Some("精细化设置（试验功能）"),
+                ),
+                IDC_GATE_NOTE => ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(GATE_NOTE_TEXT)),
+                // 实验室分组框（BS_GROUPBOX）+ 四项白话复选框与说明行。
+                IDC_LAB_GROUP => (
+                    "BUTTON",
+                    ws(BS_GROUPBOX_STYLE),
+                    WINDOW_EX_STYLE(0),
+                    Some(LAB_GROUP_TITLE),
+                ),
+                IDC_LAB_PERSIST | IDC_LAB_STATS | IDC_LAB_POLLING | IDC_LAB_BT => {
+                    let label = LAB_ITEMS
+                        .iter()
+                        .find(|(i, _, _)| *i == id)
+                        .map(|(_, l, _)| *l)
+                        .unwrap_or("");
+                    (
+                        "BUTTON",
+                        ws(BS_AUTOCHECKBOX),
+                        WINDOW_EX_STYLE(0),
+                        Some(label),
+                    )
+                }
+                IDC_LAB_PERSIST_DESC | IDC_LAB_STATS_DESC | IDC_LAB_POLLING_DESC
+                | IDC_LAB_BT_DESC => {
+                    let desc = LAB_ITEMS
+                        .iter()
+                        .find(|(i, _, _)| *i == id - 4)
+                        .map(|(_, _, d)| *d)
+                        .unwrap_or("");
+                    ("STATIC", ws(0), WINDOW_EX_STYLE(0), Some(desc))
+                }
+                IDC_LAB_RESET => (
+                    "BUTTON",
+                    ws(BS_OWNERDRAW_STYLE),
+                    WINDOW_EX_STYLE(0),
+                    Some("全部恢复默认（开启）"),
+                ),
+                IDC_LAB_RESTART => (
+                    "BUTTON",
+                    ws(BS_OWNERDRAW_STYLE),
+                    WINDOW_EX_STYLE(0),
+                    Some("立即重启"),
+                ),
                 _ => continue,
             };
         let font = match id {
             IDC_SEC_REFRESH | IDC_SEC_LOW => f_title,
             IDC_COVER_HINT | IDC_INTERVAL_HINT | IDC_EXPERIMENTAL_HINT => f_hint,
+            IDC_GATE_NOTE | IDC_LAB_PERSIST_DESC | IDC_LAB_STATS_DESC | IDC_LAB_POLLING_DESC
+            | IDC_LAB_BT_DESC => f_hint,
             IDC_TEXT_RANGE | IDC_BG_RANGE | IDC_LOW_RANGE => f_hint,
             _ => f_base,
         };
@@ -1692,6 +1873,8 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
         IDC_BG_RESET,
         IDC_RESET_LOW,
         IDC_RESET_ALL,
+        IDC_LAB_RESET,
+        IDC_LAB_RESTART,
     ] {
         let b = GetDlgItem(Some(hwnd), id).unwrap_or_default();
         subclass(b, Some(button_hover_proc));
@@ -1777,6 +1960,22 @@ const TIER_CHILDREN: [i32; 14] = [
     // IDC_TIER_HINT 单列（随卡片隐藏）。
 ];
 
+/// 实验室分组控件集（v0.3.22 D-87：闸门收起时整组隐藏）。
+const LAB_CHILDREN: [i32; 12] = [
+    IDC_LAB_GROUP,
+    IDC_LAB_PERSIST,
+    IDC_LAB_STATS,
+    IDC_LAB_POLLING,
+    IDC_LAB_BT,
+    IDC_LAB_PERSIST_DESC,
+    IDC_LAB_STATS_DESC,
+    IDC_LAB_POLLING_DESC,
+    IDC_LAB_BT_DESC,
+    IDC_EXPERIMENTAL_HINT,
+    IDC_LAB_RESET,
+    IDC_LAB_RESTART,
+];
+
 /// 布局刷新：分档卡展开/收起 → 下方控件上移 TIER_DELTA，窗口高度同步收缩。
 unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     ctx.expanded.set(expanded);
@@ -1784,7 +1983,12 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
     for &(id, x, y, w, h) in BELOW.iter() {
         let w2 = match id {
             IDC_COVER_HINT | IDC_INTERVAL_HINT => ctx.cw.get() - 104,
-            IDC_EXPERIMENTAL_HINT => ctx.cw.get() - 32,
+            IDC_EXPERIMENTAL_HINT => ctx.cw.get() - 56,
+            IDC_GATE_NOTE => ctx.cw.get() - 32,
+            IDC_LAB_GROUP => ctx.cw.get() - 32,
+            IDC_LAB_PERSIST_DESC | IDC_LAB_STATS_DESC | IDC_LAB_POLLING_DESC | IDC_LAB_BT_DESC => {
+                ctx.cw.get() - 76
+            }
             IDC_TEXT_RANGE | IDC_BG_RANGE | IDC_LOW_RANGE => ctx.cw.get() - 416,
             _ => w,
         };
@@ -1805,11 +2009,21 @@ unsafe fn relayout(hwnd: HWND, ctx: &Ctx, expanded: bool) {
         ctl(hwnd, IDC_TIER_HINT),
         if expanded { SW_SHOW } else { SW_HIDE },
     );
+    // v0.3.22（D-87）：实验室分组可见性——闸门收起仅隐藏选项，四项使能
+    // 不变（收起≠关闭）。
+    let lab_visible = ctx.gate_expanded.get();
+    for id in LAB_CHILDREN {
+        let _ = ShowWindow(ctl(hwnd, id), if lab_visible { SW_SHOW } else { SW_HIDE });
+    }
     // 窗口尺寸（客户区 → 外框）。
     let client_h = if expanded {
         L_EXPANDED_H
     } else {
         L_COLLAPSED_H
+    } + if ctx.gate_expanded.get() {
+        EXP_GATE_DELTA
+    } else {
+        0
     };
     let mut rc = RECT {
         left: 0,
@@ -2239,8 +2453,12 @@ fn refresh_preview_and_hints(hwnd: HWND, ctx: &Ctx) {
     // 视觉重叠；用户可直接看任务栏判断可读性。
     // v0.3.6：分档说明示例随当前档数/阈值实时拼写（替代静态常量）。
     let tier_hint = tier_hint_dynamic(&cfg.icon_font_tier_thresholds);
+    let lab_enabled = cfg.experimental_enabled_count();
     drop(cfg);
     set_text(ctx, IDC_TIER_HINT, &tier_hint);
+    // v0.3.22（D-87/D-88）：闸门计数常驻动态显示 + hint 动态「已修改」判定。
+    set_text(ctx, IDC_FINE_TUNE_GATE, &fine_tune_gate_text(lab_enabled));
+    set_text(ctx, IDC_EXPERIMENTAL_HINT, &lab_hint_text(lab_dirty(ctx)));
 }
 
 /// 程序化同步全部控件 ↔ 工作配置（抑制自身事件）。
@@ -2368,6 +2586,36 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
             }),
             LPARAM(0)
         );
+        // v0.3.22（D-87）：闸门与实验室四项复选框回填（程序化同步，抑制事件）。
+        SendMessageW!(
+            ctl(hwnd, IDC_FINE_TUNE_GATE),
+            BM_SETCHECK,
+            WPARAM(if cfg.ui_fine_tune_expanded {
+                BST_CHECKED.0 as usize
+            } else {
+                BST_UNCHECKED.0 as usize
+            }),
+            LPARAM(0)
+        );
+        for (id, _, _) in LAB_ITEMS.iter() {
+            let on = match *id {
+                IDC_LAB_PERSIST => cfg.experimental_persist_last_known,
+                IDC_LAB_STATS => cfg.experimental_stats,
+                IDC_LAB_POLLING => cfg.experimental_per_device_polling,
+                IDC_LAB_BT => cfg.experimental_bluetooth_wired,
+                _ => false,
+            };
+            SendMessageW!(
+                ctl(hwnd, *id),
+                BM_SETCHECK,
+                WPARAM(if on {
+                    BST_CHECKED.0 as usize
+                } else {
+                    BST_UNCHECKED.0 as usize
+                }),
+                LPARAM(0)
+            );
+        }
         let slider = ctl(hwnd, IDC_SLIDER);
         SendMessageW!(
             slider,
@@ -2398,8 +2646,14 @@ fn sync_controls(hwnd: HWND, ctx: &Ctx) {
         let bv = wide(&bvs);
         let _ = SetWindowTextW(ctl(hwnd, IDC_BG_VAL), PCWSTR(bv.as_ptr()));
 
-        // 展开态变化才重排（收起回收 112px，展开还原）。
-        if ctx.expanded.get() != tiered {
+        // v0.3.22（D-87）：闸门展开态变化才重排（窗口高度随实验室分组
+        // 增减 EXP_GATE_DELTA；与分档卡同一 relayout 路径）。
+        let gate = cfg.ui_fine_tune_expanded;
+        if ctx.gate_expanded.get() != gate {
+            ctx.gate_expanded.set(gate);
+            relayout(hwnd, ctx, tiered);
+        } else if ctx.expanded.get() != tiered {
+            // 展开态变化才重排（收起回收 112px，展开还原）。
             relayout(hwnd, ctx, tiered);
         }
         // 档内二次可见性：N 档 = N-1 个阈值框 + N 个色点。
@@ -2497,6 +2751,12 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             || (IDC_TIER_DOT0..IDC_TIER_DOT0 + 5).contains(&id))
     {
         unsafe { handle_color_pick(hwnd, ctx, id) };
+        return;
+    }
+    // v0.3.22（D-88）：立即重启——复用既有启动路径 spawn 当前 exe，由主
+    // 循环统一优雅退出；排程代码零改动、非热生效（不在此处直接重启）。
+    if clicked && id == IDC_LAB_RESTART {
+        crate::request_restart();
         return;
     }
     let selchange = code == CBN_SELCHANGE;
@@ -2669,6 +2929,70 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             touched = true;
             resync = true;
         }
+        // v0.3.22（D-87）：精细化设置闸门——只管可见性，不管使能（收起≠关闭）。
+        // 注意：这里不直接 set ctx.gate_expanded——留给 sync_controls 的
+        // 「闸门态变化才重排」分支检测并调 relayout（窗口高度随实验室
+        // 分组增减 EXP_GATE_DELTA，同一 relayout 路径），否则重排永不触发。
+        IDC_FINE_TUNE_GATE if clicked => {
+            let checked = unsafe {
+                SendMessageW!(
+                    ctl(hwnd, IDC_FINE_TUNE_GATE),
+                    BM_GETCHECK,
+                    WPARAM(0),
+                    LPARAM(0)
+                )
+            };
+            cfg.ui_fine_tune_expanded = checked == BST_CHECKED.0 as isize;
+            touched = true;
+            resync = true;
+        }
+        // v0.3.22（D-88）：四项试验功能开关——保存后重启生效（非热生效）。
+        IDC_LAB_PERSIST if clicked => {
+            let checked = unsafe {
+                SendMessageW!(
+                    ctl(hwnd, IDC_LAB_PERSIST),
+                    BM_GETCHECK,
+                    WPARAM(0),
+                    LPARAM(0)
+                )
+            };
+            cfg.experimental_persist_last_known = checked == BST_CHECKED.0 as isize;
+            touched = true;
+        }
+        IDC_LAB_STATS if clicked => {
+            let checked = unsafe {
+                SendMessageW!(ctl(hwnd, IDC_LAB_STATS), BM_GETCHECK, WPARAM(0), LPARAM(0))
+            };
+            cfg.experimental_stats = checked == BST_CHECKED.0 as isize;
+            touched = true;
+        }
+        IDC_LAB_POLLING if clicked => {
+            let checked = unsafe {
+                SendMessageW!(
+                    ctl(hwnd, IDC_LAB_POLLING),
+                    BM_GETCHECK,
+                    WPARAM(0),
+                    LPARAM(0)
+                )
+            };
+            cfg.experimental_per_device_polling = checked == BST_CHECKED.0 as isize;
+            touched = true;
+        }
+        IDC_LAB_BT if clicked => {
+            let checked =
+                unsafe { SendMessageW!(ctl(hwnd, IDC_LAB_BT), BM_GETCHECK, WPARAM(0), LPARAM(0)) };
+            cfg.experimental_bluetooth_wired = checked == BST_CHECKED.0 as isize;
+            touched = true;
+        }
+        // v0.3.22（D-86）：一键对齐——仅四项置为默认开启，不动其余配置。
+        IDC_LAB_RESET if clicked => {
+            cfg.experimental_persist_last_known = true;
+            cfg.experimental_stats = true;
+            cfg.experimental_per_device_polling = true;
+            cfg.experimental_bluetooth_wired = true;
+            touched = true;
+            resync = true;
+        }
         _ => {}
     }
 
@@ -2685,7 +3009,7 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::tier_hint_dynamic;
+    use super::{fine_tune_gate_text, lab_hint_text, tier_hint_dynamic, LAB_HINT_TEXT};
 
     #[test]
     fn tier_hint_dynamic_spells_ranges() {
@@ -2697,5 +3021,31 @@ mod tests {
             tier_hint_dynamic(&[10, 30, 50, 70]),
             "阈值 1–99 严格递增；电量 ≤ 数值归入对应档（10/30/50/70 → 0–10 / 11–30 / 31–50 / 51–70 / 71–100）"
         );
+    }
+
+    /// v0.3.22（D-87）：闸门计数常驻动态显示——N/4 实时拼写。
+    #[test]
+    fn fine_tune_gate_text_spells_count() {
+        assert_eq!(
+            fine_tune_gate_text(0),
+            "精细化设置（试验功能，已开启 0/4 项）"
+        );
+        assert_eq!(
+            fine_tune_gate_text(4),
+            "精细化设置（试验功能，已开启 4/4 项）"
+        );
+        assert_eq!(
+            fine_tune_gate_text(2),
+            "精细化设置（试验功能，已开启 2/4 项）"
+        );
+    }
+
+    /// v0.3.22（D-88）：hint 终版口径 + 未保存改动动态追加行。
+    #[test]
+    fn lab_hint_text_marks_dirty() {
+        assert!(!lab_hint_text(false).contains("已修改，重启后生效"));
+        assert!(lab_hint_text(true).contains("已修改，重启后生效"));
+        assert!(lab_hint_text(false).contains("实验室（试验功能）"));
+        assert!(LAB_HINT_TEXT.contains("尚未完成全量真机验证"));
     }
 }

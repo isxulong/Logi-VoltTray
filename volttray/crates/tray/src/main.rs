@@ -49,6 +49,19 @@ pub(crate) use imp::{pick_save_path_with_filter, write_tmp_rename, IoCmd};
 #[cfg(windows)]
 static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// v0.3.22（D-88）：设置窗口「立即重启」请求标志——置位后由主消息循环
+/// 统一消费（先 spawn 新进程，再走既有优雅退出；排程代码零改动、
+/// 非热生效）。
+#[cfg(windows)]
+static RESTART_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 请求应用自重启（v0.3.22 D-88）：仅置位，实际重启由主循环执行——
+/// 复用既有启动路径（current_exe spawn），不在设置窗口所在调用栈重启。
+#[cfg(windows)]
+pub fn request_restart() {
+    RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(windows)]
 mod imp {
     use std::collections::HashSet;
@@ -2439,7 +2452,7 @@ mod imp {
         // 3. 配置：不存在则按 schema 默认值创建（P1-8）。
         bootlog::stage("config-load");
         let cfg_path = Config::default_path();
-        let (cfg, load_warnings) = match Config::load(&cfg_path) {
+        let (mut cfg, load_warnings) = match Config::load(&cfg_path) {
             Ok((c, w)) => {
                 bootlog::note(&format!("config loaded, {} warning(s)", w.len()));
                 // v0.3.8（B-3）：警告内容逐条写入日志——上次真机排查只有
@@ -2469,6 +2482,24 @@ mod imp {
             }
         };
 
+        // v0.3.22（D-86）：Q3 一次性提示闩锁——v0321 标记在文件里 ∧ 四项
+        // 至少一项为 false ∧ 升级后首启 → 一次性 toast；提示后取走闩锁并
+        // 落盘（二次启动不重复）。不新增 v0322 迁移标记（C-09：显式值永
+        // 不被覆盖，存量 false 保持 false 由用户自行对齐）。
+        if cfg.default_on_notice_due() {
+            let n = cfg.experimental_enabled_count();
+            let body = format!(
+                "LogiVoltTray v0.3.22 起试验功能默认开启；你当前已开启 {n}/4 项，可到 设置→精细化设置 一键对齐"
+            );
+            if let Err(e) = toast::notify("实验室（试验功能）默认开启", &body, true) {
+                bootlog::note(&format!("default-on notice toast failed: {e}"));
+            }
+            if cfg.take_default_on_notice() {
+                if let Err(e) = write_tmp_rename(&cfg_path, &cfg.to_toml()) {
+                    bootlog::note(&format!("default-on notice latch persist failed: {e}"));
+                }
+            }
+        }
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
         // v0.3.12（D-69）：最近一次枚举快照——IO 线程每轮枚举后写入，
@@ -2824,6 +2855,27 @@ mod imp {
         phase_tick: bool,
         blink_timer: &mut usize,
     ) {
+        // v0.3.22（D-88）：「立即重启」——复用既有启动路径 spawn 当前 exe
+        // （单实例互斥体在进程退出前仍持有，故先 spawn 再优雅退出），随后
+        // 走既有退出序列（IoCmd::Shutdown + ENDSESSION_HOOK ack ≤2s +
+        // PostQuitMessage）；排程代码零改动、非热生效。
+        if crate::RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
+            bootlog::note("restart requested: spawn new instance then graceful shutdown");
+            match std::process::Command::new(exe).spawn() {
+                Ok(_) => {}
+                Err(e) => bootlog::note(&format!("restart spawn failed: {e}")),
+            }
+            let _ = cmd_tx.send(IoCmd::Shutdown);
+            if let Ok(guard) = crate::statsexport::ENDSESSION_HOOK.lock() {
+                if let Some((_, rx)) = guard.as_ref() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+            }
+            unsafe {
+                PostQuitMessage(0);
+            }
+            return;
+        }
         // 应用层消息。
         let mut snap_changed = false;
         while let Ok(m) = gui_rx.try_recv() {
@@ -3826,5 +3878,40 @@ fn main() {
     {
         eprintln!("LogiVoltTray 仅支持 Windows；此二进制在非 Windows 平台仅用于编译与单元测试。");
         std::process::exit(2);
+    }
+}
+
+/// v0.3.22（D-88）：「立即重启」回归断言——确认重启走「置位标志 →
+/// 主循环统一消费」的单次语义（防热生效回潮：设置窗口调用栈内不做任何
+/// 重启动作），且标志消费后复位（二次 pump 不再触发）。
+#[cfg(all(test, windows))]
+mod restart_request_tests {
+    use super::RESTART_REQUESTED;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn restart_request_sets_then_consumes_once() {
+        // 前置：确保从干净状态开始（单测试函数内串行操作同一全局静态，
+        // 避免并行竞态）。
+        RESTART_REQUESTED.store(false, Ordering::SeqCst);
+        assert!(!RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 请求方（设置窗口 IDC_LAB_RESTART）仅置位——不在调用栈内重启。
+        super::request_restart();
+        assert!(RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 主循环消费（swap 取走并复位）：首次取走为 true（触发一次重启）。
+        assert!(RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        // 二次 pump：已复位，不再触发（一次性语义）。
+        assert!(!RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        assert!(!RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 重复点击不产生额外计数（布尔标志天然去重）。
+        super::request_restart();
+        super::request_restart();
+        assert!(RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        assert!(!RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        // 收尾复位，防污染后续测试。
+        RESTART_REQUESTED.store(false, Ordering::SeqCst);
     }
 }
