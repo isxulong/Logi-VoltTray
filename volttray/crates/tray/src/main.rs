@@ -82,7 +82,7 @@ mod imp {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::SystemInformation::GetLocalTime;
     // WP-A：持久化与通道归因（v3 A-1/A-3）。
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
     use volttray_app::wakechannel::{channel_for_raw_path_classified, ChannelMatch};
@@ -354,9 +354,9 @@ mod imp {
         /// 负缓存——本通道句柄存活期内失败过一次即不再重复探测（结构性
         /// 噪声，非设备异常）；force 枚举句柄重开时清零。
         ff_battery_probe_failed: bool,
-        /// R-2（v0.3.17）：死槽扫描冷却——连续 K 轮握手纯超时不应答的
-        /// 槽位降频为每 K 轮扫 1 次；force 枚举清零（手动刷新/动鼠标
-        /// 立即穿透）。
+        /// R-2（v0.3.17）：死槽扫描冷却——连续 K 轮握手无设备应答
+        ///（Timeout 或 NoDevice，E10 细分口径）的槽位降频为每 K 轮
+        /// 扫 1 次；force 枚举清零（手动刷新/动鼠标立即穿透）。
         dead_slots: DeadSlotScan,
         slots: Vec<SlotState>,
     }
@@ -484,8 +484,9 @@ mod imp {
     /// 负责把 old_id 对应的槽位标记为别名（借用约束，见枚举循环）。
     ///
     /// R-1/R-2（v0.3.17）：`edge` 带出 try_slot 内部才能观测的两类事实——
-    /// 0xFF 电量探测 error_response（写通道级负缓存）与握手纯超时不应答
-    /// （喂死槽冷却裁决）；借用约束下经 &mut 带出，不改返回类型。
+    /// 0xFF 电量探测 error_response（写通道级负缓存）与握手无设备应答
+    ///（Timeout 或 NoDevice，喂死槽冷却裁决）；借用约束下经 &mut 带出，
+    /// 不改返回类型。
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
@@ -1207,8 +1208,9 @@ mod imp {
                                         continue;
                                     }
                                     // R-2（v0.3.17）：死槽冷却——连续 K 轮握手
-                                    // 纯超时不应答的槽位每 K 轮才扫 1 次（降
-                                    // 功耗/降噪）；被跳过的槽位不计入本轮
+                                    // 无设备应答（Timeout 或 NoDevice，E10 细
+                                    // 分口径）的槽位每 K 轮才扫 1 次（降功
+                                    // 耗/降噪）；被跳过的槽位不计入本轮
                                     // scanned，也不喂 SlotScanStreak（未观测
                                     // 不得裁决）；force 枚举已清零，立即穿透。
                                     if !state.dead_slots.should_scan(slot) {
@@ -2275,9 +2277,10 @@ mod imp {
     /// WP-B 统计导出（IO 线程后台执行，v3 P2-③）：导出前先强制 flush
     ///（缓冲事件不落空，v3「导出前先 flush」）→ 读双文件（current +
     /// archive）→ 分段归因 →（可选）FNV-1a 哈希序匿名化 → 渲染。
-    /// CSV 主产物直写用户在 Save-As 确认的路径；JSON / HTML 主干跟随
-    /// CSV 最终确认文件名（v3 L111），tmp→rename 落盘、失败清 tmp 且
-    /// 不影响已写出的 CSV。只读本机文件 + 渲染写盘，零设备查询（红线）。
+    /// CSV 主产物写用户在 Save-As 确认的路径（E5 起同样走 tmp→rename
+    /// 原子写，写中途失败不留半截 CSV）；JSON / HTML 主干跟随 CSV 最终
+    /// 确认文件名（v3 L111）；三件套各自 tmp→rename 落盘、失败清 tmp、
+    /// 互不影响。只读本机文件 + 渲染写盘，零设备查询（红线）。
     /// 返回给用户的结果文案（成功列文件、失败给原因、部分成功如实分列）。
     fn run_stats_export(
         store: &mut volttray_app::stats::StatsStore,
@@ -2297,9 +2300,10 @@ mod imp {
         let offset = local_offset_minutes();
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
-        match std::fs::write(
+        // E5（P1a）：CSV 主产物同样走 tmp→rename 原子写。
+        match write_tmp_rename(
             &req.csv_path,
-            attr::render_csv(&segments, anon.as_ref(), offset),
+            &attr::render_csv(&segments, anon.as_ref(), offset),
         ) {
             Ok(()) => done.push(req.csv_path.display().to_string()),
             Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
@@ -2341,12 +2345,19 @@ mod imp {
         }
     }
 
-    /// tmp→rename 落盘（WP-B JSON/HTML 副产物）：写中途失败不留半截目标
-    /// 文件；失败清 tmp。rename 在 Windows 上原子覆盖既有目标，失败时
-    /// 旧文件保留、错误向上返回。
+    /// tmp→rename 落盘：写中途失败不留半截目标文件；失败清 tmp。
+    /// rename 在 Windows 上原子覆盖既有目标，失败时旧文件保留、错误
+    /// 向上返回。
+    /// E5（P1a，红蓝对抗终审）：tmp 名带 pid＋进程内计数器唯一后缀——
+    /// 同路径并发写（导出与配置落盘竞争等）不再共用同一 tmp 名互踩。
     pub(crate) fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
+        static TMP_SEQ: AtomicU32 = AtomicU32::new(0);
         let mut tmp_os = path.as_os_str().to_owned();
-        tmp_os.push(".tmp");
+        tmp_os.push(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let tmp = PathBuf::from(tmp_os);
         let result = (|| {
             std::fs::write(&tmp, content)?;
@@ -3988,8 +3999,15 @@ mod imp {
                 b"old-bytes",
                 "旧目标逐字节保留"
             );
+            // E5：tmp 名带 pid＋计数器唯一后缀，按前缀检查残留。
             assert!(
-                !root.join("target.json.tmp").exists(),
+                !std::fs::read_dir(&root)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .any(|e| e
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("target.json.tmp")),
                 "失败后 tmp 必须被清理"
             );
             let _ = std::fs::remove_dir_all(&root);
@@ -4009,7 +4027,58 @@ mod imp {
                 "new-content",
                 "成功后目标＝新值"
             );
-            assert!(!root.join("target.json.tmp").exists(), "成功后无 tmp 残留");
+            // E5：tmp 名带 pid＋计数器唯一后缀，按前缀检查残留。
+            assert!(
+                !std::fs::read_dir(&root)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .any(|e| e
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("target.json.tmp")),
+                "成功后无 tmp 残留"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// E5（P1a）：双线程同路径并发写——tmp 名带 pid＋计数器唯一
+        /// 后缀，两写者不共用 tmp 名互踩；每次 rename 原子覆盖，任何
+        /// 可观察时刻目标都是某一写者的完整内容（非半截/混杂），全程
+        /// 无 tmp 残留。
+        #[test]
+        fn write_tmp_rename_concurrent_same_path() {
+            let root = temp_root("t01c");
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("target.csv");
+            let mut handles = Vec::new();
+            for writer in 0..2u32 {
+                let p = path.clone();
+                handles.push(std::thread::spawn(move || {
+                    for round in 0..50u32 {
+                        write_tmp_rename(&p, &format!("writer-{writer}-round-{round}"))
+                            .expect("concurrent write must succeed");
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            // 终态：目标存在，内容为某一写者某一轮的完整值。
+            let content = std::fs::read_to_string(&path).unwrap();
+            let complete =
+                (0..2u32).any(|w| (0..50u32).any(|r| content == format!("writer-{w}-round-{r}")));
+            assert!(complete, "目标必须是某一完整写入值，实际: {content:?}");
+            // 无 tmp 残留（按前缀检查）。
+            assert!(
+                !std::fs::read_dir(&root)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .any(|e| e
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("target.csv.tmp")),
+                "并发写后无 tmp 残留"
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
     }
