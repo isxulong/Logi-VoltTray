@@ -41,6 +41,52 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.21
+
+实验功能新装默认关 + D-74 轮询档位即时生效：三项用户可见修复 + 发布质量门禁首次实战。（本节说明与 [GitHub Release v0.3.21](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.21) 正文一致。）
+
+### 兼容性声明（D5：默认值突变面）
+
+本版改变默认值：**四项实验功能（按设备独立轮询档、最后已知电量持久化、耗电统计、蓝牙/有线扫描归因）自 v0.3.21 起新装默认关闭**。
+
+- 迁移规则：存量配置（无 v0.3.21 迁移标记的 config.toml）按「保持老行为」迁移——四个 experimental_* 键缺失的补 true，升级后行为与旧版一致；显式写过的值一律保留。
+- 突变面逐条：① 新装用户四项实验功能不再默认开启（旧版默认开）；② 轮询档位修改由「下一次读数后生效」变为「即时生效」。
+- 误伤面披露：手写 / 从旧版带过来的 config.toml 一律视为存量——若你手写了一份全新配置并期望新装口径，四个 experimental_* 键缺失项会被补 true；需要新装口径请把对应键显式置 false。
+- 回退已知行为：旧版（v0.3.20 及更早）保存设置时按自身键集重写 config.toml，会丢弃 experimental_* 开关与迁移标记；回退期间若在旧版改过设置，原本关掉的实验功能需在升级后按 README「实验性功能」小节重新显式关闭。
+
+### 修复（三项用户可见）
+
+1. **D-74 轮询档位变更即时生效**：设置窗口调整轮询档位后，全部在线设备的下次读数时点立即按新档重排——此前已排程设备在下一次读数前仍按旧档计时（v0.3.16 WP-C 记录在案的滞后），本版起即时生效，改完约 5 秒热重载落地。
+2. **实验功能新装默认关**：四项实验功能（按设备独立轮询档 / 最后已知电量持久化 / 耗电统计 / 蓝牙·有线扫描归因）新装默认关闭；老用户升级不受影响、保持开启。需要哪项，在 config.toml 把对应键置 true 即可开启（详见 README「实验性功能」小节）。
+3. **迁移不覆盖显式设置**：存量迁移只补缺失键——你在 config.toml 显式写过的 experimental_* 值（含 false）一律保留，不会被迁移重新打开（C-09，有单测锁定：显式 false 无标记时解析保留 false）。
+
+### 下载与安装注意
+
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（信誉随签名下载积累、逐步消除拦截；代码签名采购决策跟踪中）。唯一分发形态为 Rust EXE。
+
+下载后核验（可选但推荐）：每个 Release 附 `volttray-tray.exe.sha256.txt`。PowerShell 一行核对：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`，输出的 Hash 应与同目录 .sha256.txt 文件内首列一致。
+
+升级注意：退出旧版后再启动新版即可；配置文件向后兼容（旧版读新配置：未知键忽略并告警，不拒绝启动）。
+
+### 工程与质量（开发者向摘要，含门禁首跑结果）
+
+相位二发布质量门禁 11 项落地 + 融合处置 4 项修复（PR #11），本版为多项新门禁的首次实战运行，发布流水线（run 39878634531）实测：
+
+- **release run 全绿**：ci-gate（复用 ci.yml 全门禁：fmt / clippy / 全量 test / 协议冻结 / 构建，windows + ubuntu 双 job）→ verify-tag-on-main → build-release 全步绿；green run head_sha 即发布提交 96ef4db。
+- **windows-target 构建门禁（首跑）**：ubuntu job mingw 交叉 cargo check（x86_64-pc-windows-gnu）绿。
+- **release-contract 发布契约断言（C-01 修复后首跑）**：资产名冻结（volttray-tray.exe）、资产数量、sha256 格式断言全绿；本次真实资产格式为「64hex + 空格 + 星号 + 文件名」，与修复后断言正则一致——C-01 修复经真实发布验证。
+- **redline-guard-advisory（report-only，不阻断）**：删除类调用总数 55（基线 54，+1 随相位二新增代码），① 裸调用 0 命中、② 用户路径特征 0 命中。
+- **独立复验（C1）**：匿名渠道下载 volttray-tray.exe 实测 sha256 = 0a8ebe86910dbaf952fc5b1611ff0aa5ac5f2e0946bc9147cf9eb2bdfbac48d0，与随附 .sha256.txt 首列一致；EXE 内含 0.3.21 版本字符串、无旧版残留。
+- **nightly 状态说明**：最近一次 nightly（2026-10-22）显示 failure，但 fuzz 本体绿（301 秒 1.45 亿次执行零崩溃）——失败步为 N-2 自动开单步的 gh CLI 标志不兼容（--if-not-exists），属流程已知待修项，不影响本版产物（按 T-05 设计，nightly 失败信号不阻断发版）。
+
+测试口径：cargo test --workspace 347 全绿、clippy -D warnings 零告警、fmt --check 通过（PR #11 合并前实测）。
+
+### 未验证项（D2 分级）
+
+- **已验证**：CI 全门禁 windows + ubuntu 双 job 全绿（green run head_sha = 发布提交）；协议冻结 Python 测试全绿；发布契约断言随发布流水线执行全绿。
+- **未验证（真机）**：tray 层 Windows 真机行为——实验开关运行期接线、D-74 档位即时重排、设置页实验功能标注，核心逻辑由单元测试锁定、Windows 侧经 CI（windows-latest）构建验证，真机行为待验证。四项实验功能维持「未真机验证、逐项转正评审中」标注，如遇与描述不符请用「导出诊断信息…」反馈。
+- **缺口登记**：uhid 全链路（内核 uhid 设备 ↔ hidapi ↔ transport）CI 无覆盖，前置为自托管真机 runner（03 D+ 节）。
+
 ## v0.3.20
 
 红蓝对抗（R1）系列收官版：两项用户向修复 + 托盘菜单两项新增 + 工程质量体系全面升级。（本节说明与 [GitHub Release v0.3.20](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.20) 正文一致。）
