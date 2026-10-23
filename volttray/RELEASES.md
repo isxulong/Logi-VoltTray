@@ -41,6 +41,52 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.23（未发布，已登记待办）
+
+- **登记来源**：PR #15 质检复核 P2 三项，经评估移入下一版本，本期不改（本期仅修 P0-1／P1-1，见 v0.3.22 节与 D-88 修订）。
+- ① roundtrip 派生字段覆盖（质检 P2：往返测试对派生字段断言不足）。
+- ② Win32 侧覆盖（质检 P2：single/bootlog 等 Windows 专属模块测试覆盖待补）。
+- ③ README 热重载口径（质检 P2：README 对「保存后重启生效」的热重载表述口径待校正）。
+
+## v0.3.22
+
+实验室（试验功能）默认开启 + 设置窗口「精细化设置」闸门：四项试验功能默认态回摆为开（D-85，项目所有者 2026-10-23 终审），配套 Q3 一次性提示、一键对齐与「立即重启」。本版为 D-84 质量加固批上叠加的单一特性批（D-89 显式修订：原计划 v0.3.22 为纯质量批，主 AD 终审后叠加本特性）。
+
+### 兼容性声明（D5：默认值突变面）
+
+本版改变默认值：**四项试验功能（按设备独立轮询档、最后已知电量持久化、耗电统计、蓝牙/有线直连扫描）自 v0.3.22 起新装默认开启**（D-85；v0.3.21 曾改为默认关，本版回摆）。四队列矩阵逐条：
+
+- **Q1（新装，无 config.toml）**：四项全开——与 v0.3.20 及更早一致，与 v0.3.21 相反。
+- **Q2（v0.3.20 及更早升级上来，无 v0321 迁移标记）**：v0321 迁移按「补缺失键 true」执行，四键缺失项补 true；升级前后行为一致，零行为变化。
+- **Q3（v0.3.21 期间新装或保存过设置）**：v0.3.21 已把四键物化为显式值（含 false）写入 config.toml 且带 v0321 迁移标记；本版按 C-09「显式值永不覆盖」**保持 false、不翻转**——v0.3.21 默认关期间落下的显式 false 是用户文件里的既成事实，单凭文件无法与手写 false 区分（D-61/D-80 同族边界，详见 D-86）。补偿措施：升级后首次启动发一次性 toast（「LogiVoltTray v0.3.22 起试验功能默认开启；你当前已开启 N/4 项，可到 设置→精细化设置 一键对齐」），设置窗口内提供「全部恢复默认（开启）」一键对齐。
+- **Q4（显式 true 或混合）**：逐键保留，不动作。
+- **误伤面披露（矩阵外第 5 种情形）**：config.toml 带 v0321 迁移标记、但个别 `experimental_*` 键缺失（例如旧版只物化过部分键、或手工删过行）——v0.3.21 语义下缺失键取该版默认值 false，本版取本版默认值 true：该键从关翻为开。这是「默认值翻转 + 不新增 v0322 迁移标记」的必然推论（缺键回退到 Default，而 Default 变了），单测 `experimental_keys_migrate_on_for_existing_config` 已按新口径锁定（断言附披露注释）。
+- **消失面销项**：v0.3.21 设置页的「实验性功能标注」静态 hint（新装默认关口径）被实验室分组内的动态 hint 取代；v0.3.21 发布节所述默认关口径自本版起不再是现行口径，阅读旧节请注意版本语境。
+
+### 新增（设置窗口与提示）
+
+1. **「精细化设置（试验功能，已开启 N/4 项）」闸门**：设置窗口底部新增复选框（复用既有复选框链路），计数常驻动态显示（收起态也可见）；勾选展开「实验室（试验功能）」分组框，取消收起。收起仅隐藏选项、不改使能——已开启的功能继续生效（闸门只管可见性，D-87）。
+2. **实验室分组四项白话开关**：「重启后记住电量」「耗电统计与导出」「充电时加快刷新（15 秒）」「蓝牙与有线设备直连读取」，各配一行说明，不复现 `experimental_*` 键名；四项统一「保存后重启生效」。
+3. **「全部恢复默认（开启）」一键对齐**：仅把四项置为开启，不动其它任何配置（区别于设置页既有「恢复默认」的全量重置）。
+4. **「立即重启」按钮**：非模态；复用既有启动路径（spawn 当前 EXE 并注入 `LOGIVOLTTRAY_RESTART_CHILD` 环境标记，子实例轮询等待旧实例退出释放单实例互斥体（≤5 秒）后再进入主流程——修复与单实例检测的竞态；等待超时弹「重启失败」明确提示并以非零码退出，不静默消失），随后走既有优雅退出序列（IO 关停 + 关机钩子应答 + 退出消息循环），排程代码零改动、非热生效（护 D-74）。hint 行在四项有改动时动态显示「已修改，重启后生效」。
+5. **Q3 一次性 toast**：走既有 WinRT 通知通道（D-63）；展示判定与闩锁结算分离——配置加载后无论本轮是否实际弹提示都结算一次闩锁并落盘（首个 v0.3.22 启动即取走，避免日后「关掉一项再重启」迟到补弹），是否弹 toast 由取走前的判定决定，提示后二次启动不重复。
+
+### 回退已知行为
+
+- 本版保存设置仍按全量物化重写 config.toml（to_toml 语义零改动）；降级回 v0.3.21 后，文件中的显式值被旧版照常执行，四项试验功能行为等价。
+- 新键 `ui_fine_tune_expanded`（闸门展开态）与 Q3 提示闩锁键在旧版本按未知键忽略并告警，不会拒绝启动。
+- v0321 迁移逻辑零改动；本版不新增任何迁移标记（D-86）。
+
+### 下载与安装注意
+
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（已决策不采购代码签名证书，拦截为已接受状态）。每个 Release 附 `volttray-tray.exe.sha256.txt`，可选核验：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`。升级注意：退出旧版后再启动新版即可。
+
+### 工程与质量（开发者向摘要）
+
+- **BT 准入核对（代码定位证据）**：默认开启项中「蓝牙与有线设备直连读取」仅放开既有白名单扫描，未扩大设备标识范围——枚举仍限定 VID=0x046D（Logitech，`crates/protocol/src/lib.rs` `LOGITECH_VID`）∧ usage page ∈ {0xFF00, 0xFF43}（HID++ 厂商页，`crates/transport/src/hid_impl.rs` `HIDPP_USAGE_PAGES`）∧ usage ∈ {1, 2}（短/长报文口；充电状态 LED 等非 HID++ 接口不触碰）。扫描频次不变：重枚举沿用 30 秒门控下限（`crates/app/src/reconnect.rs` `REENUM_INTERVAL`），无设备且无候选通道时 30/60/120 秒退避（仅主机侧枚举、零射频）。`experimental_bluetooth_wired=false` 时 0xFF 槽（直连通道）跳过、接收器槽位 1..=6 不受影响（`crates/tray/src/main.rs` `bt_wired_scan` 门，逐轮读取配置）。D-65 诊断链路覆盖 BT 通道扫描失败：HidApi 初始化失败与逐通道 open 失败落入最近一次枚举快照（`EnumSnapshot.error` 与 `channels[]` open 结果），随「导出诊断信息…」可见；无设备退避跃迁双写 bootlog 与诊断事件流。
+- **测试清单（逐条）**：Default 四键 true（`experimental_keys_default_on_for_new_install`）；显式 false 保留（`experimental_migration_preserves_explicit_false_without_marker`，沿用既有）；GUI 保存只写显式值、ui 键不触碰试验键（`ui_key_save_does_not_touch_experimental_keys`）；闸门收起不改使能（`gate_expansion_does_not_change_enablement`）；Q3 toast 三态触发 + 闩锁一次性（`default_on_notice_three_states_and_latch`：标记在 ∧ 至少一键 false 触发／四键全 true 不触发／无标记不触发，take-and-clear 二次不重复）；闩锁结算与展示判定分离（`default_on_notice_settle_unconditional_on_first_startup`：首启 due()=false 时闩锁仍被取走、二次启动不再结算、取走后「关掉一项再重启」不补弹——质检复核 P1-1 回归）；「立即重启」单次消费语义（`restart_request_sets_then_consumes_once`，main.rs；排程路径 D-74 零触碰为代码审阅项）；「立即重启」spawn 注入子实例环境标记（`restart_spawn_carries_child_env_marker`，main.rs）；「立即重启」子实例等待互斥体释放→成功接管／超时→明确失败（`restart_child_waits_then_takes_over_or_times_out`，single.rs——质检复核 P0-1 回归）；D-33 休眠零主动查询回归（`zero_queries_while_sleeping`、`wake_probe_candidate_admits_only_sleeping`，沿用既有）；TOML 往返（`experimental_keys_toml_roundtrip`）；闸门计数与 hint 动态文案（`fine_tune_gate_text_spells_count`、`lab_hint_text_marks_dirty`）。
+- **限制如实说明**：本版开发环境无 Rust 工具链，cargo test / fmt / clippy 以 CI（PR 检查，windows + ubuntu 双 job）为准；tray 层 Windows 真机行为（闸门布局、立即重启端到端、toast 实际弹出）待真机验证。「立即重启」的跨进程同步（环境标记 → 等待互斥体释放 → 接管／超时失败提示）为代码层同步机制＋单测断言保障（single.rs），真机连点重启成功率随用户实测回报，开发环境未做亦不虚报真机连点验证。
+
 ## v0.3.21
 
 实验功能新装默认关 + D-74 轮询档位即时生效：三项用户可见修复 + 发布质量门禁首次实战。（本节说明与 [GitHub Release v0.3.21](https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.21) 正文一致。）

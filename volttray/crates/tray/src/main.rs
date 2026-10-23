@@ -49,6 +49,25 @@ pub(crate) use imp::{pick_save_path_with_filter, write_tmp_rename, IoCmd};
 #[cfg(windows)]
 static APPEARANCE_FALLBACK_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// v0.3.22（D-88）：设置窗口「立即重启」请求标志——置位后由主消息循环
+/// 统一消费（先 spawn 新进程，再走既有优雅退出；排程代码零改动、
+/// 非热生效）。
+#[cfg(windows)]
+static RESTART_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 请求应用自重启（v0.3.22 D-88）：仅置位，实际重启由主循环执行——
+/// 复用既有启动路径（current_exe spawn），不在设置窗口所在调用栈重启。
+#[cfg(windows)]
+pub fn request_restart() {
+    RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// v0.3.22（质检复核 P0-1）：「立即重启」spawn 子实例时注入的环境
+/// 标记——子实例据此进入「轮询等待旧实例释放互斥体」路径，而不是
+/// 走普通第二实例的「已在运行」弹窗退出。
+#[cfg(windows)]
+pub const RESTART_CHILD_ENV: &str = "LOGIVOLTTRAY_RESTART_CHILD";
+
 #[cfg(windows)]
 mod imp {
     use std::collections::HashSet;
@@ -116,7 +135,7 @@ mod imp {
     };
     use crate::menu::build_menu;
     use crate::rawinput;
-    use crate::single::{acquire, SingleInstance};
+    use crate::single::{acquire, acquire_restart_child, RestartAcquire, SingleInstance};
     use crate::toast;
     #[cfg(windows)]
     use crate::APPEARANCE_FALLBACK_NOTE;
@@ -2401,19 +2420,53 @@ mod imp {
         bootlog::install_panic_hook();
         bootlog::stage("single-instance");
         // 1. 单实例（P1-3）：第二实例发激活事件后退出。
-        let _mutex = match acquire() {
-            Ok(SingleInstance::First(h)) => h,
-            Ok(SingleInstance::Second) => {
-                // v0.3.7（D-63 B-3）：静默退出正是「双击没反应」的头号嫌疑
-                //（旧版本可能仍在托盘里）——退出前弹窗告知已在运行。
-                bootlog::note("second instance blocked: already running, notify and exit");
-                bootlog::already_running_box();
-                return 0;
+        // v0.3.22（质检复核 P0-1）：「立即重启」的子实例带环境标记——
+        // 旧实例优雅退出期间互斥体仍被持有，子实例识别标记后轮询等待
+        // 释放（≤RESTART_WAIT_TIMEOUT）再进主流程；超时给明确失败提示
+        // 并以非零码退出，不再撞「已在运行」弹窗后新旧双退。
+        let restart_child = std::env::var_os(crate::RESTART_CHILD_ENV).is_some();
+        if restart_child {
+            // 标记只作用于启动判定，读后即清，避免向更下游传递。
+            std::env::remove_var(crate::RESTART_CHILD_ENV);
+            bootlog::note("restart child: waiting for previous instance to release mutex");
+        }
+        let _mutex = if restart_child {
+            match acquire_restart_child() {
+                Ok(RestartAcquire::Acquired(h)) => {
+                    bootlog::note("restart child: mutex acquired, taking over");
+                    h
+                }
+                Ok(RestartAcquire::Timeout) => {
+                    bootlog::note(
+                        "restart child: timed out waiting for mutex release, abort restart",
+                    );
+                    bootlog::fatal_box(
+                        "LogiVoltTray 重启失败",
+                        "旧实例未在限定时间内退出，本次重启已中止。请手动重新启动 LogiVoltTray。",
+                    );
+                    return 1;
+                }
+                Err(e) => {
+                    bootlog::note(&format!("single instance error: {e}"));
+                    bootlog::fatal_box("LogiVoltTray 启动失败", &format!("单实例初始化失败：{e}"));
+                    return 1;
+                }
             }
-            Err(e) => {
-                bootlog::note(&format!("single instance error: {e}"));
-                bootlog::fatal_box("LogiVoltTray 启动失败", &format!("单实例初始化失败：{e}"));
-                return 1;
+        } else {
+            match acquire() {
+                Ok(SingleInstance::First(h)) => h,
+                Ok(SingleInstance::Second) => {
+                    // v0.3.7（D-63 B-3）：静默退出正是「双击没反应」的头号嫌疑
+                    //（旧版本可能仍在托盘里）——退出前弹窗告知已在运行。
+                    bootlog::note("second instance blocked: already running, notify and exit");
+                    bootlog::already_running_box();
+                    return 0;
+                }
+                Err(e) => {
+                    bootlog::note(&format!("single instance error: {e}"));
+                    bootlog::fatal_box("LogiVoltTray 启动失败", &format!("单实例初始化失败：{e}"));
+                    return 1;
+                }
             }
         };
 
@@ -2439,7 +2492,7 @@ mod imp {
         // 3. 配置：不存在则按 schema 默认值创建（P1-8）。
         bootlog::stage("config-load");
         let cfg_path = Config::default_path();
-        let (cfg, load_warnings) = match Config::load(&cfg_path) {
+        let (mut cfg, load_warnings) = match Config::load(&cfg_path) {
             Ok((c, w)) => {
                 bootlog::note(&format!("config loaded, {} warning(s)", w.len()));
                 // v0.3.8（B-3）：警告内容逐条写入日志——上次真机排查只有
@@ -2469,6 +2522,28 @@ mod imp {
             }
         };
 
+        // v0.3.22（D-86；质检复核 P1-1 修订）：Q3 一次性提示——展示判定
+        // 与闩锁结算拆成两段：配置加载后无条件结算一次闩锁并落盘（无论
+        // 本轮是否实际弹提示，首个 v0.3.22 启动都应取走，避免首启
+        // due()=false 的用户闩锁残留、日后「关掉一项再重启」迟到补弹）；
+        // 是否弹 toast 仍由取走前的 default_on_notice_due() 判定决定。
+        // 不新增 v0322 迁移标记（C-09：显式值永不被覆盖，存量 false 保持
+        // false 由用户自行对齐）。
+        let (notice_due, latch_taken) = cfg.settle_default_on_notice();
+        if latch_taken {
+            if let Err(e) = write_tmp_rename(&cfg_path, &cfg.to_toml()) {
+                bootlog::note(&format!("default-on notice latch persist failed: {e}"));
+            }
+        }
+        if notice_due {
+            let n = cfg.experimental_enabled_count();
+            let body = format!(
+                "LogiVoltTray v0.3.22 起试验功能默认开启；你当前已开启 {n}/4 项，可到 设置→精细化设置 一键对齐"
+            );
+            if let Err(e) = toast::notify("实验室（试验功能）默认开启", &body, true) {
+                bootlog::note(&format!("default-on notice toast failed: {e}"));
+            }
+        }
         let config_arc = Arc::new(RwLock::new(cfg.clone()));
         let observer = Arc::new(Mutex::new(Observer::new()));
         // v0.3.12（D-69）：最近一次枚举快照——IO 线程每轮枚举后写入，
@@ -2804,6 +2879,15 @@ mod imp {
         }
     }
 
+    /// v0.3.22（质检复核 P0-1）：构造「立即重启」的子实例启动命令——
+    /// 注入 RESTART_CHILD_ENV 环境标记，子实例据此等待旧实例释放互斥体。
+    /// 抽出为独立函数以便回归断言直接验证标记注入（Command::get_envs）。
+    pub(crate) fn restart_command(exe: &Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.env(crate::RESTART_CHILD_ENV, "1");
+        cmd
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn pump(
         tray: &tray_icon::TrayIcon,
@@ -2824,6 +2908,29 @@ mod imp {
         phase_tick: bool,
         blink_timer: &mut usize,
     ) {
+        // v0.3.22（D-88；质检复核 P0-1 修订）：「立即重启」——复用既有
+        // 启动路径 spawn 当前 exe 并注入 RESTART_CHILD_ENV 环境标记，子
+        // 实例识别标记后轮询等待本进程退出释放互斥体（≤5s）再进主流程，
+        // 消除「先 spawn 再优雅退出」与 acquire() 不等待互斥体之间的竞态；
+        // 随后走既有退出序列（IoCmd::Shutdown + ENDSESSION_HOOK ack ≤2s +
+        // PostQuitMessage）；排程代码零改动、非热生效。
+        if crate::RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
+            bootlog::note("restart requested: spawn new instance then graceful shutdown");
+            match restart_command(exe).spawn() {
+                Ok(_) => {}
+                Err(e) => bootlog::note(&format!("restart spawn failed: {e}")),
+            }
+            let _ = cmd_tx.send(IoCmd::Shutdown);
+            if let Ok(guard) = crate::statsexport::ENDSESSION_HOOK.lock() {
+                if let Some((_, rx)) = guard.as_ref() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+            }
+            unsafe {
+                PostQuitMessage(0);
+            }
+            return;
+        }
         // 应用层消息。
         let mut snap_changed = false;
         while let Ok(m) = gui_rx.try_recv() {
@@ -3826,5 +3933,57 @@ fn main() {
     {
         eprintln!("LogiVoltTray 仅支持 Windows；此二进制在非 Windows 平台仅用于编译与单元测试。");
         std::process::exit(2);
+    }
+}
+
+/// v0.3.22（D-88）：「立即重启」回归断言——确认重启走「置位标志 →
+/// 主循环统一消费」的单次语义（防热生效回潮：设置窗口调用栈内不做任何
+/// 重启动作），且标志消费后复位（二次 pump 不再触发）。
+#[cfg(all(test, windows))]
+mod restart_request_tests {
+    use super::RESTART_REQUESTED;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn restart_request_sets_then_consumes_once() {
+        // 前置：确保从干净状态开始（单测试函数内串行操作同一全局静态，
+        // 避免并行竞态）。
+        RESTART_REQUESTED.store(false, Ordering::SeqCst);
+        assert!(!RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 请求方（设置窗口 IDC_LAB_RESTART）仅置位——不在调用栈内重启。
+        super::request_restart();
+        assert!(RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 主循环消费（swap 取走并复位）：首次取走为 true（触发一次重启）。
+        assert!(RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        // 二次 pump：已复位，不再触发（一次性语义）。
+        assert!(!RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        assert!(!RESTART_REQUESTED.load(Ordering::SeqCst));
+
+        // 重复点击不产生额外计数（布尔标志天然去重）。
+        super::request_restart();
+        super::request_restart();
+        assert!(RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        assert!(!RESTART_REQUESTED.swap(false, Ordering::SeqCst));
+        // 收尾复位，防污染后续测试。
+        RESTART_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
+    /// v0.3.22（质检复核 P0-1）回归：主循环 spawn 子实例的命令必须
+    /// 注入 RESTART_CHILD_ENV 环境标记——子实例凭它进入「等待旧实例
+    /// 释放互斥体」路径；等待/接管/超时三段语义的断言在 single.rs
+    /// （restart_child_waits_then_takes_over_or_times_out）。
+    #[test]
+    fn restart_spawn_carries_child_env_marker() {
+        let cmd = super::imp::restart_command(std::path::Path::new("volttray-tray.exe"));
+        let marker = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(super::RESTART_CHILD_ENV));
+        assert_eq!(
+            marker.and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("1")),
+            "重启 spawn 必须注入 RESTART_CHILD_ENV=1"
+        );
     }
 }
