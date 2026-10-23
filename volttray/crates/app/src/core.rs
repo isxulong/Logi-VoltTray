@@ -2222,8 +2222,11 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(core.entries[0].tier_interval(&cfg_on), Some(POLL_CHARGING));
-        // 新装默认（关）：充电设备退回配置档。
-        let cfg_off = Config::default();
+        // 显式置关（v0.3.22 起新装默认为开，D-85）：充电设备退回配置档。
+        let cfg_off = Config {
+            experimental_per_device_polling: false,
+            ..Config::default()
+        };
         assert_eq!(
             core.entries[0].tier_interval(&cfg_off),
             Some(Duration::from_secs(cfg_off.poll_interval_secs))

@@ -493,13 +493,13 @@ pub struct Config {
     /// 图标背景覆盖度（% 相对位图内切块，D-48/D-57），默认 100，范围
     /// 20..=100（100% = 满出血零边距，已触及位图边界，故上限为 100）。
     pub icon_bg_scale: u8,
-    /// 实验性功能开关组（相位二 · 冲突三裁决，F-A-2 口径）：四项未真机
-    /// 验证功能的逐项总闸。**新装默认关**（Default 全 false）；存量配置
-    /// （无 `experimental_migrated_v0321` 标记）解析时缺失键迁 true 保留
-    /// 原行为——默认关只对新装生效，变更不静默（避免「升级后设备从托盘
-    /// 静默消失」的行为突变）；显式解析到的键值不被迁移覆盖（C-09：
-    /// 回退→再升级 / 手写存量配置路径下显式 false 保留）。安全性未知、
-    /// 待转正评审逐项证实（不采「零事故」作默认态依据，D 核对单差异 1）。
+    /// 实验性功能开关组（v0.3.22 起称「实验室（试验功能）」，D-87）：
+    /// 四项未真机验证功能的逐项总闸。**v0.3.22 起新装默认开**（D-85，
+    /// Default 全 true，相位二冲突三口径修订）；存量配置显式解析到的
+    /// 键值（含 false）不被覆盖（C-09：回退→再升级 / 手写存量配置
+    /// 路径下显式 false 保留），无 v0321 标记的更早存量经迁移补 true
+    /// 保留原行为。尚未完成全量真机验证——如遇异常可到
+    /// 设置→精细化设置 逐项关闭并通过 Issues 反馈。
     /// 重启即显最后已知电量（last_known.json 持久化 + 虚拟条目）。
     pub experimental_persist_last_known: bool,
     /// 耗电统计与导出（stats.jsonl 落盘与导出链路）。
@@ -516,6 +516,20 @@ pub struct Config {
     /// 按文件显式值。解析后恒置 true 并随 to_toml 写出（幂等）；
     /// 旧版本读取时按未知键忽略（降级兼容）。
     pub experimental_migrated_v0321: bool,
+    /// v0.3.22（D-87）：设置窗口「精细化设置」闸门展开态——true=展开
+    /// 「实验室（试验功能）」分组，false=收起。**收起仅隐藏选项，不影
+    /// 响四键使能**（闸门只管可见性、不管使能）；随 to_toml 物化，旧
+    /// 版本读取时按未知键忽略 + 告警、不拒启（沿既有降级先例）。
+    pub ui_fine_tune_expanded: bool,
+    /// v0.3.22（D-86）：Q3 一次性提示闩锁——true=尚未提示（有资格），
+    /// 提示后取走置 false 并持久化（仿 D-64 取走即消）；不参与迁移
+    /// 逻辑、不随 v0321 标记联动。
+    pub ui_default_on_notice_v0322: bool,
+    /// 运行时推导字段（**不序列化、不入 to_toml、不从文件解析**）：本
+    /// 轮 parse 的文件里是否显式出现 v0321 标记。Default 置 true 使
+    /// to_toml roundtrip 等价成立（新装四键全开 → Q3 判定恒 false，
+    /// 该取值无行为影响）。
+    pub experimental_marker_in_file: bool,
 }
 
 impl Default for Config {
@@ -539,13 +553,20 @@ impl Default for Config {
             icon_text_scale: ICON_TEXT_SCALE_DEFAULT,
             icon_text_scale_migrated_v0318: true,
             icon_bg_scale: 100,
-            // 相位二（冲突三）：实验功能新装默认关（存量配置经
-            // experimental_migrated_v0321 迁移保留 true）。
-            experimental_persist_last_known: false,
-            experimental_stats: false,
-            experimental_per_device_polling: false,
-            experimental_bluetooth_wired: false,
+            // D-85（2026-10-23，项目所有者终审）：实验室四键新装默认开
+            // （v0.3.21 存量经 experimental_migrated_v0321 迁移/显式值
+            // 保留原状，不翻转）。
+            experimental_persist_last_known: true,
+            experimental_stats: true,
+            experimental_per_device_polling: true,
+            experimental_bluetooth_wired: true,
             experimental_migrated_v0321: true,
+            // D-87：精细化设置闸门默认收起（只影响可见性）。
+            ui_fine_tune_expanded: false,
+            // D-86：Q3 一次性提示闩锁默认未取走（有提示资格）。
+            ui_default_on_notice_v0322: true,
+            // 运行时推导字段（见结构体注释；新装不经 parse，恒无行为影响）。
+            experimental_marker_in_file: true,
         }
     }
 }
@@ -775,6 +796,14 @@ impl Config {
                     saw_experimental_marker = true;
                     cfg.experimental_migrated_v0321 = *b;
                 }
+                // v0.3.22（D-86/D-87）：UI 辅助键——显式键按文件值，
+                // 不参与迁移逻辑。
+                ("ui_fine_tune_expanded", Value::Bool(b)) => {
+                    cfg.ui_fine_tune_expanded = *b;
+                }
+                ("ui_default_on_notice_v0322", Value::Bool(b)) => {
+                    cfg.ui_default_on_notice_v0322 = *b;
+                }
                 ("icon_bg_scale", Value::Int(n)) => {
                     // D-57：越界钳制到 [20, 100] + 警告（>100 会溢出位图）。
                     let clamped = (*n).clamp(ICON_BG_SCALE_MIN as u64, ICON_BG_SCALE_MAX as u64);
@@ -863,7 +892,9 @@ impl Config {
                     | "experimental_stats"
                     | "experimental_per_device_polling"
                     | "experimental_bluetooth_wired"
-                    | "experimental_migrated_v0321",
+                    | "experimental_migrated_v0321"
+                    | "ui_fine_tune_expanded"
+                    | "ui_default_on_notice_v0322",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
                 (other, _) => warn(other, "unknown key; ignored"),
@@ -939,11 +970,16 @@ impl Config {
             warnings.push(ConfigWarning {
                 key: "experimental_migrated_v0321".into(),
                 reason: "migrated (v0.3.21): missing experimental_* keys filled ON for existing \
-                         configs (explicit values preserved); new installs default OFF"
+                         configs (explicit values preserved); new installs default ON (v0.3.22)"
                     .into(),
             });
             cfg.experimental_migrated_v0321 = true;
         }
+        // v0.3.22（D-86）：记录本轮文件是否显式含 v0321 标记——Q3 一次性
+        // 提示只面向「标记在」的存量（v0.3.21 期间新装/保存过设置）；
+        // 无标记（v0.3.20 及更早直升级）本轮已补迁，不提示。
+        // 运行时推导字段：不序列化、不入 to_toml、不从文件解析。
+        cfg.experimental_marker_in_file = saw_experimental_marker;
         // 分档数据始终规范化（v0.3.3 #4）：钳制 / 递进修复 / 数量对齐。
         {
             let (ths, cols, mut tier_warns) = normalize_font_tiers(
@@ -991,13 +1027,17 @@ impl Config {
              icon_text_scale = {}\n\
              icon_text_scale_migrated_v0318 = {}\n\
              icon_bg_scale = {}\n\
-             # 实验性功能（未真机验证）：新装默认关；存量配置已迁移保留原值。\n\
-             # 逐项转正评审中——验证一项开一项（配置文件手动可改）。\n\
+             # 实验室（试验功能）：v0.3.22 起新装默认开（D-85）；显式值（含 false）保留（C-09）。\n\
+             # 尚未完成全量真机验证——可到 设置→精细化设置 逐项关闭；保存后重启生效。\n\
              experimental_persist_last_known = {}\n\
              experimental_stats = {}\n\
              experimental_per_device_polling = {}\n\
              experimental_bluetooth_wired = {}\n\
-             experimental_migrated_v0321 = {}\n",
+             experimental_migrated_v0321 = {}\n\
+             # 精细化设置闸门展开态（v0.3.22，D-87）：收起=false 仅隐藏选项，不影响使能。\n\
+             ui_fine_tune_expanded = {}\n\
+             # Q3 一次性提示闩锁（v0.3.22，D-86）：提示后取走置 false，不参与迁移逻辑。\n\
+             ui_default_on_notice_v0322 = {}\n",
             self.autostart,
             self.poll_interval_secs,
             self.icon_style.name(),
@@ -1020,7 +1060,37 @@ impl Config {
             self.experimental_per_device_polling,
             self.experimental_bluetooth_wired,
             self.experimental_migrated_v0321,
+            self.ui_fine_tune_expanded,
+            self.ui_default_on_notice_v0322,
         )
+    }
+
+    /// v0.3.22（D-85/D-87）：实验室四键中已开启的计数（N/4，闸门文案
+    /// 「精细化设置（试验功能，已开启 N/4 项）」与 Q3 toast 共用）。
+    pub fn experimental_enabled_count(&self) -> usize {
+        usize::from(self.experimental_persist_last_known)
+            + usize::from(self.experimental_stats)
+            + usize::from(self.experimental_per_device_polling)
+            + usize::from(self.experimental_bluetooth_wired)
+    }
+
+    /// v0.3.22（D-86，终审采 D 差异 1）：Q3 一次性提示判定——v0321 标记
+    /// 在文件中显式存在 ∧ 四键至少一键关 ∧ 提示闩锁未取走。无标记
+    /// （v0.3.20 及更早直升级，本轮 parse 已补迁）不触发；四键全开
+    /// 不触发；闩锁取走后不再触发（一次性）。
+    pub fn default_on_notice_due(&self) -> bool {
+        self.experimental_marker_in_file
+            && self.ui_default_on_notice_v0322
+            && self.experimental_enabled_count() < 4
+    }
+
+    /// 取走 Q3 提示闩锁（置 false；调用方负责持久化——无论本轮是否
+    /// 实际弹提示，首个 v0.3.22 启动都应取走，避免「日后再关某项才
+    /// 补弹」的迟到提示）。返回闩锁原值。
+    pub fn take_default_on_notice(&mut self) -> bool {
+        let was = self.ui_default_on_notice_v0322;
+        self.ui_default_on_notice_v0322 = false;
+        was
     }
 
     /// 默认配置路径：%APPDATA%\LogiVoltTray\config.toml（无 APPDATA 时退回当前目录）。
@@ -1426,7 +1496,15 @@ mod tests {
         // roundtrip：迁移结果序列化后再解析，值与标记稳定、零警告。
         let (c1, _) = Config::parse("icon_text_scale = 100\n");
         let (c2, w2) = Config::parse(&c1.to_toml());
-        assert_eq!(c1, c2);
+        // experimental_marker_in_file 是解析期派生元数据（本轮输入
+        // 文件是否出现 v0321 标记），不参与持久化等价：to_toml 全量
+        // 物化后标记必然出现，故以序列化形式与关键字段比较等价性。
+        assert_eq!(c1.to_toml(), c2.to_toml());
+        assert_eq!(c1.icon_text_scale, c2.icon_text_scale);
+        assert_eq!(
+            c1.icon_text_scale_migrated_v0318,
+            c2.icon_text_scale_migrated_v0318
+        );
         assert!(!w2.iter().any(|x| x.key == "icon_text_scale"), "{w2:?}");
     }
 
@@ -1644,25 +1722,27 @@ mod tests {
         assert_eq!(w[0].key, "experimental_migrated_v0321");
     }
 
-    /// 相位二（第 4 项）：实验功能键——新装（配置文件不存在，直接走
-    /// `Config::default()`、不经 parse）默认全关、标记恒写；默认值首轮
+    /// D-85（v0.3.22）：实验功能键——新装（配置文件不存在，直接走
+    /// `Config::default()`、不经 parse）默认全开、标记恒写；默认值首轮
     /// 写盘后再解析即稳态（标记在 → 零警告）。
     #[test]
-    fn experimental_keys_default_off_for_new_install() {
+    fn experimental_keys_default_on_for_new_install() {
         let c = Config::default();
-        assert!(!c.experimental_persist_last_known);
-        assert!(!c.experimental_stats);
-        assert!(!c.experimental_per_device_polling);
-        assert!(!c.experimental_bluetooth_wired);
+        assert!(c.experimental_persist_last_known);
+        assert!(c.experimental_stats);
+        assert!(c.experimental_per_device_polling);
+        assert!(c.experimental_bluetooth_wired);
         // 新装视为已迁移（不落存量迁移路径）。
         assert!(c.experimental_migrated_v0321);
+        // 新装四键全开 → Q3 提示不触发（D-86）。
+        assert!(!c.default_on_notice_due());
         let (back, w) = Config::parse(&c.to_toml());
         assert_eq!(back, c);
         assert!(w.is_empty(), "{w:?}");
-        // 非法值回退默认（关）+ 键名警告。
+        // 非法值回退默认（开）+ 键名警告。
         let (c2, w2) =
             Config::parse("experimental_stats = \"nope\"\nexperimental_migrated_v0321 = true\n");
-        assert!(!c2.experimental_stats);
+        assert!(c2.experimental_stats);
         assert!(w2.iter().any(|x| x.key == "experimental_stats"), "{w2:?}");
     }
 
@@ -1693,7 +1773,10 @@ mod tests {
         let (c3, w3) =
             Config::parse("experimental_migrated_v0321 = true\nexperimental_stats = false\n");
         assert!(!c3.experimental_stats);
-        assert!(!c3.experimental_persist_last_known);
+        // D-85（v0.3.22）：标记在时缺失键不走迁移、随新默认 true 生效
+        // （v0.3.21 下为 false；手写含标记的部分键配置属此口径，已在
+        // RELEASES 误伤面披露——如需关闭请显式写 false）。
+        assert!(c3.experimental_persist_last_known);
         assert!(
             !w3.iter().any(|x| x.key == "experimental_migrated_v0321"),
             "{w3:?}"
@@ -1735,7 +1818,7 @@ mod tests {
         );
     }
 
-    /// 相位二（第 4 项）：to_toml 恒写 5 键，round-trip 等价。
+    /// D-85：to_toml 恒写实验/UI 辅助 7 键，round-trip 等价。
     #[test]
     fn experimental_keys_toml_roundtrip() {
         let c = Config {
@@ -1743,6 +1826,8 @@ mod tests {
             experimental_stats: true,
             experimental_per_device_polling: true,
             experimental_bluetooth_wired: false,
+            ui_fine_tune_expanded: true,
+            ui_default_on_notice_v0322: false,
             ..Config::default()
         };
         let (back, w) = Config::parse(&c.to_toml());
@@ -1751,5 +1836,103 @@ mod tests {
             !w.iter().any(|x| x.key.starts_with("experimental")),
             "{w:?}"
         );
+        assert!(!w.iter().any(|x| x.key.starts_with("ui_")), "{w:?}");
+    }
+
+    /// D-86/D-87：Q3 一次性提示三态触发 + 闩锁一次性（取走即消）。
+    #[test]
+    fn default_on_notice_three_states_and_latch() {
+        // ① 标记在 ∧ 至少一键 false（Q3：v0.3.21 期间新装/保存过设置）
+        // → 触发，文案计数 N/4 正确。
+        let (mut c, _) = Config::parse(
+            "experimental_migrated_v0321 = true\nexperimental_persist_last_known = false\n\
+             experimental_stats = false\nexperimental_per_device_polling = false\n\
+             experimental_bluetooth_wired = false\n",
+        );
+        assert!(c.default_on_notice_due());
+        assert_eq!(c.experimental_enabled_count(), 0);
+        // ② 四键全 true → 不触发。
+        let (c_all, _) = Config::parse(
+            "experimental_migrated_v0321 = true\nexperimental_persist_last_known = true\n\
+             experimental_stats = true\nexperimental_per_device_polling = true\n\
+             experimental_bluetooth_wired = true\n",
+        );
+        assert!(!c_all.default_on_notice_due());
+        assert_eq!(c_all.experimental_enabled_count(), 4);
+        // ③ 无标记（v0.3.20 及更早直升级；含显式 false 的 C-09 路径）
+        // → 不触发（本轮 parse 已补迁，提示只面向「标记在」的存量）。
+        let (c_nomark, _) = Config::parse("low_threshold = 25\nexperimental_stats = false\n");
+        assert!(!c_nomark.experimental_marker_in_file);
+        assert!(!c_nomark.default_on_notice_due());
+        // ④ 闩锁一次性：取走并物化后再读 → 不触发（二次启动不重复）。
+        assert!(c.take_default_on_notice());
+        assert!(!c.default_on_notice_due());
+        let (mut c2, _) = Config::parse(&c.to_toml());
+        assert!(!c2.ui_default_on_notice_v0322);
+        assert!(!c2.default_on_notice_due());
+        // take 幂等：闩锁已取走时再取返回 false。
+        assert!(!c2.take_default_on_notice());
+    }
+
+    /// D-87（测试清单「闸门收起不改使能」配置层断言）：闸门展开态
+    /// 翻转不改变四键使能——同一份配置 ± ui_fine_tune_expanded，四键
+    /// 逐键相等。
+    #[test]
+    fn gate_expansion_does_not_change_enablement() {
+        let base = "experimental_migrated_v0321 = true\nexperimental_persist_last_known = true\n\
+             experimental_stats = false\nexperimental_per_device_polling = true\n\
+             experimental_bluetooth_wired = false\n";
+        let (collapsed, _) = Config::parse(base);
+        let (expanded, _) = Config::parse(&format!("{base}ui_fine_tune_expanded = true\n"));
+        assert!(!collapsed.ui_fine_tune_expanded);
+        assert!(expanded.ui_fine_tune_expanded);
+        assert_eq!(
+            collapsed.experimental_enabled_count(),
+            expanded.experimental_enabled_count()
+        );
+        assert_eq!(
+            collapsed.experimental_persist_last_known,
+            expanded.experimental_persist_last_known
+        );
+        assert_eq!(collapsed.experimental_stats, expanded.experimental_stats);
+        assert_eq!(
+            collapsed.experimental_per_device_polling,
+            expanded.experimental_per_device_polling
+        );
+        assert_eq!(
+            collapsed.experimental_bluetooth_wired,
+            expanded.experimental_bluetooth_wired
+        );
+    }
+
+    /// D-86/D-87（测试清单「GUI 保存只写显式值」配置层断言）：UI 辅助
+    /// 键保存不隐式改写任何实验键——仅显式改动的键发生变化。
+    #[test]
+    fn ui_key_save_does_not_touch_experimental_keys() {
+        let (mut c, _) = Config::parse(
+            "experimental_migrated_v0321 = true\nexperimental_persist_last_known = true\n\
+             experimental_stats = false\nexperimental_per_device_polling = true\n\
+             experimental_bluetooth_wired = false\n",
+        );
+        let before = (
+            c.experimental_persist_last_known,
+            c.experimental_stats,
+            c.experimental_per_device_polling,
+            c.experimental_bluetooth_wired,
+        );
+        // 模拟设置窗口只改闸门展开态并物化保存。
+        c.ui_fine_tune_expanded = true;
+        let (back, _) = Config::parse(&c.to_toml());
+        let after = (
+            back.experimental_persist_last_known,
+            back.experimental_stats,
+            back.experimental_per_device_polling,
+            back.experimental_bluetooth_wired,
+        );
+        assert_eq!(before, after);
+        assert!(back.ui_fine_tune_expanded);
+        // 物化文件含 v0321 标记 → 再解析 marker_in_file 为 true
+        // （Q3 判定输入正确传递）。
+        assert!(back.experimental_marker_in_file);
     }
 }
