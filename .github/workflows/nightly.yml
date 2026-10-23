@@ -109,37 +109,69 @@ jobs:
       # comments --jq '.comments' 返回数组，须加 '| length' 取整数——
       # 否则 [ "$count" -ge 10 ] 整数比较报错（退出码 2 → if 为假），
       # 「评论上限 10 条」防噪机制失效。
-      # R2-F3① 已知缺口（0026 登记）：FAILED_STEP 硬编码步名，步改名
-      # 须同步更新；融合注记：协议测试现为真实门禁，协议红同样触发
-      # 本步，正文的失败步名以 run 页实际失败步为准。
+      # E4（2026-10-24 红蓝对抗终审）三项修复：
+      # ① 幂等化——gh label create 无 --if-not-exists flag（gh 官方
+      #    manual 核对，2026-10-24），runner 上 "unknown flag" 必败，
+      #    开单死在第一步 = nightly 失败静默的根因；改 --force
+      #    （不存在则建、已存在则更新 color/description），幂等。
+      # ② R2-F3① 闭环——FAILED_STEP 硬编码步名改为 jobs API 动态取
+      #    本 job 内 conclusion == failure 的步名，步改名不须跟改。
+      # ③ 开单步失效自报——set +e 手动收集 + ::error 注解 + 失败
+      #    exit 1，开单步自身红时在 run 页高亮，不再静默。
       - name: N-2 open-or-comment issue (ci-nightly-failure)
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
-          FAILED_STEP: "fuzz frame_fuzz (5min smoke)"
         shell: bash
         run: |
+          set +e -uo pipefail
+          errs=0
+          note_err() { echo "::error::[N-2 开单步自报] $1"; errs=$((errs + 1)); }
           gh label create ci-nightly-failure \
             --color B60205 \
             --description "nightly fuzz 失败自动开单（N-2）" \
-            --if-not-exists
-          num=$(gh issue list --state open --label ci-nightly-failure \
-            --json number --limit 1 | jq -r '.[0].number // empty')
-          if [ -n "$num" ]; then
-            count=$(gh issue view "$num" --json comments --jq '.comments | length')
-            if [ "$count" -ge 10 ]; then
-              echo "[N-2] issue #${num} 评论已达上限（10），本晚失败仅计数、不再追加（防噪三件套）"
-            else
-              gh issue comment "$num" \
-                --body "nightly fuzz 失败（${FAILED_STEP}，实际失败步以 run 页为准）：${RUN_URL}"
-            fi
+            --force \
+            || note_err "gh label create ci-nightly-failure 失败"
+          FAILED_STEPS=""
+          steps_jq='[.jobs[] | select(.name == "'"${GITHUB_JOB}"'") | .steps[]? | select(.conclusion == "failure") | .name] | join("、")'
+          if FAILED_STEPS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --jq "$steps_jq"); then
+            [ -n "$FAILED_STEPS" ] || FAILED_STEPS="（未取到失败步名，以 run 页为准）"
           else
-            body=$(printf '触发：%s（实际失败步以 run 页为准）\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
-              "$FAILED_STEP" "$RUN_URL")
-            gh issue create --label ci-nightly-failure \
-              --title "nightly fuzz 失败（自动开单）" \
-              --body "$body"
+            FAILED_STEPS="（失败步名获取失败，以 run 页为准）"
+            note_err "gh api jobs 取失败步名失败"
+          fi
+          if [ "$errs" -eq 0 ]; then
+            num=""
+            if list_json=$(gh issue list --state open --label ci-nightly-failure \
+              --json number --limit 1); then
+              num=$(printf '%s' "$list_json" | jq -r '.[0].number // empty')
+            else
+              note_err "gh issue list 查重失败"
+            fi
+            if [ -n "$num" ]; then
+              count=$(gh issue view "$num" --json comments --jq '.comments | length')
+              if [ -z "$count" ]; then
+                note_err "gh issue view #${num} 取评论数失败"
+              elif [ "$count" -ge 10 ]; then
+                echo "[N-2] issue #${num} 评论已达上限（10），本晚失败仅计数、不再追加（防噪三件套）"
+              else
+                gh issue comment "$num" \
+                  --body "nightly 失败（失败步：${FAILED_STEPS}）：${RUN_URL}" \
+                  || note_err "gh issue comment #${num} 失败"
+              fi
+            else
+              body=$(printf '触发步：%s\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
+                "$FAILED_STEPS" "$RUN_URL")
+              gh issue create --label ci-nightly-failure \
+                --title "nightly fuzz 失败（自动开单）" \
+                --body "$body" \
+                || note_err "gh issue create 失败"
+            fi
+          fi
+          if [ "$errs" -ne 0 ]; then
+            echo "::error::[N-2] 开单步自身失效（${errs} 处），失败信号可能丢失，请人工核查本 run"
+            exit 1
           fi
 
       # 「30 晚无非红」到期评审：起算日常量仅作下限，到期判据按最近
@@ -154,7 +186,8 @@ jobs:
           gh label create ci-review-due \
             --color FBCA04 \
             --description "30 晚到期评审（N-2 / T-05）" \
-            --if-not-exists
+            --force \
+            || { echo "::error::[N-2 自报] gh label create ci-review-due 失败（E4：--force 幂等）"; exit 1; }
           runs_json=$(gh run list --workflow nightly.yml \
             --json conclusion,createdAt --limit 400)
           total=$(printf '%s' "$runs_json" | jq --arg start "$FUZZ_CLOCK_START" \
@@ -176,7 +209,8 @@ jobs:
             "$FUZZ_CLOCK_START" "$total" "$green")
           gh issue create --label ci-review-due \
             --title "30 晚到期评审：nightly fuzz 无非红（自动开单）" \
-            --body "$body"
+            --body "$body" \
+            || { echo "::error::[N-2 自报] 到期评审开单失败（E4：开单步失效不静默）"; exit 1; }
 
   # P1-5（C1 冲突三裁决选 A：机械可及的先机械）：门禁脚本自身失效
   # 如何被发现——本 job 每晚对 verify.sh 做干跑自检：① bash -n 语法
@@ -211,6 +245,9 @@ jobs:
         run: bash verify.sh --a4 --strict
 
       # N-2 同法开单（label 精确查重 + 评论上限 10 条防噪）。
+      # E4（2026-10-24 终审）同步三修：--if-not-exists → --force（gh 无该
+      # flag，nightly 失败静默同根因）；失败步名 jobs API 动态取；
+      # 开单步失效自报（::error 注解 + 失败 exit 1）。
       - name: N-2 open-or-comment issue (verify-selfcheck-failure)
         if: failure()
         env:
@@ -218,31 +255,61 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
         shell: bash
         run: |
+          set +e -uo pipefail
+          errs=0
+          note_err() { echo "::error::[N-2 开单步自报] $1"; errs=$((errs + 1)); }
           gh label create verify-selfcheck-failure \
             --color B60205 \
             --description "verify.sh 自检失效自动开单（P1-5）" \
-            --if-not-exists
-          num=$(gh issue list --state open --label verify-selfcheck-failure \
-            --json number --limit 1 | jq -r '.[0].number // empty')
-          if [ -n "$num" ]; then
-            count=$(gh issue view "$num" --json comments --jq '.comments | length')
-            if [ "$count" -ge 10 ]; then
-              echo "[N-2] issue #${num} 评论已达上限（10），本次失效仅计数、不再追加（防噪三件套）"
-            else
-              gh issue comment "$num" \
-                --body "verify.sh 自检失效（bash -n 或 --a4 dry-run）：${RUN_URL}"
-            fi
+            --force \
+            || note_err "gh label create verify-selfcheck-failure 失败"
+          FAILED_STEPS=""
+          steps_jq='[.jobs[] | select(.name == "'"${GITHUB_JOB}"'") | .steps[]? | select(.conclusion == "failure") | .name] | join("、")'
+          if FAILED_STEPS=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --jq "$steps_jq"); then
+            [ -n "$FAILED_STEPS" ] || FAILED_STEPS="（未取到失败步名，以 run 页为准）"
           else
-            body=$(printf '触发：verify-selfcheck job（bash -n 语法检查或 --a4 dry-run 失败）\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
-              "$RUN_URL")
-            gh issue create --label verify-selfcheck-failure \
-              --title "verify.sh 自检失效（自动开单）" \
-              --body "$body"
+            FAILED_STEPS="（失败步名获取失败，以 run 页为准）"
+            note_err "gh api jobs 取失败步名失败"
+          fi
+          if [ "$errs" -eq 0 ]; then
+            num=""
+            if list_json=$(gh issue list --state open --label verify-selfcheck-failure \
+              --json number --limit 1); then
+              num=$(printf '%s' "$list_json" | jq -r '.[0].number // empty')
+            else
+              note_err "gh issue list 查重失败"
+            fi
+            if [ -n "$num" ]; then
+              count=$(gh issue view "$num" --json comments --jq '.comments | length')
+              if [ -z "$count" ]; then
+                note_err "gh issue view #${num} 取评论数失败"
+              elif [ "$count" -ge 10 ]; then
+                echo "[N-2] issue #${num} 评论已达上限（10），本次失效仅计数、不再追加（防噪三件套）"
+              else
+                gh issue comment "$num" \
+                  --body "verify.sh 自检失效（失败步：${FAILED_STEPS}）：${RUN_URL}" \
+                  || note_err "gh issue comment #${num} 失败"
+              fi
+            else
+              body=$(printf '触发步：%s\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注（零天数时限）。' \
+                "$FAILED_STEPS" "$RUN_URL")
+              gh issue create --label verify-selfcheck-failure \
+                --title "verify.sh 自检失效（自动开单）" \
+                --body "$body" \
+                || note_err "gh issue create 失败"
+            fi
+          fi
+          if [ "$errs" -ne 0 ]; then
+            echo "::error::[N-2] 开单步自身失效（${errs} 处），失败信号可能丢失，请人工核查本 run"
+            exit 1
           fi
 
-  # P0-3② 指针漂移防复发 advisory（report-only）：仿 ci.yml actionlint
-  # 步 continue-on-error 提示先例（C-F6），红不阻断任何人，仅在 run 页
-  # 留痕，由维护者按 06 对账定性；连续两晚红再人工定性是否真实漂移。
+  # P0-3② 指针漂移防复发 advisory：仿 ci.yml actionlint 步
+  # continue-on-error 提示先例（C-F6）。E4（2026-10-24 终审）升级：
+  # 「红不阻断」保持（阻断形态缓行，job 仍绿、run 不被拦），但命中
+  # 不再仅靠人工翻 run 页——转红即按 N-2 同法自动开单（label 精确
+  # 查重 + 评论上限 10 条），与「连续两晚红再人工定性是否真实漂移」
+  # 口径衔接。
   # 不建链接可达性检查（C1 稿明确排除）。检查逻辑 2026-10-22 在本地
   # 快照实测：当前树零命中（旧指针/缺失 E/D 引用均 0），并经注入旧
   # 指针、E99 假引用反向自证可捕获。检查项：
@@ -261,11 +328,15 @@ jobs:
   #    双 G 节撞号对①–③不可见，唯一性须单独断言。
   pointer-drift-advisory:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
+      # E4：job 级 continue-on-error 下移到本步——步红不阻断 job，
+      # 但 outcome 记为 failure 供下方开单步判定（job 级形态下
+      # 后续步的 failure() 语义不可靠，steps.<id>.outcome 才确定）。
       - name: old-pointer grep + E/D reference existence (report-only)
+        id: drift-check
+        continue-on-error: true
         shell: bash
         run: |
           set -uo pipefail
@@ -323,3 +394,56 @@ jobs:
           fi
           echo "── 结果：fail=${fail}（report-only，不阻断）──"
           exit $fail
+
+      # E4（2026-10-24 终审）：advisory 转红即开单。步名不动态取——本步
+      # 级 continue-on-error 时 drift-check 在 jobs API 里 conclusion 为
+      # success（outcome 不进 API），动态取必空，故正文直接写检查名。
+      # 开单法与 fuzz job 相同：label --force 幂等 + 精确查重 + 评论上限
+      # 10 条防噪 + 开单步失效自报（::error 注解 + 失败 exit 1）。
+      - name: N-2 open-or-comment issue (ci-advisory-failure)
+        if: steps.drift-check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+        shell: bash
+        run: |
+          set +e -uo pipefail
+          errs=0
+          note_err() { echo "::error::[N-2 开单步自报] $1"; errs=$((errs + 1)); }
+          gh label create ci-advisory-failure \
+            --color D93F0B \
+            --description "pointer-drift advisory 命中自动开单（E4）" \
+            --force \
+            || note_err "gh label create ci-advisory-failure 失败"
+          if [ "$errs" -eq 0 ]; then
+            num=""
+            if list_json=$(gh issue list --state open --label ci-advisory-failure \
+              --json number --limit 1); then
+              num=$(printf '%s' "$list_json" | jq -r '.[0].number // empty')
+            else
+              note_err "gh issue list 查重失败"
+            fi
+            if [ -n "$num" ]; then
+              count=$(gh issue view "$num" --json comments --jq '.comments | length')
+              if [ -z "$count" ]; then
+                note_err "gh issue view #${num} 取评论数失败"
+              elif [ "$count" -ge 10 ]; then
+                echo "[N-2] issue #${num} 评论已达上限（10），本次命中仅计数、不再追加（防噪三件套）"
+              else
+                gh issue comment "$num" \
+                  --body "pointer-drift advisory 命中（①–④ 任一项，run 页见明细）：${RUN_URL}" \
+                  || note_err "gh issue comment #${num} 失败"
+              fi
+            else
+              body=$(printf '触发：pointer-drift advisory 检查命中（①旧指针 / ②E 编号 / ③D 编号 / ④唯一性，run 页见明细）。\n定性口径：连续两晚红再人工定性是否真实漂移。\nrun：%s\n处置出口：下个发布窗口前处置并在 Release 说明标注。' \
+                "$RUN_URL")
+              gh issue create --label ci-advisory-failure \
+                --title "pointer-drift advisory 命中（自动开单）" \
+                --body "$body" \
+                || note_err "gh issue create 失败"
+            fi
+          fi
+          if [ "$errs" -ne 0 ]; then
+            echo "::error::[N-2] 开单步自身失效（${errs} 处），advisory 命中信号可能丢失，请人工核查本 run"
+            exit 1
+          fi

@@ -11,8 +11,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use volttray_protocol::features::registry;
 use volttray_transport::events::{DiagEvent, DiagKind, EventSink};
 
-/// RingBuffer 容量（P1-2：≥256）。
-pub const DIAG_CAPACITY: usize = 256;
+/// RingBuffer 容量（P1-2：≥256；v0.3.23 前为 256，2026-10-24 红蓝对抗
+/// 终审报告 E24 扩容至 2048）。
+///
+/// 容量依据（真机实测口径，2026-10-23 v0.3.22 导出日志）：事件约
+/// 16.3 条/分钟 → 2048 ≈ 2 小时覆盖；DiagEvent 单条序列化后约数百
+/// 字节，环满常驻内存增量约 1.5MB（连同 log_tail 扩容合计，见
+/// diag_export.rs）——远低于既有 1MB×轮转的磁盘口径，无新增磁盘占用。
+pub const DIAG_CAPACITY: usize = 2048;
 
 /// 脱敏替换符（两字符，保持 hex 列对齐）。
 pub const MASK: &str = "**";
@@ -184,9 +190,9 @@ mod tests {
     }
 
     #[test]
-    fn ring_buffer_caps_at_256() {
+    fn ring_buffer_caps_at_diag_capacity() {
         let mut obs = Observer::new();
-        for _ in 0..300 {
+        for _ in 0..2100 {
             obs.push(DiagEvent::new(
                 Layer::App,
                 DiagKind::Info {
@@ -194,9 +200,9 @@ mod tests {
                 },
             ));
         }
-        assert_eq!(obs.len(), 256);
+        assert_eq!(obs.len(), DIAG_CAPACITY);
         let first = obs.events().next().expect("first");
-        assert_eq!(first.seq, 45); // 300 - 256 + 1
+        assert_eq!(first.seq, 53); // 2100 - 2048 + 1
     }
 
     #[test]

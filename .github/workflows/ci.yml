@@ -153,6 +153,39 @@ jobs:
           set -o pipefail
           cargo check --workspace --locked --target x86_64-pc-windows-gnu 2>&1 | tee ../check-windows-target.log
 
+      # E1（2026-10-24 红蓝对抗终审）：src 文本纯净性断言——诊断导出/日志
+      # 相关源码若混入 NUL 字节或非法编码字节，会被 grep 判为二进制，
+      # 依赖 grep 的下游守卫（见 redline-guard-advisory 注释）将静默漏检。
+      # 勘误（2026-10-24 字节级实测）：此前「tray/src/main.rs 含会被 grep
+      # 误判为二进制的字节序列，不加 -a 会漏 8 处」的说法系当时本地沙箱
+      # 网络盘短读伪影——对 main.rs / settings.rs / core.rs 逐字节扫描
+      # （NUL、控制字符、UTF-8 合法性）均干净且与远端 blob 一致，GNU
+      # grep 对文件内容的判定是确定的，本断言无 flaky 风险。发现判二进制
+      # 即红，防真实字节污染回归。
+      - name: src files must not be judged binary (E1)
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          count=0
+          while IFS= read -r -d '' f; do
+            count=$((count + 1))
+            if ! [ -s "$f" ]; then
+              echo "::error::$f 为空文件（源码文件不应为空）"
+              fail=1
+              continue
+            fi
+            # grep -I：二进制文件按「无匹配」处理——纯文本必命中 '.'，
+            # 含 NUL/坏编码字节的文件被判二进制后 -q 返回 1。
+            if ! grep -Iq . "$f"; then
+              echo "::error::$f 被 grep 判为二进制（E1：疑似混入 NUL 或非法编码字节，需字节级排查）"
+              fail=1
+            fi
+          done < <(find volttray -name '*.rs' -print0)
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "E1 断言通过：$count 个 .rs 源文件均为纯文本（grep -I 判定）"
+
       - name: upload logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4

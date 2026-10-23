@@ -89,6 +89,16 @@ jobs:
           # C-01：原「两空格」断言对真实资产误杀）。
           grep -Eq '^[0-9a-f]{64} [ *]volttray-tray\.exe$' target/release/volttray-tray.exe.sha256.txt \
             || { echo "::error::sha256 文件格式不符（应：64hex  space  space/asterisk  volttray-tray.exe）"; exit 1; }
+          # ③ README 下载锚点不钉版本号（E2，2026-10-24 红蓝对抗终审）：
+          # 每次发版后 README 的「当前最新版为 vX.Y.Z」锚点必然滞后失效；
+          # 下载入口一律指向 /releases/latest，历史版本入口指向 /releases。
+          # 锚点出现 releases/tag/v 即红，防止回归。
+          for readme in README.md README.en-US.md; do
+            if grep -q 'releases/tag/v' "$readme"; then
+              echo "::error::$readme 含钉死版本号的 releases/tag/v 锚点（E2 口径：下载入口应指向 /releases/latest）"
+              exit 1
+            fi
+          done
           echo "release-contract 全部断言通过"
 
       # ③ 自启注册表路径与值名文本断言——C-12 降为辅助告警：

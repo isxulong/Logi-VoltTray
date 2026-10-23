@@ -18,9 +18,15 @@ use std::path::Path;
 
 use serde::Serialize;
 
-/// 日志尾部行数上限（约 200 行：1MB 轮转上限内的近期上下文，够定位
-/// 「重启后识别失败」这类会话级问题，又不至于把导出文件撑爆）。
-pub const LOG_TAIL_MAX_LINES: usize = 200;
+/// 日志尾部行数上限（v0.3.23 前为 200，2026-10-24 红蓝对抗终审报告
+/// E24 扩容至 4096）。
+///
+/// 容量依据（真机实测口径，2026-10-23 v0.3.22 导出日志）：日志约
+/// 38.3 行/分钟 → 4096 行 ≈ 1.8 小时覆盖，能装下「安装后首个会话」的
+/// 完整上下文；1MB×2 轮转上限内 read_log_tail 全量读入再取尾部，
+/// 序列化增量连同 DIAG_CAPACITY 扩容合计约 1.5MB 量级，导出文件
+/// 仍在邮件/IM 可直接传输的体积范围内。
+pub const LOG_TAIL_MAX_LINES: usize = 4096;
 
 /// 诊断导出文件名前缀（v0.3.15：导出改为用户「另存为」自选位置后，
 /// 默认文件名口径集中到 app 层，GUI 与测试共用一处定义）。
@@ -326,14 +332,18 @@ mod tests {
         let dir = temp_dir("normal");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("logi-volttray.log");
-        let body: String = (0..250).map(|i| format!("line-{i}\n")).collect();
+        let body: String = (0..4500).map(|i| format!("line-{i}\n")).collect();
         std::fs::write(&log, body).unwrap();
         let json = bundle_json(&log);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let lines = v["log_tail"]["lines"].as_array().unwrap();
-        assert_eq!(lines.len(), LOG_TAIL_MAX_LINES, "tail must cap at 200");
-        assert_eq!(lines[0].as_str().unwrap(), "line-50", "must keep order");
-        assert_eq!(lines[199].as_str().unwrap(), "line-249");
+        assert_eq!(
+            lines.len(),
+            LOG_TAIL_MAX_LINES,
+            "tail must cap at LOG_TAIL_MAX_LINES"
+        );
+        assert_eq!(lines[0].as_str().unwrap(), "line-404", "must keep order");
+        assert_eq!(lines[LOG_TAIL_MAX_LINES - 1].as_str().unwrap(), "line-4499");
         assert_eq!(v["log_tail"]["reason"], serde_json::json!(null));
 
         // 不足上限：全量、有序。
