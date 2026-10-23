@@ -146,9 +146,12 @@ pub struct DiagExport {
     pub wake_successes: u64,
     /// attribution miss 子分类：无 Raw Input 路径（no-path）。
     pub wake_miss_no_path: u64,
-    /// attribution miss 子分类：零候选匹配 / 指纹不可解析（no-match；
-    /// BF-3 自 ambiguous 拆出——系统性失配：BT / 有线 / 他机接收器）。
-    pub wake_miss_no_match: u64,
+    /// attribution miss 子分类：零候选匹配（zero-match；E11 自 no-match
+    /// 拆出——系统性失配：BT / 有线 / 他机接收器，候选集为空）。
+    pub wake_miss_zero_match: u64,
+    /// attribution miss 子分类：指纹不可解析（no-fingerprint；E11 自
+    /// no-match 拆出——设备指纹缺失或畸形，未进入匹配）。
+    pub wake_miss_no_fingerprint: u64,
     /// attribution miss 子分类：多候选同指纹无法裁决（ambiguous）。
     pub wake_miss_ambiguous: u64,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
@@ -282,7 +285,8 @@ mod tests {
             arm_all_fills: 0,
             wake_successes: 0,
             wake_miss_no_path: 0,
-            wake_miss_no_match: 0,
+            wake_miss_zero_match: 0,
+            wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
@@ -425,7 +429,8 @@ mod tests {
             arm_all_fills: 0,
             wake_successes: 0,
             wake_miss_no_path: 0,
-            wake_miss_no_match: 0,
+            wake_miss_zero_match: 0,
+            wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
@@ -477,7 +482,8 @@ mod tests {
             arm_all_fills: 0,
             wake_successes: 0,
             wake_miss_no_path: 0,
-            wake_miss_no_match: 0,
+            wake_miss_zero_match: 0,
+            wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
@@ -512,7 +518,8 @@ mod tests {
             arm_all_fills: 3,
             wake_successes: 2,
             wake_miss_no_path: 4,
-            wake_miss_no_match: 5,
+            wake_miss_zero_match: 5,
+            wake_miss_no_fingerprint: 2,
             wake_miss_ambiguous: 1,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
@@ -527,7 +534,8 @@ mod tests {
         assert_eq!(v["arm_all_fills"], 3);
         assert_eq!(v["wake_successes"], 2);
         assert_eq!(v["wake_miss_no_path"], 4);
-        assert_eq!(v["wake_miss_no_match"], 5);
+        assert_eq!(v["wake_miss_zero_match"], 5);
+        assert_eq!(v["wake_miss_no_fingerprint"], 2);
         assert_eq!(v["wake_miss_ambiguous"], 1);
         // avg_tx_interval_ms = None → 键省略（skip_serializing_if）。
         let v2: serde_json::Value =
@@ -595,7 +603,8 @@ mod tests {
             arm_all_fills: 0,
             wake_successes: 0,
             wake_miss_no_path: 0,
-            wake_miss_no_match: 0,
+            wake_miss_zero_match: 0,
+            wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-audit".into(),
@@ -630,8 +639,9 @@ mod tests {
             "last_enum_reason",
             "log_tail",
             "wake_miss_ambiguous",
-            "wake_miss_no_match",
+            "wake_miss_no_fingerprint",
             "wake_miss_no_path",
+            "wake_miss_zero_match",
             "wake_successes",
         ]
         .into();

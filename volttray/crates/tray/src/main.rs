@@ -461,8 +461,18 @@ mod imp {
     struct SlotScanEdge {
         /// 本轮该槽位 0xFF 电量探测返回 error_response（结构性失败）。
         ff_battery_probe_failed: bool,
-        /// 本轮该槽位握手阶段纯超时不应答。
+        /// 本轮该槽位握手阶段「无设备应答」——纯超时不应答（Timeout）或
+        /// 接收器应答该槽位无设备（NoDevice，E10 细分）；喂死槽冷却裁决。
         handshake_no_response: bool,
+    }
+
+    /// 0xFF 负缓存门（E10 拆为纯函数以便回归测试逐行对照）：
+    /// cached=本 run 内该通道 0xFF 探测已出现 error_response；
+    /// cache_applies=握手结论允许负缓存（`Handshake::ff_negative_cache_applies`）。
+    /// 返回 true = 缓存抑制本次探测；false = 照常探测（未命中，或可信
+    /// HID++1 直连设备——由调用方清缓存放行，AF-6）。
+    fn ff_probe_suppressed(slot: u8, cached: bool, cache_applies: bool) -> bool {
+        slot == 0xFF && cached && cache_applies
     }
 
     /// 返回注册成功的槽位；Err 携带失败类别（v0.3.11 F1：供通道级
@@ -488,20 +498,32 @@ mod imp {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
         let hs = handshake(&mut t, slot);
+        // E10：0xFF 负缓存适用性按握手结论判定（须在 match 消费 hs 前取）。
+        // 修复前 0x01 幽灵槽被误判 Hidpp1，走下方 is_hidpp1 清缓存分支导致
+        // 负缓存永不生效；现由 Hidpp1Ghost 携带「未证实 1.0 候选」语义，
+        // 缓存对其适用。可信 HID++1 直连设备仍不适用（AF-6）。
+        let ff_cache_applies = hs.ff_negative_cache_applies();
         let (features, is_hidpp1) = match hs {
             Handshake::Hidpp2(table) => (table, false),
-            Handshake::Hidpp1 => (FeatureTable::new(), true),
+            // 可信 1.0 设备与 0x01 幽灵候选同走 1.0 寄存器探测链——真实
+            // 设备的注册通道保留；两者差异仅在负缓存适用性（上）。
+            Handshake::Hidpp1 | Handshake::Hidpp1Ghost => (FeatureTable::new(), true),
             Handshake::NoResponse(cause) => {
-                // R-2（v0.3.17）：握手纯超时不应答喂死槽冷却裁决（仅
-                // Timeout 一类；Io/Protocol 在冷却语义里算「槽位活着」，
-                // I/O 证据保持热度留给 SlotScanStreak 裁决句柄死亡）。
-                edge.handshake_no_response = matches!(cause, NoResponseCause::Timeout);
+                // E10：死槽冷却喂入口径由 NoResponseCause 自带——Timeout
+                // （直连深睡/空槽）与 NoDevice（接收器 0x08「槽位无设备」）
+                // 计入连击；Io/Protocol 在冷却语义里算「槽位活着」，I/O
+                // 证据保持热度留给 SlotScanStreak 裁决句柄死亡。
+                // 修复前仅 Timeout 置位，接收器空槽（0x08）永不喂入冷却。
+                edge.handshake_no_response = cause.feeds_dead_slot_cooldown();
                 // v0.3.11（F1）：slot scan 日志区分超时与 I/O 类失败——
                 // 死句柄与深睡设备在日志中可分辨（此前同判 no response）。
                 match cause {
                     NoResponseCause::Io => bootlog::note(&format!(
                         "slot scan: {id} io error (handle suspect) (slot skipped)"
                     )),
+                    NoResponseCause::NoDevice => {
+                        bootlog::note(&format!("slot scan: {id} no device at slot (slot skipped)"))
+                    }
                     _ => bootlog::note(&format!(
                         "slot scan: {id} handshake no response (slot skipped)"
                     )),
@@ -509,7 +531,9 @@ mod imp {
                 return Err(match cause {
                     NoResponseCause::Timeout => SlotScanFailure::Timeout,
                     NoResponseCause::Io => SlotScanFailure::Io,
-                    NoResponseCause::Protocol => SlotScanFailure::Other,
+                    // NoDevice：接收器回了字节 = 句柄活着，与 Protocol 同归
+                    // Other——不喂 SlotScanStreak 的句柄死亡裁决（防误杀）。
+                    NoResponseCause::Protocol | NoResponseCause::NoDevice => SlotScanFailure::Other,
                 });
             }
         };
@@ -519,18 +543,19 @@ mod imp {
         // 保留（槽位发现仍依赖它，仅 1 次短事务）；仅缓存 ErrorResponse
         // 一类结构性失败，超时不缓存——HID++1 直连设备可能深睡后应答，
         // 缓存超时会把它永久挡在注册门外。force 枚举句柄重开时清零。
+        // E10：缓存命中时的分支条件由 is_hidpp1 改为 ff_cache_applies——
+        // 0x01 幽灵槽（Hidpp1Ghost）不再每轮清缓存，负缓存真实生效。
+        if ff_probe_suppressed(slot, edge.ff_battery_probe_failed, ff_cache_applies) {
+            bootlog::note(&format!(
+                "slot scan: {id} battery probe skipped (0xFF failure cached this run)"
+            ));
+            return Err(SlotScanFailure::Other);
+        }
         if slot == 0xFF && edge.ff_battery_probe_failed {
-            if is_hidpp1 {
-                // HID++1 直连设备握手成功：缓存的结构性失败对其不适用
-                //（终审 R-1：握手保留 1 帧用于发现 HID++1 直连设备）——
-                // 清缓存照常探测注册，否则该设备本 run 内永不注册（AF-6）。
-                edge.ff_battery_probe_failed = false;
-            } else {
-                bootlog::note(&format!(
-                    "slot scan: {id} battery probe skipped (0xFF failure cached this run)"
-                ));
-                return Err(SlotScanFailure::Other);
-            }
+            // 可信 HID++1 直连设备握手成功：缓存的结构性失败对其不适用
+            //（终审 R-1：握手保留 1 帧用于发现 HID++1 直连设备）——
+            // 清缓存照常探测注册，否则该设备本 run 内永不注册（AF-6）。
+            edge.ff_battery_probe_failed = false;
         }
         // 电量探测：失败不注册（BatteryUnknown 事件已由 probe_battery 记录原因分类）。
         // F5 次修 P2：#255（0xFF 接收器直连槽）的 error_response 是握手
@@ -801,12 +826,14 @@ mod imp {
     /// R-11（v0.3.17）：唤醒路径遥测（诊断导出 summary 追加字段）——
     /// 进程级静态计数，IO 线程写、导出时读，避免跨线程签名穿线。
     /// arm_all 装填数 / 唤醒成功数 / attribution miss 子分类（no-path /
-    /// no-match / ambiguous，BF-3 拆分：no-match 含指纹不可解析与零
-    /// 候选匹配两类系统性失配，与「多候选同指纹」的歧义相区分）。
+    /// zero-match / no-fingerprint / ambiguous；E11 把原 no-match 桶
+    /// 拆为零候选匹配与指纹不可解析两类，与「多候选同指纹」的歧义
+    /// 相区分）。
     static WAKE_ARM_ALL_FILLS: AtomicU64 = AtomicU64::new(0);
     static WAKE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
     static WAKE_MISS_NO_PATH: AtomicU64 = AtomicU64::new(0);
-    static WAKE_MISS_NO_MATCH: AtomicU64 = AtomicU64::new(0);
+    static WAKE_MISS_ZERO_MATCH: AtomicU64 = AtomicU64::new(0);
+    static WAKE_MISS_NO_FINGERPRINT: AtomicU64 = AtomicU64::new(0);
     static WAKE_MISS_AMBIGUOUS: AtomicU64 = AtomicU64::new(0);
 
     /// R-4（v0.3.17）：attribution miss 日志采样——BT/有线系统性失配
@@ -2102,22 +2129,37 @@ mod imp {
                                                 wake_arm_set(&sleeping, &online_gray, None);
                                             (ids, "miss-ambiguous", exempt)
                                         }
-                                        ChannelMatch::ZeroMatch | ChannelMatch::NoFingerprint => {
+                                        ChannelMatch::ZeroMatch => {
                                             channel_map_miss.fetch_add(1, Ordering::Relaxed);
-                                            // BF-3（v0.3.17）：零匹配 / 指纹
-                                            // 不可解析与歧义分桶——系统性失
-                                            // 配（BT / 有线 / 他机接收器）
-                                            // 单独计数，不再计入 ambiguous。
-                                            WAKE_MISS_NO_MATCH.fetch_add(1, Ordering::Relaxed);
+                                            // E11：零候选匹配（系统性失配：
+                                            // BT / 有线 / 他机接收器）与指
+                                            // 纹不可解析分桶，各自独立计数。
+                                            WAKE_MISS_ZERO_MATCH.fetch_add(1, Ordering::Relaxed);
                                             if let Some(line) = wake_miss_sampler.note_miss(
-                                                    "wake channel attribution miss (no-match); fallback arm-all",
+                                                    "wake channel attribution miss (zero-match); fallback arm-all",
                                                     Instant::now(),
                                                 ) {
                                                     bootlog::note(&line);
                                                 }
                                             let (ids, exempt) =
                                                 wake_arm_set(&sleeping, &online_gray, None);
-                                            (ids, "miss-no-match", exempt)
+                                            (ids, "miss-zero-match", exempt)
+                                        }
+                                        ChannelMatch::NoFingerprint => {
+                                            channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                                            // E11：指纹不可解析（缺失/畸形）
+                                            // 独立计数。
+                                            WAKE_MISS_NO_FINGERPRINT
+                                                .fetch_add(1, Ordering::Relaxed);
+                                            if let Some(line) = wake_miss_sampler.note_miss(
+                                                    "wake channel attribution miss (no-fingerprint); fallback arm-all",
+                                                    Instant::now(),
+                                                ) {
+                                                    bootlog::note(&line);
+                                                }
+                                            let (ids, exempt) =
+                                                wake_arm_set(&sleeping, &online_gray, None);
+                                            (ids, "miss-no-fingerprint", exempt)
                                         }
                                     }
                                 }
@@ -3605,7 +3647,8 @@ mod imp {
             arm_all_fills: WAKE_ARM_ALL_FILLS.load(Ordering::Relaxed),
             wake_successes: WAKE_SUCCESSES.load(Ordering::Relaxed),
             wake_miss_no_path: WAKE_MISS_NO_PATH.load(Ordering::Relaxed),
-            wake_miss_no_match: WAKE_MISS_NO_MATCH.load(Ordering::Relaxed),
+            wake_miss_zero_match: WAKE_MISS_ZERO_MATCH.load(Ordering::Relaxed),
+            wake_miss_no_fingerprint: WAKE_MISS_NO_FINGERPRINT.load(Ordering::Relaxed),
             wake_miss_ambiguous: WAKE_MISS_AMBIGUOUS.load(Ordering::Relaxed),
             exported_at,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -3650,6 +3693,56 @@ mod imp {
                 PCWSTR(title.as_ptr()),
                 MB_OK | MB_ICONINFORMATION,
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod e10_regression_tests {
+        use super::*;
+        use volttray_app::reconnect::DEAD_SLOT_COOLDOWN_ROUNDS;
+
+        /// E10 回归①（#255 负缓存）：缓存命中时——0x01 幽灵口径
+        /// （cache_applies=true，对应 Hidpp1Ghost/Hidpp2）由缓存抑制探测；
+        /// 可信 HID++1（cache_applies=false）放行探测由调用方清缓存
+        /// （AF-6）；缓存未命中或非 0xFF 槽不抑制。
+        #[test]
+        fn ff_negative_cache_gate_truth_table() {
+            // 幽灵/2.0 + 缓存命中 → 抑制（修复点：0x01 路径进入负缓存）。
+            assert!(ff_probe_suppressed(0xFF, true, true));
+            // 可信 HID++1 + 缓存命中 → 不抑制（AF-6 清缓存照常探测）。
+            assert!(!ff_probe_suppressed(0xFF, true, false));
+            // 缓存未命中 → 不抑制（首轮探测照常，失败后才置缓存）。
+            assert!(!ff_probe_suppressed(0xFF, false, true));
+            assert!(!ff_probe_suppressed(0xFF, false, false));
+            // 非 0xFF 槽不适用负缓存。
+            assert!(!ff_probe_suppressed(0x02, true, true));
+        }
+
+        /// E10 回归②（死槽冷却喂入）：接收器 0x08「槽位无设备」证据经
+        /// `feeds_dead_slot_cooldown` 真实写入 DeadSlotScan——连续 K 轮后
+        /// 进入冷却，冷却期内不重复判定（每 K 轮放行 1 次复扫）；Io 证据
+        /// 不喂冷却（留给 SlotScanStreak 裁决句柄死亡）。
+        #[test]
+        fn dead_slot_cooldown_fed_by_no_device_evidence() {
+            let mut d = DeadSlotScan::new();
+            // 生产接线同形：try_slot 的 NoResponse 臂
+            // `edge.handshake_no_response = cause.feeds_dead_slot_cooldown()`。
+            let feed = NoResponseCause::NoDevice.feeds_dead_slot_cooldown();
+            assert!(feed, "NoDevice 必须喂入死槽冷却");
+            for _ in 0..DEAD_SLOT_COOLDOWN_ROUNDS {
+                assert!(d.should_scan(2), "冷却前每轮都扫");
+                d.note_handshake(2, feed);
+            }
+            assert!(d.should_scan(2), "streak 达 K 的整数倍放行最后 1 次");
+            d.note_handshake(2, feed);
+            for _ in 1..DEAD_SLOT_COOLDOWN_ROUNDS {
+                assert!(!d.should_scan(2), "冷却期内不重复判定");
+                d.note_handshake(2, feed);
+            }
+            assert!(d.should_scan(2), "每 K 轮放行 1 次复扫");
+            // Io 不喂冷却：一次 Io 证据即复位（句柄可疑≠槽位死）。
+            d.note_handshake(2, NoResponseCause::Io.feeds_dead_slot_cooldown());
+            assert!(d.should_scan(2), "Io 证据复位冷却");
         }
     }
 

@@ -31,7 +31,7 @@
 | `channel_map_miss` / `frame_tx` / `frame_rx` | 原子计数器 | 纯数值 | 无需覆盖 |
 | `avg_tx_interval_ms`（skip） | 帧间隔均值 | 纯数值 | 无需覆盖 |
 | `feature_index_tx` / `feature_index_rx` | `FrameStats`：键为 `format!("0x{f:02X}")`（HID++ 帧第 3 字节格式化，`main.rs` L243/L250） | 键是协议功能索引号，非用户数据 | 无需覆盖 |
-| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_no_match` / `wake_miss_ambiguous` | 原子计数器 | 纯数值 | 无需覆盖 |
+| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_zero_match` / `wake_miss_no_fingerprint` / `wake_miss_ambiguous` | 原子计数器 | 纯数值 | 无需覆盖 |
 | `exported_at` | unix 秒 | 时间戳，无个人标识 | 无需覆盖 |
 | `app_version` | `CARGO_PKG_VERSION` | 版本号 | 无需覆盖 |
 
