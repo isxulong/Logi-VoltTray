@@ -530,6 +530,14 @@ pub struct Config {
     /// to_toml roundtrip 等价成立（新装四键全开 → Q3 判定恒 false，
     /// 该取值无行为影响）。
     pub experimental_marker_in_file: bool,
+    /// E6（P1a，红蓝对抗终审）：未知键保留——本轮 parse 收集的、本版本
+    /// 不认识的键（键名 + 原始值文本），随 to_toml 原样带出，升降级往返
+    /// （新版写 → 旧版读 → 旧版写 → 新版读）不丢键。仅收存「值为可解析
+    /// 扁平标量/数组」的未知键；值不可解析的键、节头行、非 key=value 行
+    /// 仍按既有口径警告后丢弃（最小止损子集）。不参与迁移逻辑与
+    /// 行为判定；「恢复默认」重建 Config 时清空（恢复出厂语义）。
+    #[serde(default)]
+    pub unknown_keys: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -567,6 +575,8 @@ impl Default for Config {
             ui_default_on_notice_v0322: true,
             // 运行时推导字段（见结构体注释；新装不经 parse，恒无行为影响）。
             experimental_marker_in_file: true,
+            // E6：新装/恢复默认无未知键。
+            unknown_keys: Vec::new(),
         }
     }
 }
@@ -897,7 +907,15 @@ impl Config {
                     | "ui_default_on_notice_v0322",
                     _,
                 ) => warn(key, "invalid value or out of range; default kept"),
-                (other, _) => warn(other, "unknown key; ignored"),
+                (other, _) => {
+                    // E6（P1a）：未知键最小止损——键名与原始值文本收进
+                    // unknown_keys 随 to_toml 原样带出（值已经 parse_value
+                    // 验过形态，写回不引入语法面）；警告照发，容错红线不变
+                    //（不拒启、不静默）。
+                    cfg.unknown_keys
+                        .push((other.to_string(), value_raw.trim().to_string()));
+                    warn(other, "unknown key; preserved verbatim")
+                }
             }
         }
 
@@ -1007,8 +1025,8 @@ impl Config {
             .map(|c| format!("\"{}\"", c.to_hex()))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "# LogiVoltTray 配置（扁平键值；未知键会被忽略并产生诊断警告）\n\
+        let mut out = format!(
+            "# LogiVoltTray 配置（扁平键值；未知键产生诊断警告并原样保留——可能由其它版本写入）\n\
              autostart = {}\n\
              # 轮询间隔档位（秒）：300 / 600 / 1800 / 3600 / 7200（5/10/30/60/120 分钟），默认 1800\n\
              poll_interval_secs = {}\n\
@@ -1062,7 +1080,20 @@ impl Config {
             self.experimental_migrated_v0321,
             self.ui_fine_tune_expanded,
             self.ui_default_on_notice_v0322,
-        )
+        );
+        // E6（P1a）：未知键原样保留段——其它（更新）版本写入、本版本不
+        // 认识的键逐字带回（键名 + 原始值文本）；解析回来仍收进
+        // unknown_keys 且顺序不变，往返幂等。手工删除即彻底移除。
+        if !self.unknown_keys.is_empty() {
+            out.push_str("# 以下为未识别键（可能由其它版本写入），原样保留：\n");
+            for (k, v) in &self.unknown_keys {
+                out.push_str(k);
+                out.push_str(" = ");
+                out.push_str(v);
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// v0.3.22（D-85/D-87）：实验室四键中已开启的计数（N/4，闸门文案
@@ -1225,6 +1256,41 @@ mod tests {
         assert_eq!(c.low_threshold, 30);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].key, "evil_key");
+    }
+
+    /// E6（P1a，红蓝对抗终审）：「未知键保留」升降级往返对账——
+    /// 旧写（其它/更新版本写出的配置含本版本不认识的键）→ 新读（本版本
+    /// 解析：警告照发、键值原文收存）→ 新写（to_toml 原样带出未知键）→
+    /// 旧读（再解析：仍只警告、不拒启、不丢键），且二次写出与一次写出
+    /// 逐字一致（幂等）。本测试先于实现提交（先红证据见提交信息）。
+    #[test]
+    fn unknown_keys_preserved_roundtrip_reconciliation() {
+        // 旧写：两个未知键（布尔与字符串）+ 已知键 + 迁移标记（防迁移告警混入）。
+        let written = "low_threshold = 25\nfuture_flag = true\nfuture_note = \"hello world\"\nexperimental_migrated_v0321 = true\n";
+        // 新读：已知键生效；未知键逐条警告。
+        let (c, w) = Config::parse(written);
+        assert_eq!(c.low_threshold, 25);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|x| x.key == "future_flag"));
+        assert!(w.iter().any(|x| x.key == "future_note"));
+        // 新写：未知键名与原始值文本逐字出现在输出里。
+        let out1 = c.to_toml();
+        assert!(
+            out1.contains("future_flag = true"),
+            "to_toml 必须原样带出未知键 future_flag：\n{out1}"
+        );
+        assert!(
+            out1.contains("future_note = \"hello world\""),
+            "to_toml 必须原样带出未知键 future_note：\n{out1}"
+        );
+        // 旧读（等价于旧版本再读）：仍只警告、不拒启、键值不丢。
+        let (c2, w2) = Config::parse(&out1);
+        assert_eq!(c2.low_threshold, 25);
+        assert!(w2.iter().any(|x| x.key == "future_flag"));
+        assert!(w2.iter().any(|x| x.key == "future_note"));
+        // 幂等：二次写出与一次写出逐字一致。
+        let out2 = c2.to_toml();
+        assert_eq!(out1, out2, "往返写出必须幂等");
     }
 
     #[test]

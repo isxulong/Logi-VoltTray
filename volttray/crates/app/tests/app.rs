@@ -49,10 +49,16 @@ fn watcher_survives_invalid_rewrite() {
     )
     .expect("rewrite");
     let (cfg, warnings) = watcher.poll().expect("change").expect("load ok");
+    // E6（P1a）：已知键无效值仍回落默认；未知键（unknown_key = 1）按
+    // 「未知键保留」口径收进 unknown_keys 随写盘原样带出，不再是
+    // 「等于 default」——断言相应对齐保留语义。
     assert_eq!(
         cfg,
-        Config::default(),
-        "invalid values fall back to defaults"
+        Config {
+            unknown_keys: vec![("unknown_key".to_string(), "1".to_string())],
+            ..Config::default()
+        },
+        "invalid values fall back to defaults; unknown keys preserved verbatim (E6)"
     );
     assert_eq!(warnings.len(), 2);
     let _ = std::fs::remove_file(&path);
