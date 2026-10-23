@@ -258,7 +258,7 @@ pub const DEAD_SLOT_COOLDOWN_ROUNDS: u32 = 10;
 /// 每个通道一个实例（IO 线程按 ChannelState 持有），Instant 无关、纯计数。
 #[derive(Debug, Clone, Default)]
 pub struct DeadSlotScan {
-    /// 槽位号 → 连续「握手纯超时不应答」轮数。
+    /// 槽位号 → 连续「握手无设备应答」轮数（Timeout 或 NoDevice）。
     streaks: std::collections::HashMap<u8, u32>,
 }
 
@@ -276,11 +276,13 @@ impl DeadSlotScan {
         }
     }
 
-    /// 登记一轮该槽位的握手结果。`no_response_timeout` = 握手阶段纯
-    /// 超时不应答；其余一切结果（握手成功 / I/O 类 / 协议类）都视为
-    /// 「槽位活着」清零重计。
-    pub fn note_handshake(&mut self, slot: u8, no_response_timeout: bool) {
-        if no_response_timeout {
+    /// 登记一轮该槽位的握手结果。`no_device_response` = 握手阶段
+    /// 「无设备应答」——纯超时不应答（Timeout）或接收器应答该槽位
+    /// 无设备（NoDevice，E10 细分；喂入口径见
+    /// `NoResponseCause::feeds_dead_slot_cooldown`）；其余一切结果
+    /// （握手成功 / I/O 类 / 协议类）都视为「槽位活着」清零重计。
+    pub fn note_handshake(&mut self, slot: u8, no_device_response: bool) {
+        if no_device_response {
             let s = self.streaks.entry(slot).or_insert(0);
             *s = s.saturating_add(1);
         } else {
@@ -952,7 +954,7 @@ mod tests {
 
     use super::{DeadSlotScan, DEAD_SLOT_COOLDOWN_ROUNDS};
 
-    /// R-2 用例 1（冷却生效）：连续 K 轮纯超时不应答后进入冷却，
+    /// R-2 用例 1（冷却生效）：连续 K 轮握手无设备应答后进入冷却，
     /// 之后每 K 轮才放行 1 次扫描。
     /// 本用例序列与生产接线一一对应（BF-1）：tray 扫槽循环在
     /// `should_scan` 为 false 的跳过轮同样调用 `note_handshake(true)`

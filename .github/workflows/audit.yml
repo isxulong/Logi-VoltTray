@@ -52,7 +52,7 @@ jobs:
           gh label create ci-audit \
             --color D93F0B \
             --description "cargo audit 周检失败自动开单（N-2 / T-06）" \
-            --if-not-exists
+            --force
           num=$(gh issue list --state open --label ci-audit \
             --json number --limit 1 | jq -r '.[0].number // empty')
           if [ -n "$num" ]; then

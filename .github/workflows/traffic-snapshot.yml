@@ -182,7 +182,7 @@ jobs:
           if ! gh label create clock-review-due \
             --color D93F0B \
             --description "T-14/T-09 时钟到期评审（P0-2）" \
-            --if-not-exists; then
+            --force; then
             echo "[降级] issues:write 未启用（C-05：评审结论已登记，请维护者在 permissions 恢复 issues: write 后重跑本 workflow 或手动开单）——${due} 已到期"
             exit 0
           fi
