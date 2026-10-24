@@ -158,7 +158,7 @@ jobs:
           curl -fsSL --retry 3 -o "$zip" "https://github.com/jedisct1/minisign/releases/download/${ver}/minisign-${ver}-win64.zip"
           echo "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479  $zip" | sha256sum -c -
           mkdir -p "$dest"
-          tar -xf "$zip" -C "$dest"
+          tar --force-local -xf "$zip" -C "$dest"
           echo "$dest/minisign-win64/x86_64" >> "$GITHUB_PATH"
           minisign -v
 
