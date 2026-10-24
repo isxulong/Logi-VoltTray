@@ -416,6 +416,10 @@ mod imp {
         /// 本轮该槽位握手阶段「无设备应答」——纯超时不应答（Timeout）或
         /// 接收器应答该槽位无设备（NoDevice，E10 细分）；喂死槽冷却裁决。
         handshake_no_response: bool,
+        /// E22：本次注册把一台 Sleeping/Disconnected 设备捞回在线
+        ///（upsert 前设备处于休眠/断开态）；供调用方在唤醒信号窗口内
+        /// 补记 wake_recovery_via_reenum。
+        recovered_via_scan: bool,
     }
 
     /// 0xFF 负缓存门（E10 拆为纯函数以便回归测试逐行对照）：
@@ -435,6 +439,33 @@ mod imp {
     /// 物理身份时发生 rebind：返回值第二元携带 (old_id, new_id)，调用方
     /// 负责把 old_id 对应的槽位标记为别名（借用约束，见枚举循环）。
     ///
+    /// E22：唤醒恢复窗口——唤醒信号后该时长内经整轮重枚举把休眠/断开
+    /// 设备捞回注册，计为 wake_recovery_via_reenum（与唤醒探测直接命中
+    /// 的 wake_successes 区分，归因「信号来了但探测没抓住」的路径）。
+    const WAKE_RECOVERY_WINDOW: Duration = Duration::from_secs(30);
+
+    /// E22：本次扫槽捞回了休眠/断开设备且处于唤醒信号窗口内时，补记
+    /// 一次重枚举唤醒恢复（遥测 + bootlog，零新增设备查询）。
+    fn note_wake_recovery_via_reenum(
+        telemetry: &Telemetry,
+        recovered_via_scan: bool,
+        last_wake_signal_at: Option<Instant>,
+        id: &str,
+        now: Instant,
+    ) {
+        if recovered_via_scan
+            && last_wake_signal_at.is_some_and(|t| now.duration_since(t) <= WAKE_RECOVERY_WINDOW)
+        {
+            telemetry
+                .wake_recovery_via_reenum
+                .fetch_add(1, Ordering::Relaxed);
+            bootlog::note(&format!(
+                "wake recovery via re-enumeration: id={id} (registered within {}s of wake signal)",
+                WAKE_RECOVERY_WINDOW.as_secs()
+            ));
+        }
+    }
+
     /// R-1/R-2（v0.3.17）：`edge` 带出 try_slot 内部才能观测的两类事实——
     /// 0xFF 电量探测 error_response（写通道级负缓存）与握手无设备应答
     ///（Timeout 或 NoDevice，喂死槽冷却裁决）；借用约束下经 &mut 带出，
@@ -626,6 +657,12 @@ mod imp {
                 .entries()
                 .iter()
                 .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping);
+            // E22：注册前处于休眠/断开态 = 本次扫槽把设备捞回在线，
+            // 供调用方在唤醒信号窗口内补记 wake_recovery_via_reenum。
+            edge.recovered_via_scan = was_sleeping
+                || c.entries()
+                    .iter()
+                    .any(|e| e.device.id == id && e.device.state == DeviceState::Disconnected);
             let (pct, chg) = (reading.percent, reading.charging);
             c.record_success(&id, reading, now);
             let pk = c
@@ -789,6 +826,10 @@ mod imp {
         pub(crate) frames: Arc<FrameStats>,
         pub(crate) wake_arm_all_fills: AtomicU64,
         pub(crate) wake_successes: AtomicU64,
+        /// E22：唤醒信号窗口内经整轮重枚举恢复注册的槽位数——与
+        /// wake_successes（唤醒探测直接命中）区分，归因「信号来了但
+        /// 归因/探测没抓住、靠重枚举捞回」的恢复路径。
+        pub(crate) wake_recovery_via_reenum: AtomicU64,
         pub(crate) wake_miss_no_path: AtomicU64,
         pub(crate) wake_miss_zero_match: AtomicU64,
         pub(crate) wake_miss_no_fingerprint: AtomicU64,
@@ -801,6 +842,7 @@ mod imp {
                 frames: Arc::new(FrameStats::new()),
                 wake_arm_all_fills: AtomicU64::new(0),
                 wake_successes: AtomicU64::new(0),
+                wake_recovery_via_reenum: AtomicU64::new(0),
                 wake_miss_no_path: AtomicU64::new(0),
                 wake_miss_zero_match: AtomicU64::new(0),
                 wake_miss_no_fingerprint: AtomicU64::new(0),
@@ -868,6 +910,9 @@ mod imp {
         shutdown_ack: mpsc::Sender<()>,
     ) {
         let mut channels: Vec<ChannelState> = Vec::new();
+        // E22：最近一次唤醒信号时刻——窗口内经整轮重枚举捞回休眠/断开
+        // 设备时补记 wake_recovery_via_reenum（遥测，见 try_slot 调用点）。
+        let mut last_wake_signal_at: Option<Instant> = None;
         let mut watcher = ConfigWatcher::new(cfg_path);
         // v0.3.6（D-62）：热重载告警去重——同一组迁移告警只上报一次。
         let mut last_reload_warnings: Vec<String> = Vec::new();
@@ -1223,6 +1268,15 @@ mod imp {
                                         .note_handshake(slot, edge.handshake_no_response);
                                     match outcome {
                                         Ok((s, rebound)) => {
+                                            // E22：唤醒信号窗口内重枚举捞回
+                                            // 休眠/断开设备 → 补记遥测。
+                                            note_wake_recovery_via_reenum(
+                                                &telemetry,
+                                                edge.recovered_via_scan,
+                                                last_wake_signal_at,
+                                                &s.id,
+                                                Instant::now(),
+                                            );
                                             // WP-A：扫槽成功读数写入持久化
                                             // （change-driven dirty，节流在
                                             // store 内；虚拟/冲突键内部拒绝）。
@@ -1365,6 +1419,15 @@ mod imp {
                                 ff_battery_probe_failed = edge.ff_battery_probe_failed;
                                 dead_slots.note_handshake(slot, edge.handshake_no_response);
                                 if let Ok((s, rebound)) = outcome {
+                                    // E22：唤醒信号窗口内重枚举捞回
+                                    // 休眠/断开设备 → 补记遥测。
+                                    note_wake_recovery_via_reenum(
+                                        &telemetry,
+                                        edge.recovered_via_scan,
+                                        last_wake_signal_at,
+                                        &s.id,
+                                        Instant::now(),
+                                    );
                                     slots.push(s);
                                     if let Some((old_id, _)) = rebound {
                                         pending_aliases.push(old_id);
@@ -1707,13 +1770,22 @@ mod imp {
                             Err(reason) => match reason {
                                 // 查询超时 = 疑似休眠：连击 2 次暂停轮询（不注销、
                                 // 不重试——对休眠中的鼠标发查询才是真费电，D-33）。
+                                // E22：HID++1 0x8F/0x08（UNKNOWN_DEVICE，接收器
+                                // 应答但槽位无设备）语义等价超时，并入同一休眠路径
+                                // ——通道活性仍记 Responded（接收器回了字节）。
+                                // 仅限已注册槽位的轮询路径；扫描期 0x08 的 E10 死槽
+                                // 冷却映射不受影响（互斥阶段，见 battery.rs）。
                                 // D-67：通道级判死改由轮末 ChannelLiveness 按
                                 // 「整轮零应答」裁决，此处只分类登记结果。
-                                UnknownReason::QueryTimeout => {
-                                    outcomes.push(SlotOutcome::Timeout);
+                                UnknownReason::QueryTimeout | UnknownReason::NoDeviceAtSlot => {
+                                    outcomes.push(match reason {
+                                        UnknownReason::NoDeviceAtSlot => SlotOutcome::Responded,
+                                        _ => SlotOutcome::Timeout,
+                                    });
                                     bootlog::note(&format!(
-                                        "battery query failed id={} reason=query_timeout (sleep path)",
-                                        s.id
+                                        "battery query failed id={} reason={} (sleep path)",
+                                        s.id,
+                                        reason.code()
                                     ));
                                     if core.record_timeout(&s.id, now)
                                         == TimeoutOutcome::EnteredSleep
@@ -2029,6 +2101,8 @@ mod imp {
                     // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
                     // 恢复延迟取决于用户动鼠标的那一刻，而不是轮询周期。
                     Ok(IoCmd::WakeSignal(raw_path)) => {
+                        // E22：记录唤醒信号时刻，供重枚举唤醒恢复窗口判定。
+                        last_wake_signal_at = Some(Instant::now());
                         // v0.3.11（F5）：0 注册槽位时（重启后鼠标休眠、槽位
                         // 空，未注册设备收不到唤醒探测资格）——唤醒信号 =
                         // Raw Input 已观测到罗技鼠标活动，设备已被用户物理
@@ -3370,10 +3444,10 @@ mod imp {
             Some(d) => (d.percent, d.gray),
             None => (None, false),
         };
-        // D-33：休眠 = 灰显但保留最后已知电量数字。gray 只作用于颜色档；
-        // 若把文本也打成 "--"，用户会误以为「未读取」——正是本次要修的症状。
-        let sleeping = show.is_some_and(|d| d.state == "sleeping");
-        let text = icon_text(percent, gray && !sleeping);
+        // D-33/E22：休眠/过期 = 灰显但保留最后已知电量数字。icon_text 内部
+        // 已按 percent 有无区分（有读数渲染数字、无读数才 "--"），gray 只
+        // 作用于颜色档与 tooltip 语义，不再把文本打成 "--"。
+        let text = icon_text(percent, gray);
         // v0.3.3 #4：分档模式按电量百分比映射档位色（阈值含该值归上一档）；
         // 灰显（未知/休眠离线）仍走灰色档。
         let color = match percent {
@@ -3393,6 +3467,12 @@ mod imp {
             Some(d) if d.state == "sleeping" => {
                 format!(
                     "LogiVoltTray — {} {}（休眠中 · 最后已知电量）",
+                    d.name, text
+                )
+            }
+            Some(d) if d.gray && d.percent.is_some() => {
+                format!(
+                    "LogiVoltTray — {} {}（最后已知电量 · 显示已过期）",
                     d.name, text
                 )
             }

@@ -5,9 +5,12 @@
 //! 与接收器 HID 通道路径共享 VID/PID 与父实例前缀，据此把唤醒信号
 //! 归因到通道，只给该通道上的休眠设备装填探测资格。
 //!
-//! 匹配规则（保守）：VID/PID 对 + 实例段前两个 `&` 分量全部相等才
-//! 算同通道；**唯一匹配才返回**——0 个或 ≥2 个候选命中一律 None
-//! （调用方回退全量装填 + miss 计数，「漏唤醒的损失大于多探测一次」）。
+//! 匹配规则（保守 + E22 单候选回退）：VID/PID 对 + 实例段前两个 `&`
+//! 分量全部相等才算同通道；**唯一匹配才返回**——≥2 个候选命中一律
+//! None（调用方回退全量装填 + miss 计数，「漏唤醒的损失大于多探测
+//! 一次」）。E22 回退：完整指纹零匹配时，若候选集**仅 1 个通道**且
+//! VID/PID 级一致即判 Hit——单接收器机器上实例前缀差异（换 USB 口、
+//! 拓扑变化）不应让归因失效；多候选时维持实例前缀要求，不回退。
 //!
 //! 适用边界（v3 A-3 写明）：本机制面向接收器多通道场景治本；蓝牙 /
 //! 有线直连（BTHHID / 直连 HID）的设备路径系统性匹配不上接收器
@@ -57,17 +60,10 @@ fn channel_fingerprint(path: &str) -> Option<(String, String)> {
 /// 调用方定义（槽位下标 / 通道号），返回值即该标识在列表中的下标。
 /// 唯一指纹匹配返回 `Some(下标)`；零匹配或多匹配（歧义）返回 None。
 pub fn channel_for_raw_path(raw_path: &str, candidates: &[(String, String)]) -> Option<usize> {
-    let fp = channel_fingerprint(raw_path)?;
-    let mut hit = None;
-    for (i, (_, hid_path)) in candidates.iter().enumerate() {
-        if channel_fingerprint(hid_path).as_ref() == Some(&fp) {
-            if hit.is_some() {
-                return None; // 歧义：多个候选同指纹，不可归因
-            }
-            hit = Some(i);
-        }
+    match channel_for_raw_path_classified(raw_path, candidates) {
+        ChannelMatch::Hit(i) => Some(i),
+        _ => None,
     }
-    hit
 }
 
 /// `channel_for_raw_path` 的分类版本（BF-3 / R-11）：把「零匹配」与
@@ -106,7 +102,21 @@ pub fn channel_for_raw_path_classified(
     }
     match hit {
         Some(i) => ChannelMatch::Hit(i),
-        None => ChannelMatch::ZeroMatch,
+        None => {
+            // E22 回退：完整指纹零匹配时，候选集仅 1 个通道则放宽到
+            // VID/PID 级匹配——单接收器机器上实例前缀差异（换 USB 口 /
+            // 拓扑变化）不应让唤醒归因失效；该通道本就是全量装填回退
+            // 的唯一受益方，判 Hit 只改善归因与计数、零装填行为变化。
+            // 多候选维持实例前缀要求（VID/PID 级无法区分同型号接收器）。
+            if candidates.len() == 1 {
+                if let Some(cfp) = channel_fingerprint(&candidates[0].1) {
+                    if cfp.0 == fp.0 {
+                        return ChannelMatch::Hit(0);
+                    }
+                }
+            }
+            ChannelMatch::ZeroMatch
+        }
     }
 }
 
@@ -141,11 +151,48 @@ mod tests {
     }
 
     #[test]
-    fn different_receiver_instance_does_not_match() {
-        // 两台同型号接收器：VID/PID 相同但实例前缀不同 → 不误判。
+    fn single_candidate_vid_pid_fallback_hits() {
+        // E22 回退：候选集仅 1 个通道时，VID/PID 相同但实例前缀不同
+        //（换 USB 口 / 拓扑变化）→ VID/PID 级匹配判 Hit。
         let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
         let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        assert_eq!(channel_for_raw_path(raw, &candidates), Some(0));
+        assert_eq!(
+            channel_for_raw_path_classified(raw, &candidates),
+            ChannelMatch::Hit(0)
+        );
+    }
+
+    #[test]
+    fn single_candidate_vid_pid_mismatch_still_zero_match() {
+        // E22 回退边界：单候选但 VID/PID 都不同 → 仍 ZeroMatch，不误判。
+        let raw = r"\\?\HID#VID_046D&PID_9999&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
         assert_eq!(channel_for_raw_path(raw, &candidates), None);
+        assert_eq!(
+            channel_for_raw_path_classified(raw, &candidates),
+            ChannelMatch::ZeroMatch
+        );
+    }
+
+    #[test]
+    fn multi_candidate_keeps_instance_requirement() {
+        // E22 回退边界：多候选（同型号两台接收器）时实例前缀不同 →
+        // 不回退，维持 ZeroMatch（VID/PID 级无法区分两台同型号接收器）。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("u1".to_string(), UNIFYING_CHAN.to_string()),
+            (
+                "u2".to_string(),
+                r"\\?\HID#VID_046D&PID_C52B#8&4444aaaa&0&0000#{4d1e55b2-f16e-11cf-88cb-001111000030}"
+                    .to_string(),
+            ),
+        ];
+        assert_eq!(channel_for_raw_path(raw, &candidates), None);
+        assert_eq!(
+            channel_for_raw_path_classified(raw, &candidates),
+            ChannelMatch::ZeroMatch
+        );
     }
 
     #[test]
@@ -213,8 +260,8 @@ mod tests {
     #[test]
     fn classified_splits_zero_match_from_ambiguous() {
         // BF-3 核心诉求：零匹配与歧义不再混为一个 None。
-        // 零匹配：另一台同型号接收器（实例前缀不同）。
-        let zero = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        // 零匹配（E22 后口径）：VID/PID 也不匹配的设备路径。
+        let zero = r"\\?\HID#VID_046D&PID_9999&MI_01#7&DEADBEEF&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
         let one = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
         assert_eq!(
             channel_for_raw_path_classified(zero, &one),

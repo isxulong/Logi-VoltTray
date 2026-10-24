@@ -301,6 +301,7 @@ pub(crate) fn export_diag(
         wake_miss_zero_match: telemetry.wake_miss_zero_match.load(Ordering::Relaxed),
         wake_miss_no_fingerprint: telemetry.wake_miss_no_fingerprint.load(Ordering::Relaxed),
         wake_miss_ambiguous: telemetry.wake_miss_ambiguous.load(Ordering::Relaxed),
+        wake_recovery_via_reenum: telemetry.wake_recovery_via_reenum.load(Ordering::Relaxed),
         exported_at,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }

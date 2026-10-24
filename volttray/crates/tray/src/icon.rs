@@ -183,14 +183,20 @@ pub fn font_rgb(
 }
 
 /// 按百分比取图标文本（评审 4.1：两位封顶，100% 显示"满"）。
+/// D-33/E22：有最后已知电量时即使灰显（休眠/显示过期）也渲染该数字，
+/// 由调用方配合灰色配色与 tooltip 语义提示「最后已知电量」；
+/// 只有从未拿到读数（None）时才显示占位符。
 pub fn icon_text(percent: Option<u8>, gray: bool) -> String {
-    if gray {
-        return "--".to_string();
-    }
     match percent {
         Some(100) => "满".to_string(),
         Some(p) => format!("{}", p.min(99)),
-        None => "?".to_string(),
+        None => {
+            if gray {
+                "--".to_string()
+            } else {
+                "?".to_string()
+            }
+        }
     }
 }
 
@@ -861,7 +867,11 @@ mod tests {
         assert_eq!(icon_text(Some(99), false), "99");
         assert_eq!(icon_text(Some(7), false), "7");
         assert_eq!(icon_text(None, false), "?");
-        assert_eq!(icon_text(Some(40), true), "--");
+        // D-33/E22：灰显（休眠/过期）且有最后已知电量 → 渲染数字而非 "--"。
+        assert_eq!(icon_text(Some(40), true), "40");
+        assert_eq!(icon_text(Some(100), true), "满");
+        // 灰显但从未拿到读数 → 仍显示 "--" 占位。
+        assert_eq!(icon_text(None, true), "--");
     }
 
     #[test]

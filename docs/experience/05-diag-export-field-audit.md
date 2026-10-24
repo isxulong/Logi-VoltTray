@@ -17,7 +17,7 @@
 
 ## 二、DiagExport 逐字段审计
 
-结构体定义 `diag_export.rs` L105 起。18 个序列化字段（含 `skip_serializing_if` 可选字段）：
+结构体定义 `diag_export.rs` L105 起。19 个序列化字段（含 `skip_serializing_if` 可选字段；E22 新增 `wake_recovery_via_reenum`）：
 
 | 字段 | 内容来源 | 泄露面评估 | redact 覆盖 |
 | --- | --- | --- | --- |
@@ -31,7 +31,7 @@
 | `channel_map_miss` / `frame_tx` / `frame_rx` | 原子计数器 | 纯数值 | 无需覆盖 |
 | `avg_tx_interval_ms`（skip） | 帧间隔均值 | 纯数值 | 无需覆盖 |
 | `feature_index_tx` / `feature_index_rx` | `FrameStats`：键为 `format!("0x{f:02X}")`（HID++ 帧第 3 字节格式化，`main.rs` L243/L250） | 键是协议功能索引号，非用户数据 | 无需覆盖 |
-| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_zero_match` / `wake_miss_no_fingerprint` / `wake_miss_ambiguous` | 原子计数器 | 纯数值 | 无需覆盖 |
+| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_zero_match` / `wake_miss_no_fingerprint` / `wake_miss_ambiguous` / `wake_recovery_via_reenum`（E22 新增：唤醒信号窗口内经整轮重枚举恢复注册计数） | 原子计数器 | 纯数值 | 无需覆盖 |
 | `exported_at` | unix 秒 | 时间戳，无个人标识 | 无需覆盖 |
 | `app_version` | `CARGO_PKG_VERSION` | 版本号 | 无需覆盖 |
 
@@ -84,9 +84,9 @@ BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{0000
 
 `volttray/crates/app/src/diag_export.rs` 测试模块新增 `t02b_all_fields_enumerated_and_no_user_path_leak`：
 
-1. 构造全 18 字段填充的 `DiagExport`，所有文本型字段（`devices` 事件消息、`devices_reason`、`log_tail` 三子字段、`ChannelEnumResult.tag`/`error`、`EnumSnapshot.error`、`last_enum_reason`）埋入同一假用户名路径与设备名；
+1. 构造全 19 字段填充的 `DiagExport`，所有文本型字段（`devices` 事件消息、`devices_reason`、`log_tail` 三子字段、`ChannelEnumResult.tag`/`error`、`EnumSnapshot.error`、`last_enum_reason`）埋入同一假用户名路径与设备名；
 2. `to_json_string_with(&device_names)` 后断言：全文不含假用户名、不含设备名、含 `<USER>`；
-3. **枚举字段名**：解析输出 JSON 顶层键集合，与本表 18 字段清单严格相等——结构体新增/删除字段时测试失败，强制同步本文档（「使审计结论不随依赖升级漂移」的实施形态）；
+3. **枚举字段名**：解析输出 JSON 顶层键集合，与本表 19 字段清单严格相等——结构体新增/删除字段时测试失败，强制同步本文档（「使审计结论不随依赖升级漂移」的实施形态）；
 4. 锁定 `tag` 维持现状结论：断言输出仍含 tag 原文形态（`7&31a4c5e6&0&0000`），防止未来误加规则静默破坏排障信息。
 
 真机导出样例复检：**未执行**（本审计基于源码实证，真机导出行为未验证，见 commit 的 Not-Verified trailer）。

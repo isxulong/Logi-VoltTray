@@ -19,7 +19,7 @@
 //! 全部失败返回 `Err(UnknownReason)`，诊断流记录 BatteryUnknown 事件（可定位）。
 
 use volttray_protocol::commands::{feature_ids, QueryCommand};
-use volttray_protocol::error::{DeviceErrorCode, HidppError};
+use volttray_protocol::error::{DeviceErrorCode, ErrorFamily, HidppError};
 use volttray_protocol::voltage;
 use volttray_protocol::FeatureTable;
 use volttray_transport::channel::{HidChannel, IoError};
@@ -79,6 +79,10 @@ pub enum UnknownReason {
     NoBatteryFeatures,
     /// 请求超时（设备休眠 / 离线 / 不应答）。
     QueryTimeout,
+    /// E22：HID++1 0x8F/0x08（UNKNOWN_DEVICE）——接收器应答但报告槽位上
+    /// 无设备应答，真机上对应设备休眠/离线；语义等价于超时，走休眠路径。
+    /// 仅限 HID++1 族：HID++2 0x08 是 Busy（设备在线繁忙），不落入此臂。
+    NoDeviceAtSlot,
     /// 设备回了错误帧（带错误码）。
     ErrorResponse,
     /// 应答帧格式无法解析。
@@ -98,6 +102,7 @@ impl UnknownReason {
         match self {
             Self::NoBatteryFeatures => "no_battery_features",
             Self::QueryTimeout => "query_timeout",
+            Self::NoDeviceAtSlot => "no_device_at_slot",
             Self::ErrorResponse => "error_response",
             Self::MalformedResponse => "malformed_response",
             Self::MappingFailure => "mapping_failure",
@@ -419,6 +424,17 @@ fn classify_transport_error(err: &TransportError) -> (UnknownReason, String) {
             (UnknownReason::DeviceGone, e.to_string())
         }
         TransportError::Io(e) => (UnknownReason::IoFailure, e.to_string()),
+        // E22：HID++1 0x8F/0x08 = UNKNOWN_DEVICE（槽位休眠/离线），语义等价
+        // 超时 → NoDeviceAtSlot 走休眠路径；必须按 family 区分——HID++2
+        // 0x08 = Busy（在线繁忙），仍归 ErrorResponse，不得误判为休眠。
+        TransportError::Protocol(HidppError::Device {
+            family: ErrorFamily::Hidpp1,
+            code,
+            ..
+        }) if code.code() == 0x08 => (
+            UnknownReason::NoDeviceAtSlot,
+            "device error ERR_BUSY (hidpp1 0x08 = UNKNOWN_DEVICE: slot asleep/offline)".into(),
+        ),
         TransportError::Protocol(HidppError::Device { code, .. }) => (
             UnknownReason::ErrorResponse,
             format!("device error {}", code.name()),
@@ -453,6 +469,35 @@ mod tests {
         // 未知名称（未来版本新增 / 手改文件）→ None，不 panic。
         assert_eq!(BatterySource::from_name("future_source"), None);
         assert_eq!(BatterySource::from_name(""), None);
+    }
+
+    #[test]
+    fn hidpp1_unknown_device_maps_to_no_device_at_slot() {
+        // E22：HID++1 0x8F/0x08 = UNKNOWN_DEVICE（槽位休眠/离线）→ 休眠路径。
+        let err = TransportError::Protocol(HidppError::Device {
+            device_index: 0x01,
+            family: ErrorFamily::Hidpp1,
+            feature_index: 0x0D,
+            code: DeviceErrorCode::Busy, // 0x08，名称按 2.0 基线，语义看 family
+        });
+        let (reason, _) = classify_transport_error(&err);
+        assert_eq!(reason, UnknownReason::NoDeviceAtSlot);
+        // 不触发策略回退（与 Busy 一致：直接终止本轮查询）。
+        assert!(!should_fallback(&err));
+    }
+
+    #[test]
+    fn hidpp2_busy_stays_error_response() {
+        // E22 安全核对：HID++2 0xFF/0x08 = Busy（在线繁忙）→ 不得误判休眠。
+        let err = TransportError::Protocol(HidppError::Device {
+            device_index: 0x01,
+            family: ErrorFamily::Hidpp2,
+            feature_index: 0x07,
+            code: DeviceErrorCode::Busy,
+        });
+        let (reason, _) = classify_transport_error(&err);
+        assert_eq!(reason, UnknownReason::ErrorResponse);
+        assert!(!should_fallback(&err));
     }
 
     #[test]

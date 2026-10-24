@@ -154,6 +154,10 @@ pub struct DiagExport {
     pub wake_miss_no_fingerprint: u64,
     /// attribution miss 子分类：多候选同指纹无法裁决（ambiguous）。
     pub wake_miss_ambiguous: u64,
+    /// E22：唤醒信号窗口内经整轮重枚举恢复注册的累计数——与
+    /// wake_successes（唤醒探测直接命中）区分，归因「信号来了但
+    /// 归因/探测没抓住、靠重枚举捞回」的恢复路径。
+    pub wake_recovery_via_reenum: u64,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,
     /// 导出程序版本（CARGO_PKG_VERSION）。
@@ -288,6 +292,7 @@ mod tests {
             wake_miss_zero_match: 0,
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
+            wake_recovery_via_reenum: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
         }
@@ -432,6 +437,7 @@ mod tests {
             wake_miss_zero_match: 0,
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
+            wake_recovery_via_reenum: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
         }
@@ -485,6 +491,7 @@ mod tests {
             wake_miss_zero_match: 0,
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
+            wake_recovery_via_reenum: 0,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -521,6 +528,7 @@ mod tests {
             wake_miss_zero_match: 5,
             wake_miss_no_fingerprint: 2,
             wake_miss_ambiguous: 1,
+            wake_recovery_via_reenum: 3,
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -537,6 +545,7 @@ mod tests {
         assert_eq!(v["wake_miss_zero_match"], 5);
         assert_eq!(v["wake_miss_no_fingerprint"], 2);
         assert_eq!(v["wake_miss_ambiguous"], 1);
+        assert_eq!(v["wake_recovery_via_reenum"], 3);
         // avg_tx_interval_ms = None → 键省略（skip_serializing_if）。
         let v2: serde_json::Value =
             serde_json::from_str(&bundle_json(&missing_log("avg-none"))).unwrap();
@@ -606,6 +615,7 @@ mod tests {
             wake_miss_zero_match: 0,
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
+            wake_recovery_via_reenum: 0,
             exported_at: 1_760_000_000,
             app_version: "0.0.0-audit".into(),
         };
@@ -642,6 +652,7 @@ mod tests {
             "wake_miss_no_fingerprint",
             "wake_miss_no_path",
             "wake_miss_zero_match",
+            "wake_recovery_via_reenum",
             "wake_successes",
         ]
         .into();
