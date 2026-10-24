@@ -41,13 +41,56 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
-## v0.3.23（未发布，已登记待办）
+## v0.3.23
 
-- **登记来源**：PR #15 质检复核 P2 三项，经评估移入下一版本，本期不改（本期仅修 P0-1／P1-1，见 v0.3.22 节与 D-88 修订）。
+红蓝对抗整改落地批（改进项 E1–E24 逐批落地）＋真机休眠反馈三项修复＋Release minisign 签名启用。本版无配置默认值变化、无新增迁移标记，升级零行为突变。
+
+### 用户可见变化
+
+1. **真机休眠反馈三项修复（E22）**：① 休眠期间托盘灰显最后已知电量的观感修复——有最后已知电量时灰显也渲染数字（仅从未读到数才显示「--」），tooltip 标注「休眠中 · 最后已知电量」；② HID++1 设备 0x8F/0x08（UNKNOWN_DEVICE）应答改判休眠路径，轮询失败并入休眠计数（连击 2 次进 Sleeping、零查询），不再被当成普通故障反复重查；HID++2 的 0x08=Busy 仍归错误应答、不误伤在线繁忙设备；③ 唤醒归因增加一级回退——唤醒信号后完整指纹零匹配时，若候选仅 1 个通道则 VID/PID 级匹配即判命中（多候选维持实例前缀要求，零装填行为无变化）；新增 `wake_recovery_via_reenum` 遥测计数（30 秒窗口内经整轮重枚举捞回休眠/断开设备时补记，与探测直接命中区分），诊断导出字段同步（05 审计文档 18→19 字段）。
+2. **接收器幽灵槽与死槽修复（E10/E11，D-90）**：修复接收器 0x01 幽灵槽应答导致的每轮重复告警——0x01 改判 HID++1 幽灵槽、结构性失败真实进 0xFF 负缓存（充电/离线误报不再每轮重报）；0x08「槽位无设备」改归 NoDevice 并喂入死槽冷却，判死槽位冷却期内不再全量重扫；唤醒 miss 计数拆分为 `wake_miss_zero_match` / `wake_miss_no_fingerprint`。
+3. **诊断导出扩容（E24）**：诊断事件容量 256→2048 条、附带日志尾 200→4096 行——按真机实测产生速率（约 16.3 事件/分钟、38.3 行/分钟）约合 2 小时 / 1.8 小时覆盖，环满常驻内存增量约 1.5MB，无新增磁盘占用。报障时导出的文件能覆盖更长的事发窗口。
+4. **导出有界与安全兜底**：统计导出 CSV 主产物接入原子写＋临时名唯一化（E5）；CSV 单元格公式注入兜底收窄为 +/- 两前缀（E12）；设置窗口字体名写入 TOML 时转义引号与反斜杠（E13，含特殊字符的字体名不再写坏配置文件）。
+5. **配置未知键保留（E6）**：升降级往返不再丢键——保存配置时文件里的未知键原样保留（旧版保存会丢弃它不认识的键）。
+
+### 工程与质量（开发者向摘要）
+
+- **质量门禁修复（E1/E2/E4）**：CI ubuntu job 加源码文本纯净性断言（坏编码字节回归即红）；README 中英下载锚点从钉死版本号改为 `/releases/latest`，发布契约新增「锚点不得钉版本号」断言防回归；nightly 自动开单闭环修复——`gh label create --if-not-exists` 哑弹改 `--force`（该 flag 不存在、runner 必败＝此前失败静默根因），FAILED_STEP 改 API 动态取，开单步失效自报，advisory 转红即开单。
+- **fuzz 扩面（E16）**：battery / stats / config 三条解析链新增 fuzz 目标（任意输入不得 panic＋解析不变量钉板），挂 PR 级阻断烟测（三目标各 100 秒，失败即红）。
+- **结构化脱敏注册表（E17）**：诊断导出脱敏改为结构化注册表＋整值替换优先＋字段级 diff 审计。
+- **Release minisign 签名链（E18）**：release.yml 新增签名三步——未配置密钥时 fail-open 跳过照常发布；配置后签名产出 `.minisig` 并立即用公钥自验（fail-closed，验不过即发布失败），并断言仓库根 `minisign.pub` 存在；本版为签名启用首版（公钥随启用批次入库），另加 `workflow_dispatch` dry_run 演练护栏（演练不产生任何真实 tag / Release）。
+- **发布对账时钟结构化（E19）**：时钟字段迁出为 `docs/experience/reconciliation-clocks.yaml`（机器可读），traffic-snapshot / nightly 改读 YAML；decisions.md 只追加冻结（CI 新增 decisions-append-only 门禁，删行即红）。
+- **微基准进 CI（E20）**：protocol 编解码 3 用例＋app 脱敏 / stats JSONL 3 用例 criterion 微基准，新增 microbench job——首版只跑数不设阈值门禁（阈值待基线积累后另行评审，见「已知项」）。
+- **结构性整改**：main.rs 叶子模块拆分（persist/export 先行，全局静态收编，E8）；Python 应用层裁减（删五个应用层模块＋四个专属测试文件，E7）；全仓 97 处 unsafe 逐块 SAFETY 注释＋计数台账（E9，见 docs/experience/07）；single.rs 命名激活事件死代码删除（E14）；设置窗口文案拼写纯逻辑抽离到 app crate（E23 两步）。
+- **测试基线**：全 workspace 单测 361 通过（E22 提交口径；E16 口径 381 含 fuzz 宿主 crate）；CI ci-gate 六 job（fmt / clippy -D warnings / 全量 test / 协议冻结 / 构建 / fuzz-smoke）＋ microbench 全绿。
+
+### issue #16 根因标注
+
+本版修复并关闭性处置 issue #16（nightly fuzz 失败自动开单）。双根因：① nightly 的 fuzz-smoke 缺 libudev 安装步——E16 扩面给 fuzz crate 加了 device/app 依赖，包级依赖对全部 bin 生效，frame_fuzz 构建开始编译 hidapi（需系统库 libudev），nightly 此前只跑 protocol 未装即构建失败；② 自动开单模板的 run URL 用了不存在的上下文属性 `github.runId`（正确为 `github.run_id`），表达式求空致 issue 正文 run 链接为空。两者均已修复（nightly.yml 补装 libudev-dev/libusb；nightly.yml 3 处＋audit.yml 1 处全量改 `github.run_id`）并复跑验证（同 commit 的 ci.yml fuzz-smoke 全绿，证明仅缺系统依赖步；本版发版门禁的 fuzz-smoke job 实跑全绿）。注：因权限边界未能直接在 issue 下回评，根因按既定处置写进本说明。
+
+### 已知项声明
+
+- **retier 尾阈值 = 99 潜伏 panic**：分档阈值末档已为 99 时继续增档，原分支 `clamp(lo+1, 99)` 因 min(100) > max(99) panic——该缺陷为历史既有行为，本版在纯逻辑抽离（E23）时以保持逐字语义为原则**钉住不修复**（`#[should_panic]` 测试锚定：`retier_thresholds_pins_preexisting_clamp_panic_at_trailing_99`），修复排下一批。
+- **微基准阈值门禁未设**：microbench job 首版只跑数不设回归阈值（E20 终审口径），阈值门禁待基线积累后另行评审。
+- **真机复验清单（待真机验证，CI 与单测已绿）**：① 休眠灰显观感——休眠设备托盘灰显最后已知电量数字、tooltip 标「休眠中」；② 唤醒恢复计数——唤醒后经重枚举恢复的设备计入 `wake_recovery_via_reenum`（诊断导出可见）；③ 繁忙设备不误判——HID++2 设备 0x08=Busy 应答不进入休眠路径；④ 解绑滞留表现——设备解绑 / 接收器拔下后的状态迁移与菜单表现。如遇与描述不符，请用「导出诊断信息…」导出诊断文件反馈。
+
+### 下载与安装注意
+
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（已决策不采购代码签名证书，拦截为已接受状态）。自本版起 Release 附 `volttray-tray.exe.minisig` 签名文件，可选验签：`minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig`（公钥 `minisign.pub` 在仓库根目录）；sha256 核验照旧：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`。升级注意：退出旧版后再启动新版即可。
+
+### English Summary
+
+v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24) and enables minisign release signing. User-facing: three fixes from physical-machine sleep feedback — sleeping devices now show the last known battery grayed out with the number rendered (instead of "--"), HID++1 0x8F/0x08 replies are judged as sleep rather than generic failures, and wake attribution gains a single-candidate VID/PID fallback plus a new wake-recovery-via-reenumeration telemetry counter; receiver ghost-slot (0x01) and dead-slot (0x08) handling fixed so charge/offline false alarms no longer repeat every polling round; diagnostics export capacity raised (256→2048 events, 200→4096 log tail lines, about 2 h of coverage); config saves now preserve unknown keys; CSV export hardened (atomic writes, formula-injection guard); font names with quotes/backslashes no longer corrupt config.toml. Engineering: fuzz targets for battery/stats/config parsers with a blocking PR-level smoke job; structured redaction registry with field-level diff audit; release signing chain (fail-open when the key is absent, fail-closed self-verification when present — this is the first signed release); reconciliation clocks migrated to structured YAML; criterion micro-benchmarks in CI (no threshold gate yet, pending baseline accumulation). Known issues: a pre-existing latent panic when adding a tier while the trailing threshold is already 99 is pinned by a `#[should_panic]` test and scheduled for the next batch (unchanged legacy behavior). Note: the EXE is not Authenticode-signed, so Windows SmartScreen may warn on first run — choose "More info" → "Run anyway"; verify downloads with the shipped `.minisig` (public key `minisign.pub` at the repo root) or the `.sha256.txt` checksum.
+
+## 后续版本（已登记待办，自 v0.3.23 窗口移交）
+
+- **登记来源**：PR #15 质检复核 P2 三项，经评估移入后续版本（v0.3.23 窗口仅修 P0-1／P1-1 与红蓝对抗整改批，见 v0.3.22 / v0.3.23 节）。
 - ① roundtrip 派生字段覆盖（质检 P2：往返测试对派生字段断言不足）。
 - ② Win32 侧覆盖（质检 P2：single/bootlog 等 Windows 专属模块测试覆盖待补）。
 - ③ README 热重载口径（质检 P2：README 对「保存后重启生效」的热重载表述口径待校正）。
-- **E10 行为层修复（D-90）**：① 修复接收器幽灵槽（0x01 应答）误报每轮重复告警——0x01 改判 `Hidpp1Ghost`，结构性失败真实进 0xFF 负缓存（充电/离线误报不再每轮重报）；真实 1.0 设备注册与 AF-6 缓存旁路语义不变。② 修复死槽冷却永不喂入——0x08「槽位无设备」改归 `NoResponseCause::NoDevice` 并喂入死槽冷却，判死槽位冷却期内不再全量重扫；不喂句柄死亡裁决。③ E11 唤醒归因 miss 计数拆分（`wake_miss_zero_match` / `wake_miss_no_fingerprint`）；3020/3020 全 miss 根因裁决待 U-1 真实休眠-唤醒导出数据。
+- **retier 尾阈值 = 99 潜伏 panic 修复**（v0.3.23 已知项，已由 `#[should_panic]` 测试锚定，见 v0.3.23 节）。
+- **微基准阈值门禁**（v0.3.23 已知项，待基线积累后评审，见 v0.3.23 节）。
+- （E10 行为层修复三项已于 v0.3.23 落地，见 v0.3.23 节第 2 条，本条销项。）
 
 ## v0.3.22
 

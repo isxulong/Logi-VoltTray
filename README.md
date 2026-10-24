@@ -22,11 +22,12 @@ Get-FileHash .\volttray-tray.exe -Algorithm SHA256
 # 输出的 Hash 应与同目录 .sha256.txt 文件内首列一致
 ```
 
-**签名验证（启用后生效）**：发布流水线已具备 minisign 签名能力，但当前版本尚未启用签名（未配置签名密钥，Release 仅附 sha256 校验文件）。启用后 Release 将额外附带 `volttray-tray.exe.minisig` 签名文件，届时用 minisign 验签：
+**签名验证（v0.3.23 起启用）**：自 v0.3.23 起，每个 Release 除 sha256 校验文件外额外附带 `volttray-tray.exe.minisig` 签名文件（minisign 签名；发布流水线签名后立即用公钥自验，验不过即发布失败）。公钥为仓库根目录的 `minisign.pub`，下载 EXE 与 .minisig 后验签：
 
 ```bash
 minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig
-# minisign.pub 为仓库根目录的公钥文件，启用签名时随启用批次提交
+# minisign.pub 为仓库根目录的公钥文件（v0.3.23 启用批次提交）
+# 输出含 "Signature and comment signature verified" 即验签通过
 ```
 
 > **未签名 EXE 首次运行可能被 Windows SmartScreen 拦截**（发布者无信誉积累；已决策不采购代码签名证书、拦截长期存在为已接受状态——2026-10-23 决策，见 docs/experience/06 发布对账常设区）。若弹出蓝色「Windows 已保护你的电脑」提示：点「**更多信息**」→「**仍要运行**」即可放行；只放行本程序的这一个 EXE，不要据此放宽系统对其它未知程序的拦截设置。
