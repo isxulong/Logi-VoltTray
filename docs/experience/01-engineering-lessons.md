@@ -374,3 +374,36 @@
 3. 采样参数（窗口、频率）写进发布说明或决策记录，可复核。
 
 **溯源**：`volttray/RELEASES.md` v0.3.17 R-4；commit `a1594fb54b`；D-77。
+
+---
+
+## E35. CI 的静默失败面：表达式属性笔误求空无报错，包级依赖扩面会横向改变全部构建目标的系统依赖
+
+**教训**：两处「不报错的错」——GitHub Actions 表达式里不存在的属性（`github.runId`，正确为 `github.run_id`）求值为空字符串而非失败，下游拿到的是空链接；Cargo 包级依赖对全部 bin 生效，给 fuzz crate 加两个本地依赖即让最早存在的目标也开始编译 hidapi（需系统库 libudev），只跑过旧目标的 nightly 环境当即构建失败。两者都让链路在「配置看起来没问题」的状态下产出空结果或直接失败，发现依赖下游症状（issue 正文链接为空 / nightly 红）。
+
+**真实案例**：issue #16（2026-10-24 nightly fuzz 失败自动开单）双根因——① E16 fuzz 扩面（battery/stats/config 三目标）给 fuzz crate 加了 device/app 依赖，frame_fuzz 随之开始编译 hidapi，nightly 的 fuzz-smoke 此前只跑 protocol、未装 libudev 即构建失败（日志实证 Unable to find libudev）；② 自动开单模板 RUN_URL 用 `github.runId` 求空，issue 正文 run 链接为空。修复：nightly.yml 补装 libudev-dev/libusb（与 ci.yml 已实证步骤同款）；`github.runId`→`github.run_id` 全量 4 处。复跑验证：同 commit 的 ci.yml fuzz-smoke 全绿（证明仅缺系统依赖步）；v0.3.23 发版门禁的 fuzz-smoke job 实跑全绿。
+
+**可执行做法**：
+
+1. workflow 里写表达式属性名后，用一次真实触发核对输出非空——空字符串不报错。
+2. 给多 bin crate 加包级依赖时，核查最老构建目标的系统依赖面是否变化（cargo tree 对比 / 全部 bin 试编译）。
+3. 同一故障先分「构建链失败」与「报告链失败」两条线独立归因，再合并处置；修复以同 commit 等价链路的绿灯为证据。
+
+**溯源**：issue #16；`volttray/RELEASES.md` v0.3.23「issue #16 根因标注」节；commit `cd77a925fd`。
+
+---
+
+## E37. 签名链启用：先 dry_run 演练全链（零真实产物），工具支持与权限分层逐项实证
+
+**教训**：发布签名链涉及「密钥配置（Secrets 写权限）→ 工具安装 → 签名 → 公钥自验 → 资产上传」多环节，任何一环的首次实战失败若发生在正式发版里就不可逆；给发布 workflow 加 dry_run 演练护栏（走完构建 / 签名 / 自验全部步骤但跳过 Release 创建与上传），先在零真实产物前提下暴露问题。四类暗礁被演练拦下：① 令牌权限分层——Actions 触发可用（204）≠ Secrets 写可用（403），逐项探、403 即停手上报、授权后续跑；② 工具清单「按公开清单采用」不等于可用——taiki-e/install-action 公开清单外的 minisign 在 windows runner 直接报不支持，fallback cargo-binstall 也失败，改官方预编译包＋sha256 钉死才闭合；③ shell 环境差异——git-bash 的 GNU tar 不能解 zip（需系统 bsdtar），且盘符路径会被 tar 当远程主机（--force-local 背景）；④ GITHUB_PATH 只对后续步生效，同步内冒烟要用全路径。
+
+**真实案例**：v0.3.23 发版前 E18 签名链演练（2026-10-24）：release.yml 加 workflow_dispatch dry_run 输入（tag push 时 inputs 为 null、条件恒真，正式行为零变化）；首轮演练因令牌缺 Secrets 写权限阻塞（403，按纪律未重试未绕过、如实上报），授权后续跑；第二轮实证 install-action 不支持 minisign（log: "does not support minisign" → cargo-binstall "no binaries specified nor inferred"），修复为官方 win64 预编译包（sha256 钉死，本地经作者公钥验签）；第三轮实证 git-bash 的 GNU tar 不能解 zip（"This does not look like a tar archive"），改用 Windows 系统 bsdtar（/c/Windows/System32/tar.exe）；第四轮实证 GITHUB_PATH 追加仅对后续步生效（同步内 minisign -v 报 command not found, exit 127），install 步改全路径冒烟、sign 步显式 export PATH（cygpath 转 POSIX）双保险；第五轮 dry_run 全绿（run 40106733568）——install / 签名 / 公钥自验真实执行，两个 upload 步被 dry_run 护栏拦截，零真实 tag / Release 产生，日志零密钥材料命中。fail-open（无密钥跳过照常发布）与 fail-closed（验不过即发布失败）双分支均有日志明文可核。三轮失败各暴露一个真实缺陷、错误互不相同——这正是演练护栏的价值：全部拦在零真实产物阶段。
+
+**可执行做法**：
+
+1. 涉及密钥 / 签名的发布链路，正式发版前必做一次 dry_run 演练，并逐步骤回读日志（不采信「步骤绿了」的自述，要看每步真实执行了哪条分支）。
+2. 权限核验逐项来：读 / 写 / 触发分别探一次；403 即停，报清需要用户开哪一项权限。
+3. CI 引用的第三方工具在目标 runner 上的支持度，要么实测、要么准备替代路径（官方预编译包＋哈希钉死是最稳的兜底）。
+4. 密钥纪律：私钥只进 Secrets，永不入仓库 / 日志 / 评论；公钥入库供用户验签；推送前敏感扫描零命中。
+
+**溯源**：`volttray/RELEASES.md` v0.3.23「工程与质量」E18 条；commits `eca01eb4ea`、`addbb7078c`、`2cc3b086df`、`541afa85d5`、`78b6cb00f8`、`8d6a55890f`、`14fb39fa1a`；dry_run 演练 runs 40101257286 / 40102430268 / 40105000369 / 40105836296 / 40106733568（末轮全绿）；仓库根 `minisign.pub`。

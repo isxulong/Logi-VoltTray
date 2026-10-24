@@ -1,17 +1,18 @@
 # LogiVoltTray 项目经验知识库
 
-> **内容同步至 v0.3.20 / 2026-10-22**（每次发布回写时同步更新本戳，见「维护约定」）。
+> **内容同步至 v0.3.23 / 2026-10-24**（每次发布回写时同步更新本戳，见「维护约定」）。
 >
 > 这个文件夹沉淀本项目（2026-09 至 2026-10 真实迭代）的工程教训与协作方法论。
 > 注：仓库于 2026-10-11 重建，此前素材以重建时合并入库为准。
 > E16–E25 为 2026-10-17 增补，覆盖 v0.3.14 之后至 v0.3.15 发布 + T6 修复合并 + 三个设计包（WP-A/B/C）定稿期间的新经验。
 > E26 为 2026-10-17 增补：版本发布后经验回写机制（用户常设规则，首个适用版本 v0.3.16）——每次发版后按此机制把链路经验回写进本文件夹。
 > E27–E34 为 2026-10-19 增补，覆盖 v0.3.16–v0.3.19 四个版本链路的新经验（E26 机制首次版本回写执行）。
+> E35–E37 为 2026-10-24 增补，覆盖 v0.3.23 发版链路（红蓝对抗整改落地批、nightly 双根因处置、签名链演练与启用）的新经验。
 > 目标：**新加入的 AI（或新参与者）仅凭本文件夹即可有效吸收过往经验**；通用读者也能带走可迁移的方法论。
 
 ## 这是什么
 
-LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 34 条带真实案例的经验（编号 **E1–E34**；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
+LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 37 条带真实案例的经验（编号 **E1–E37**；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
 
 每条经验的固定结构：
 
@@ -34,8 +35,8 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 
 | 文件 | 内容 | 覆盖经验 |
 | --- | --- | --- |
-| [01-engineering-lessons.md](01-engineering-lessons.md) | 工程经验教训：Windows 时间算术、HID 句柄失效、HID++ 协议与休眠、诊断导出设计、CI/GitHub 实战、Rust 托盘应用杂项、Windows 交叉验证、设备身份锚定、托盘性能审查、平台移植评估、本地文件有界、渲染可信性与 CI 纪律 | E1–E6、E16–E20、E27–E33 |
-| [02-collaboration-playbook.md](02-collaboration-playbook.md) | 协作与流程方法论：证据优于自述、红蓝对抗、质量门禁、卡壳判定、进度监控、断点交接、收口纪律、误指派处置、串行代码槽位、红蓝编排进阶、设计阶段红蓝、用户红线传导、决策发生链路、版本发布后经验回写机制 | E7–E14、E21–E26、E34 |
+| [01-engineering-lessons.md](01-engineering-lessons.md) | 工程经验教训：Windows 时间算术、HID 句柄失效、HID++ 协议与休眠、诊断导出设计、CI/GitHub 实战、Rust 托盘应用杂项、Windows 交叉验证、设备身份锚定、托盘性能审查、平台移植评估、本地文件有界、渲染可信性与 CI 纪律 | E1–E6、E16–E20、E27–E33、E35、E37 |
+| [02-collaboration-playbook.md](02-collaboration-playbook.md) | 协作与流程方法论：证据优于自述、红蓝对抗、质量门禁、卡壳判定、进度监控、断点交接、收口纪律、误指派处置、串行代码槽位、红蓝编排进阶、设计阶段红蓝、用户红线传导、决策发生链路、版本发布后经验回写机制、双角色独立质检 | E7–E14、E21–E26、E34、E36 |
 | [03-release-quality-gate.md](03-release-quality-gate.md) | 发布质量门禁清单：逐条可核验的放行标准（含 B5 Windows 交叉验证门禁与 v0.3.15 / T6 真实拦截记录） | E5、E7、E9、E16、E17（清单化） |
 | [04-onboarding.md](04-onboarding.md) | 新 AI 上手指引：项目结构、构建、测试、发布流程、红线清单、报障排查入口、长期原则、文档导航、已知文档滞后点、术语表 | E15 + 仓库-specific 指引 |
 | [05-diag-export-field-audit.md](05-diag-export-field-audit.md) | 诊断导出字段审计（T-02b）：导出 JSON 全字段的内容来源 / 泄露面评估 / redact 规则覆盖逐字段登记，含回归测试守护 | T-02b 审计产物 |
@@ -84,6 +85,9 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | E32 | [01](01-engineering-lessons.md) | CI 红了的处置纪律：fix-forward 并给语义等价证明 |
 | E33 | [01](01-engineering-lessons.md) | 稳态日志采样带计数，跃迁日志全量 |
 | E34 | [02](02-collaboration-playbook.md) | 优化与迁移的语义代价、误伤面必须如实披露，并给出穿透 / 回退路径 |
+| E35 | [01](01-engineering-lessons.md) | CI 的静默失败面：表达式属性笔误求空无报错，包级依赖扩面横向改变系统依赖 |
+| E36 | [02](02-collaboration-playbook.md) | 双角色独立质检：修复类窗口同一份清单两角色独立过全量范围 |
+| E37 | [01](01-engineering-lessons.md) | 签名链启用：先 dry_run 演练全链，工具支持与权限分层逐项实证 |
 
 ## 双层受众约定
 
