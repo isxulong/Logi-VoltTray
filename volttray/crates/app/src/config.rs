@@ -602,6 +602,44 @@ enum Value {
     List(Vec<Value>),
 }
 
+/// E13：写入 TOML 基本字符串前的转义——`\\`→`\\\\`、`"`→`\\"`。
+/// 仅这两个字符会破坏扁平 TOML 子集的单行字符串语法（换行/control
+/// 字符不会出现在字体名等受信任来源中；解析侧对未知转义宽容放行）。
+fn escape_toml_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// E13 配对读取侧：把 `\\"`→`"`、`\\\\`→`\\`；未知转义原样保留
+/// （宽容解析——用户手写的配置不因此报错）。
+fn unescape_toml_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn parse_value(raw: &str) -> Option<Value> {
     let v = raw.trim();
     match v {
@@ -610,7 +648,7 @@ fn parse_value(raw: &str) -> Option<Value> {
         _ => {}
     }
     if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-        return Some(Value::Str(v[1..v.len() - 1].to_string()));
+        return Some(Value::Str(unescape_toml_str(&v[1..v.len() - 1])));
     }
     if let Ok(n) = v.parse::<u64>() {
         return Some(Value::Int(n));
@@ -631,11 +669,19 @@ fn parse_value(raw: &str) -> Option<Value> {
     None
 }
 
-/// 去除行内注释（`#` 不在引号内时截断）。
+/// 去除行内注释（`#` 不在引号内时截断）。E13：引号串内识别
+/// 反斜杠转义——`\\"` 不切换 in_str，否则字体名里的转义引号会让
+/// 注释截断状态错位。
 fn strip_comment(line: &str) -> &str {
     let mut in_str = false;
+    let mut escaped = false;
     for (i, c) in line.char_indices() {
+        if in_str && escaped {
+            escaped = false;
+            continue;
+        }
         match c {
+            '\\' if in_str => escaped = true,
             '"' => in_str = !in_str,
             '#' if !in_str => return &line[..i],
             _ => {}
@@ -1064,7 +1110,7 @@ impl Config {
             self.icon_shape.name(),
             self.icon_background.name(),
             self.icon_font_color.name(),
-            self.icon_font_family,
+            escape_toml_str(&self.icon_font_family),
             self.low_threshold,
             self.blink_enabled,
             self.icon_font_tiers_enabled,
@@ -1414,6 +1460,52 @@ mod tests {
         let (back, w) = Config::parse(&c.to_toml());
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn font_family_quotes_roundtrip() {
+        // E13：字体名含 `"` 与 `\\` 时写入转义、读回还原，
+        // 保存/加载循环不累积反斜杠。
+        let c = Config {
+            icon_font_family: "My \"Font\\ X".into(),
+            ..Config::default()
+        };
+        let text = c.to_toml();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("icon_font_family"))
+            .expect("to_toml 必须含 icon_font_family 行");
+        assert!(
+            line.contains("\\\"") && line.contains("\\\\"),
+            "写入侧必须转义引号与反斜杠：{line}"
+        );
+        let (back, w) = Config::parse(&text);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back.icon_font_family, "My \"Font\\ X");
+        // 二次往返稳定（不累积转义）。
+        let (back2, w2) = Config::parse(&back.to_toml());
+        assert!(w2.is_empty(), "{w2:?}");
+        assert_eq!(back2.icon_font_family, "My \"Font\\ X");
+    }
+
+    #[test]
+    fn strip_comment_ignores_escaped_quote() {
+        // E13：`\\"` 不应切换字符串状态；其后的 `#` 仍在字符串内，不截断。
+        assert_eq!(
+            strip_comment("icon_font_family = \"A \\\" B # tail\" # real"),
+            "icon_font_family = \"A \\\" B # tail\" "
+        );
+        // 无转义时行为不变。
+        assert_eq!(strip_comment("k = \"v\" # c"), "k = \"v\" ");
+    }
+
+    #[test]
+    fn unescape_unknown_sequences_kept_literal() {
+        // 宽容读取：未知转义（如手写 `\\n`）原样保留，不报错不吞字符。
+        let (c, w) =
+            Config::parse("icon_font_family = \"A\\nB\"\nexperimental_migrated_v0321 = true\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.icon_font_family, "A\\nB");
     }
 
     #[test]
