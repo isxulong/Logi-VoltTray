@@ -665,4 +665,133 @@ mod tests {
         //    不脱敏，防未来误加规则静默破坏排障信息。
         assert!(json.contains("7&31a4c5e6&0&0000"), "tag 原文应保留：{json}");
     }
+
+    /// E17（报告口径 A-R11）字段级 diff 审计：t02b 的逐字段版——
+    /// 不再只断言「全文无残留」，而是对 05 审计文档表格的**每一行**
+    /// 各断言一次该字段的处置口径（脱敏后形态 / 原文保留 / 数值不动），
+    /// 字段口径与文档表格一一对应；任一行口径漂移在此定位到具体字段。
+    #[test]
+    fn e17_field_level_diff_audit_per_05_doc() {
+        let secret_user = "e17_field_audit";
+        let device_name = "E17 Audit Mouse";
+        let user_path = format!(r"C:\Users\{}\AppData\Roaming\LogiVoltTray", secret_user);
+        let devices = serde_json::json!([
+            {
+                "seq": 1,
+                "ts_ms": 1,
+                "layer": "app",
+                "type": "device_found",
+                "id": "046D|7&31a4c5e6&0&0000#3",
+                "name": device_name,
+            },
+            {
+                "seq": 2,
+                "ts_ms": 2,
+                "layer": "transport",
+                "type": "io_error",
+                "message": format!("hid open failed at {user_path}"),
+            },
+        ]);
+        let export = DiagExport {
+            devices,
+            devices_reason: Some(format!("observer lock poisoned at {user_path}")),
+            log_tail: LogTail {
+                path: user_path.clone(),
+                lines: vec![format!("persist battery to {user_path} failed")],
+                reason: Some(format!("log read failed at {user_path}")),
+            },
+            last_enum: Some(EnumSnapshot {
+                at_ms: 1_760_000_012_345,
+                forced: true,
+                candidate_channels: 2,
+                channels: vec![ChannelEnumResult {
+                    key: "C52B|7&31a4c5e6&0&0000".into(),
+                    pid: "0xC52B".into(),
+                    tag: "7&31a4c5e6&0&0000".into(),
+                    open: "failed".into(),
+                    error: Some(format!("hid open error: {user_path}")),
+                }],
+                registered_slots: 1,
+                error: Some(format!("enum failed: {user_path}")),
+            }),
+            last_enum_reason: Some(format!("enum snapshot lock poisoned at {user_path}")),
+            channel_map_miss: 3,
+            frame_tx: 41,
+            frame_rx: 39,
+            avg_tx_interval_ms: Some(12),
+            feature_index_tx: [("0x01".to_string(), 7u64)].into_iter().collect(),
+            feature_index_rx: [("0x0D".to_string(), 5u64)].into_iter().collect(),
+            arm_all_fills: 2,
+            wake_successes: 9,
+            wake_miss_no_path: 1,
+            wake_miss_zero_match: 1,
+            wake_miss_no_fingerprint: 1,
+            wake_miss_ambiguous: 1,
+            wake_recovery_via_reenum: 4,
+            exported_at: 1_760_000_000,
+            app_version: "0.0.0-e17".into(),
+        };
+        let json = export.to_json_string_with(&[device_name.to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // —— 规则一覆盖行：路径形态字段逐字段断言 <USER> 且无残留 ——
+        let path_fields: Vec<(&str, serde_json::Value)> = vec![
+            ("log_tail.path", v["log_tail"]["path"].clone()),
+            ("log_tail.lines[0]", v["log_tail"]["lines"][0].clone()),
+            ("log_tail.reason", v["log_tail"]["reason"].clone()),
+            ("devices_reason", v["devices_reason"].clone()),
+            ("last_enum.error", v["last_enum"]["error"].clone()),
+            ("last_enum_reason", v["last_enum_reason"].clone()),
+            (
+                "last_enum.channels[0].error",
+                v["last_enum"]["channels"][0]["error"].clone(),
+            ),
+            ("devices[1].message", v["devices"][1]["message"].clone()),
+        ];
+        for (name, val) in path_fields {
+            let text = val.as_str().unwrap_or_else(|| panic!("{name} 应为字符串"));
+            assert!(text.contains("<USER>"), "{name} 规则一未生效：{text}");
+            assert!(!text.contains(secret_user), "{name} 用户名残留：{text}");
+        }
+        // —— 规则二覆盖行：设备名字段 ——
+        assert_eq!(v["devices"][0]["name"], "设备1", "设备名整值替换");
+        // —— 维持现状行：tag / key / id 实例指纹不脱敏（05 第三节①） ——
+        assert_eq!(
+            v["last_enum"]["channels"][0]["tag"], "7&31a4c5e6&0&0000",
+            "tag 维持现状"
+        );
+        assert_eq!(
+            v["last_enum"]["channels"][0]["key"], "C52B|7&31a4c5e6&0&0000",
+            "key 维持现状"
+        );
+        assert_eq!(
+            v["devices"][0]["id"], "046D|7&31a4c5e6&0&0000#3",
+            "事件 id 维持现状"
+        );
+        // —— 无需覆盖行：纯数值/枚举字段逐字段原值不动 ——
+        assert_eq!(v["channel_map_miss"], 3);
+        assert_eq!(v["frame_tx"], 41);
+        assert_eq!(v["frame_rx"], 39);
+        assert_eq!(v["avg_tx_interval_ms"], 12);
+        assert_eq!(v["feature_index_tx"]["0x01"], 7);
+        assert_eq!(v["feature_index_rx"]["0x0D"], 5);
+        assert_eq!(v["arm_all_fills"], 2);
+        assert_eq!(v["wake_successes"], 9);
+        assert_eq!(v["wake_miss_no_path"], 1);
+        assert_eq!(v["wake_miss_zero_match"], 1);
+        assert_eq!(v["wake_miss_no_fingerprint"], 1);
+        assert_eq!(v["wake_miss_ambiguous"], 1);
+        assert_eq!(v["wake_recovery_via_reenum"], 4);
+        assert_eq!(v["exported_at"], 1_760_000_000u64);
+        assert_eq!(v["app_version"], "0.0.0-e17");
+        assert_eq!(v["last_enum"]["at_ms"], 1_760_000_012_345u64);
+        assert_eq!(v["last_enum"]["forced"], true);
+        assert_eq!(v["last_enum"]["candidate_channels"], 2);
+        assert_eq!(v["last_enum"]["registered_slots"], 1);
+        assert_eq!(v["last_enum"]["channels"][0]["pid"], "0xC52B");
+        assert_eq!(v["last_enum"]["channels"][0]["open"], "failed");
+        // —— 事件侧非敏感字段不动 ——
+        assert_eq!(v["devices"][0]["seq"], 1);
+        assert_eq!(v["devices"][0]["type"], "device_found");
+    }
 }

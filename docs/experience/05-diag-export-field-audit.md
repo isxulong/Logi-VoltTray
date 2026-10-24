@@ -90,3 +90,10 @@ BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{0000
 4. 锁定 `tag` 维持现状结论：断言输出仍含 tag 原文形态（`7&31a4c5e6&0&0000`），防止未来误加规则静默破坏排障信息。
 
 真机导出样例复检：**未执行**（本审计基于源码实证，真机导出行为未验证，见 commit 的 Not-Verified trailer）。
+
+### E17 增补（2026-10-24，A-R11 落地）
+
+- **结构化脱敏注册表**：两条全文级规则升格为 `redact.rs` 的编译期常量注册表 `REDACTION_RULES`（稳定 id `R1-user-path` / `R2-device-name`＋口径＋本文档锚点），由测试 `redaction_rules_registry_is_pinned` 钉板——规则删改/重排即测试失败，强制回本表同步。
+- **整值替换优先**：规则二替换执行顺序改为按名字长度降序（编号仍按收集顺序），修复互为子串设备名的半替换失真（原「MX Keys 先于 MX Keys Mini 收集 → 设备1 Mini」残留）；安全性两序等价，仅可读性变化。由 `whole_value_priority_replaces_longest_first` 钉板。
+- **字段级 diff 审计**：`diag_export.rs` 新增 `e17_field_level_diff_audit_per_05_doc`——对第二节表格**每一行**各断言一次处置口径（规则一覆盖行 8 字段逐字段断言 `<USER>`＋零残留；规则二行断言整值替换为「设备1」；维持现状行 tag/key/id 原文保留；无需覆盖行 22 项数值/枚举原值不动），任一行口径漂移定位到具体字段。
+- **含令牌值的错误帧 golden**：`golden_error_frame_with_token_values`——hid open 错误帧（必查点②形态）含用户名路径＋设备名两令牌，固定输入 → 固定输出逐字相等，任何规则行为漂移打破 golden。

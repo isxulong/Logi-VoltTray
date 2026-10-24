@@ -3,27 +3,68 @@
 //! 纯函数、仅用 std、无正则、无 Err 路径——输入任何字符串都返回
 //! 一个脱敏后的字符串（导出永远成功的硬约束不允许 Err）。
 //!
-//! 规则一：`C:\Users\` 后第一段路径段替换为 `<USER>`。单一形态覆盖
-//! USERPROFILE / APPDATA / LOCALAPPDATA 三前缀（三者均含 `C:\Users\<名>`
-//! 主干）；用户名从路径文本解析，零环境变量依赖。输入是最终 JSON 文本，
-//! 因此 JSON 转义形态（`C:\\Users\\`）与原始形态（`C:\Users\`）都识别。
+//! E17（报告口径 A-R11）：规则从函数内嵌实现升格为**结构化脱敏
+//! 注册表**（`REDACTION_RULES`，见下）——每条规则有稳定 id / 一句话
+//! 口径 / 文档锚点，可枚举、可在测试中对账，新增规则只追加不重排。
 //!
-//! 规则二：设备名按出现顺序替换为「设备N」（N 从 1 起，按收集顺序）。
-//! 设备名由调用方（tray 侧 export_diag）从诊断事件流 DeviceFound 收集。
-//! 已知限制：规则二为全局子串替换，按收集顺序逐个执行；当两个设备名
-//! 互为子串且较短者先被收集时（如 "MX Keys" 先于 "MX Keys Mini"），长名
-//! 会被部分替换、产生半替换失真（如「设备1 Mini」）。脱敏安全性不受影响
-//! （原设备名均被覆盖），仅影响可读性，本期不修。
+//! 规则一（R1-user-path）：`C:\Users\` 后第一段路径段替换为 `<USER>`。
+//! 单一形态覆盖 USERPROFILE / APPDATA / LOCALAPPDATA 三前缀（三者均含
+//! `C:\Users\<名>` 主干）；用户名从路径文本解析，零环境变量依赖。
+//! 输入是最终 JSON 文本，因此 JSON 转义形态（`C:\\Users\\`）与原始
+//! 形态（`C:\Users\`）都识别。
+//!
+//! 规则二（R2-device-name）：设备名按收集顺序编号为「设备N」。
+//! 设备名由调用方（tray 侧 export_diag）从诊断事件流 DeviceFound
+//! 收集。**E17 整值替换优先**：替换执行顺序改为按名字长度降序
+//! （等长保持收集顺序），长设备名先整体替换——修复原「收集顺序
+//! 逐个替换」在半子串场景下的失真（如 "MX Keys" 先于 "MX Keys Mini"
+//! 被收集时，长名被部分替换产生「设备1 Mini」）。编号仍按收集顺序
+//! （「设备N」的 N 与收集序号一致，不随替换执行顺序变化），因此
+//! 既有导出里同一设备跨字段的编号对应关系不变；改变的只是互为
+//! 子串场景下不再出现半替换残留。脱敏安全性两序等价（所有设备名
+//! 均被覆盖），整值优先只影响可读性。
 
-/// 对文本执行规则一＋规则二的完整脱敏。
+/// 脱敏规则注册表条目（E17）。字段全部为静态文本，注册表是
+/// 编译期常量——审计与测试可枚举全部规则而无需执行脱敏。
+pub struct RedactionRule {
+    /// 稳定规则 id（测试钉板；新增规则只追加、不重排、不改 id）。
+    pub id: &'static str,
+    /// 一句话口径（与模块文档对应段落一致）。
+    pub summary: &'static str,
+    /// 文档锚点：docs/experience/05-diag-export-field-audit.md 章节。
+    pub doc_anchor: &'static str,
+}
+
+/// 结构化脱敏注册表（E17，A-R11）。当前两条全文级规则；
+/// 设备名编号语义（收集顺序 → 设备N）属 R2 的口径一部分。
+pub const REDACTION_RULES: &[RedactionRule] = &[
+    RedactionRule {
+        id: "R1-user-path",
+        summary: "C:\\Users\\<段>（含 JSON 转义形态）的 <段> → <USER>",
+        doc_anchor: "05 文档第一节规则一",
+    },
+    RedactionRule {
+        id: "R2-device-name",
+        summary: "设备名按收集顺序 → 设备N；整值替换优先（长名先替换）",
+        doc_anchor: "05 文档第一节规则二",
+    },
+];
+
+/// 对文本执行注册表全部规则（当前：规则一＋规则二）的完整脱敏。
 ///
 /// - `C:\Users\<段>`（含 JSON 转义形态 `C:\\Users\\<段>`）的 `<段>`
 ///   替换为 `<USER>`；
-/// - `device_names` 中第 i 个名字（收集顺序即出现顺序）替换为「设备i+1」；
+/// - `device_names` 中收集序第 i 个名字替换为「设备i+1」；替换执行
+///   按名字长度降序（E17 整值替换优先），等长保持收集顺序；
 /// - 其余字符逐字保留；空设备名跳过（避免空串替换把全文打碎）。
 pub fn redact_text(input: &str, device_names: &[String]) -> String {
     let mut out = redact_user_paths(input);
-    for (idx, name) in device_names.iter().enumerate() {
+    // E17 整值替换优先：按名字长度降序执行替换（等长稳定保持收集
+    // 顺序），编号仍取原收集序号——长名先整体替换，避免短名先把
+    // 长名的前缀部分吃掉产生半替换失真。
+    let mut order: Vec<(usize, &String)> = device_names.iter().enumerate().collect();
+    order.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+    for (idx, name) in order {
         if name.is_empty() {
             continue;
         }
@@ -133,5 +174,51 @@ mod tests {
         let input = "plain text without paths or names";
         let out = redact_text(input, &[String::new(), "不存在的设备".to_string()]);
         assert_eq!(out, input, "无命中时逐字恒等");
+    }
+
+    /// E17 整值替换优先：互为子串的设备名（短名先收集）不再产生
+    /// 半替换失真——长名先整体替换；编号仍按收集顺序。
+    #[test]
+    fn whole_value_priority_replaces_longest_first() {
+        let names = vec!["MX Keys".to_string(), "MX Keys Mini".to_string()];
+        let input = "{\"devices\":[{\"name\":\"MX Keys Mini\"},{\"name\":\"MX Keys\"}]}";
+        let out = redact_text(input, &names);
+        assert!(
+            out.contains(r#"{"name":"设备2"},{"name":"设备1"}"#),
+            "长名整体替换为 设备2、短名为 设备1，无半替换残留：{out}"
+        );
+        assert!(!out.contains("Mini"), "不得残留长名尾部：{out}");
+        assert!(!out.contains("MX Keys"), "不得残留设备名：{out}");
+    }
+
+    /// E17 注册表钉板：规则集合（id 序列）与文档锚点锁定——新增
+    /// 规则只追加；删改既有 id 在此失败，强制同步 05 文档与审计。
+    #[test]
+    fn redaction_rules_registry_is_pinned() {
+        let ids: Vec<&str> = REDACTION_RULES.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec!["R1-user-path", "R2-device-name"]);
+        for rule in REDACTION_RULES {
+            assert!(!rule.summary.is_empty());
+            assert!(rule.doc_anchor.contains("05 文档"));
+        }
+    }
+
+    /// E17 golden：含令牌值（用户名路径 + 设备名）的错误帧全文比对。
+    /// 帧形态取自 05 文档必查点②（hid open 错误原文可能含路径）——
+    /// 固定输入 → 固定输出逐字相等，任何规则行为漂移都会打破 golden。
+    #[test]
+    fn golden_error_frame_with_token_values() {
+        let input = concat!(
+            r#"{"seq":7,"layer":"transport","type":"io_error","#,
+            r#""message":"hid open failed: C:\Users\audit_tok\AppData\Roaming\LogiVoltTray\x.log (MX Audit Pro)"}"#
+        );
+        let out = redact_text(input, &["MX Audit Pro".to_string()]);
+        assert_eq!(
+            out,
+            concat!(
+                r#"{"seq":7,"layer":"transport","type":"io_error","#,
+                r#""message":"hid open failed: C:\Users\<USER>\AppData\Roaming\LogiVoltTray\x.log (设备1)"}"#
+            )
+        );
     }
 }
