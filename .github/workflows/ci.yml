@@ -215,6 +215,57 @@ jobs:
   # 基线（2026-10-22 本地实测）：54 处删除类调用，全部 `let _ =` 兜底，
   # ①② 均 0 命中。「拦截 v0.3.9 类 P1」为未验证的候选收益（C1 稿原文
   # 口径，不写成实测）。
+  # E16（2026-10-24 终审，A-R9 按 F-BvA-6 修正）：fuzz 扩面三处
+  # （battery/stats/config 解析）＋ PR 级阻断烟测。报告口径原文
+  # 「第一版挂 PR 级 5 分钟阻断烟测（信号链修复前不进 nightly）」——
+  # 故挂 ci.yml（PR 同门禁）而非 nightly.yml；真实门禁、失败即红
+  # （无 continue-on-error）。三目标各 100 秒 ≈ 5 分钟总量。
+  # 环境口径与 nightly fuzz-smoke 一致：nightly 显式钉（RUSTUP_TOOLCHAIN
+  # 压过 rust-toolchain.toml）、rust-src、taiki-e cargo-fuzz@0.13.2、
+  # 显式 gnu target（taiki-e musl 版默认 target 与 ASan 不兼容，
+  # nightly 首跑已实证）。libudev：device/app 经 transport 默认特性
+  # 拉入 hidapi，同 ubuntu job 需系统库。
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install system deps (libudev for hidapi)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      # PR 级烟测不挂语料缓存（语料复用属 nightly 职责，F-A8）；
+      # 每目标 100 秒空语料起跑即足够暴露构造性崩溃与接线退化。
+      - name: fuzz smoke (3 targets x 100s, blocking)
+        working-directory: volttray/fuzz
+        shell: bash
+        run: |
+          set -euo pipefail
+          for t in battery_fuzz stats_fuzz config_fuzz; do
+            echo "── fuzz $t (100s) ──"
+            cargo fuzz run --target x86_64-unknown-linux-gnu "$t" -- -max_total_time=100 -rss_limit_mb=2560
+          done
+
+      # 崩溃样本上传：if: always()（F-A8：fuzz 步红时不得被跳过）。
+      - name: upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-pr-artifacts
+          path: volttray/fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
   redline-guard-advisory:
     runs-on: ubuntu-latest
     continue-on-error: true

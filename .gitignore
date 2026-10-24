@@ -4,3 +4,7 @@ dist/
 __pycache__/
 *.pyc
 volttray/target/
+
+# fuzz 本地产物（E16：语料复用走 CI cache/artifact，不入库）
+volttray/fuzz/corpus/
+volttray/fuzz/artifacts/

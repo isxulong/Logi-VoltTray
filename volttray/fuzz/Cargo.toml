@@ -13,9 +13,32 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 volttray-protocol = { path = "../crates/protocol" }
+# E16：battery/stats/config 解析链扩面（device/app crate 为纯逻辑
+# 宿主；transport 默认特性 hid 随之拉入 hidapi，CI 需 libudev-dev，
+# 与 ci.yml ubuntu job 口径一致）。
+volttray-device = { path = "../crates/device" }
+volttray-app = { path = "../crates/app" }
 
 [[bin]]
 name = "frame_fuzz"
 path = "fuzz_targets/frame_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "battery_fuzz"
+path = "fuzz_targets/battery_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "stats_fuzz"
+path = "fuzz_targets/stats_fuzz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "config_fuzz"
+path = "fuzz_targets/config_fuzz.rs"
 test = false
 doc = false
