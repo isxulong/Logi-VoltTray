@@ -142,11 +142,25 @@ jobs:
         shell: bash
         run: echo "未配置 MINISIGN_SECRET_KEY：按 E18 降级策略跳过签名（fail-open），发布照常"
 
+      # 2026-10-24 dry_run 演练实证：taiki-e/install-action 不支持 minisign
+      # （windows runner 日志：does not support minisign → fallback cargo-binstall
+      # 报 "no binaries specified nor inferred" 失败）。改取 jedisct1/minisign
+      # 官方预编译 win64 包，sha256 钉死核验（哈希来源：发布前从官方 release
+      # 资产本地下载实测，并经作者公钥 minisign 验签通过）。
       - name: install minisign
         if: env.MINISIGN_SECRET_KEY != ''
-        uses: taiki-e/install-action@v2
-        with:
-          tool: minisign
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=0.12
+          zip="$RUNNER_TEMP/minisign-win64.zip"
+          dest="$RUNNER_TEMP/minisign-bin"
+          curl -fsSL --retry 3 -o "$zip" "https://github.com/jedisct1/minisign/releases/download/${ver}/minisign-${ver}-win64.zip"
+          echo "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479  $zip" | sha256sum -c -
+          mkdir -p "$dest"
+          tar -xf "$zip" -C "$dest"
+          echo "$dest/minisign-win64/x86_64" >> "$GITHUB_PATH"
+          minisign -v
 
       - name: minisign sign and self-verify
         if: env.MINISIGN_SECRET_KEY != ''
