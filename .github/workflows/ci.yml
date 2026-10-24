@@ -231,13 +231,20 @@ jobs:
         with:
           workspaces: volttray
 
+      # 必须按具名 bench target 跑：cargo bench --workspace 会把参数同时
+      # 传给 lib 目标的 libtest harness，而 libtest 不认 criterion 的
+      # --measurement-time 等参数（run 40081790791 实证：Unrecognized
+      # option: 'measurement-time'）。
       - name: criterion microbenches (numbers only, no threshold)
         shell: bash
         run: |
           set -o pipefail
-          cargo bench --workspace --locked -- \
+          cargo bench -p volttray-protocol --bench frame_codec --locked -- \
             --measurement-time 1 --warm-up-time 0.5 --sample-size 10 \
             2>&1 | tee ../microbench.log
+          cargo bench -p volttray-app --bench logic_chains --locked -- \
+            --measurement-time 1 --warm-up-time 0.5 --sample-size 10 \
+            2>&1 | tee -a ../microbench.log
 
       - name: upload bench log
         if: always()
