@@ -27,8 +27,12 @@ mod frame_lru;
 mod icon;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod logrotate;
+// E22（报告口径）：wake 裁决行稳态采样是纯逻辑（无 Win32 依赖），
+// 跨平台编译以便在非 Windows 环境跑单元测试。
 #[cfg(windows)]
 mod menu;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod wakesampler;
 // E8：自 main.rs 拆出的持久化叶子模块（平面 TOML 键改写 + tmp→rename）。
 #[cfg(windows)]
 mod persist;
@@ -128,6 +132,8 @@ mod imp {
     use volttray_device::state::DeviceState;
     use volttray_device::{classify_pid, Device};
     use volttray_protocol::FeatureTable;
+
+    use crate::wakesampler::SteadyDecisionSampler;
     use volttray_transport::channel::{HidChannel, IoError};
     use volttray_transport::events::{DiagEvent, DiagKind, Layer};
     use volttray_transport::hid_impl::{enumerate_channels, ChannelInfo, HidDeviceChannel};
@@ -1013,10 +1019,13 @@ mod imp {
         let mut probe_only_next = false;
         // R-4（v0.3.17）：attribution miss 日志采样（每分钟 1 条 + 计数）。
         let mut wake_miss_sampler = MissLogSampler::new();
-        // BF-2（v0.3.17）：零信息裁决日志采样——hit ∧ 未装填 ∧ stay-asleep
-        // 是鼠标活动稳态下的高频无变化行，逐条落盘即刷屏；状态跃迁行
-        //（armed / probe-round / miss / core-lock-failed）仍逐条保留。
-        let mut wake_idle_sampler = MissLogSampler::new();
+        // BF-2（v0.3.17）＋ E22（报告口径）：零信息裁决日志稳态采样——
+        // hit / miss-* ∧ 未装填 ∧ stay-asleep 都是鼠标活动稳态下的高频
+        // 无变化行，逐条落盘即刷屏（BF-2 原口径只覆盖 hit 桶，E10/E11
+        // 拆桶后 miss-* 各桶的同类行同样 ~2s/条）。按桶稳态采样（每
+        // 分钟 1 条+计数）；桶跃迁 / 装填 / probe-round /
+        // core-lock-failed 仍逐条全量，跃迁冲出上一桶压制计数不丢数。
+        let mut wake_steady_sampler = SteadyDecisionSampler::new();
         'outer: loop {
             // WP-B：循环顶部的 try_recv 原本只识别 Shutdown——非 Shutdown
             // 命令在此被消费即丢弃（WakeSignal 丢弃无害：轮次
@@ -2267,10 +2276,12 @@ mod imp {
                         // R-4（v0.3.17）：唤醒裁决链落 bootlog——归因
                         // 结果、装填构成、枚举门控与最终裁决（集合可能很
                         // 大，只记数量不记 id）。
-                        // BF-2（v0.3.17）：零信息情形（hit ∧ 未装填 ∧
+                        // BF-2（v0.3.17）＋ E22（报告口径）：零信息稳态
+                        //（attribution 为 hit 或 miss-* ∧ 未装填 ∧
                         // stay-asleep，鼠标活动稳态高频行）经采样器每
-                        // 分钟 1 条+计数；状态跃迁（装填 / 探测 / miss /
-                        // core-lock-failed）仍逐条保留。
+                        // 分钟 1 条+计数；状态跃迁（桶切换 / 装填 / 探测 /
+                        // core-lock-failed）仍逐条保留，跃迁时冲出上一
+                        // 桶被压制的计数（不丢数）。
                         let decision_line = format!(
                             "wake decision: attribution={attribution} armed={armed_any} (sleeping={n_sleeping} online-gray={n_gray}) enum_due={enum_due} action={}",
                             match action {
@@ -2278,16 +2289,21 @@ mod imp {
                                 WakeAction::StayAsleep => "stay-asleep",
                             }
                         );
-                        if attribution == "hit"
+                        let steady = attribution != "core-lock-failed"
                             && !armed_any
-                            && matches!(action, WakeAction::StayAsleep)
-                        {
-                            if let Some(line) =
-                                wake_idle_sampler.note_miss(&decision_line, Instant::now())
-                            {
+                            && matches!(action, WakeAction::StayAsleep);
+                        if steady {
+                            for line in wake_steady_sampler.note_steady(
+                                attribution,
+                                &decision_line,
+                                Instant::now(),
+                            ) {
                                 bootlog::note(&line);
                             }
                         } else {
+                            if let Some(line) = wake_steady_sampler.leave_steady() {
+                                bootlog::note(&line);
+                            }
                             bootlog::note(&decision_line);
                         }
                         match action {
