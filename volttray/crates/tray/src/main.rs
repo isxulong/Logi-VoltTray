@@ -16,6 +16,9 @@
 mod blink;
 #[cfg(windows)]
 mod bootlog;
+// E8：自 main.rs 拆出的导出叶子模块（诊断导出 + 统计三件套导出）。
+#[cfg(windows)]
+mod export;
 // 帧 LRU / 日志运行期轮转门控是纯逻辑（无 Win32 依赖），跨平台编译以便
 // 在非 Windows 环境跑单元测试（v0.3.15，P1-2 / P2-2）。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -26,6 +29,9 @@ mod icon;
 mod logrotate;
 #[cfg(windows)]
 mod menu;
+// E8：自 main.rs 拆出的持久化叶子模块（平面 TOML 键改写 + tmp→rename）。
+#[cfg(windows)]
+mod persist;
 #[cfg(windows)]
 mod rawinput;
 // WP-A（A-1b）：虚拟条目「最后更新于」时间注释的本地时格式化。
@@ -39,10 +45,17 @@ mod timelocal;
 #[cfg(windows)]
 mod toast;
 
-// WP-B：statsexport 子模块需要 crate 根可见的 IoCmd 与泛化 Save-As
-//（实现本体在 imp 内，此处再导出；statsexport 与 imp 互相引用）。
+// WP-B：statsexport 子模块需要 crate 根可见的 IoCmd 与泛化 Save-As。
+// E8（红蓝对抗终审）：persist / export 叶子模块自 main.rs 拆出（结构
+// 搬动、行为不变）——write_tmp_rename 落 persist 模块，Save-As 落
+// export 模块；wall_secs / wide / Telemetry 为共用项，本体在 imp、
+// 此处再导出（statsexport 与 imp 互相引用）。
 #[cfg(windows)]
-pub(crate) use imp::{pick_save_path_with_filter, write_tmp_rename, IoCmd};
+pub(crate) use export::pick_save_path_with_filter;
+#[cfg(windows)]
+pub(crate) use imp::{wall_secs, wide, IoCmd, Telemetry};
+#[cfg(windows)]
+pub(crate) use persist::write_tmp_rename;
 
 /// v0.3.8（D-64/B-2）：启动时图标渲染回退出厂默认的原因；首次打开设置
 /// 窗口时提示一次后取走（None = 未发生回退或已提示过）。
@@ -78,19 +91,14 @@ mod imp {
 
     use tray_icon::menu::MenuEvent;
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use windows::core::{PCWSTR, PWSTR};
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::System::SystemInformation::GetLocalTime;
     // WP-A：持久化与通道归因（v3 A-1/A-3）。
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
     use volttray_app::wakechannel::{channel_for_raw_path_classified, ChannelMatch};
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Controls::Dialogs::{
-        CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
-        OFN_PATHMUSTEXIST, OPENFILENAMEW,
-    };
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -103,10 +111,7 @@ mod imp {
     use volttray_app::config::{
         font_tier_for_percent, IconBackground, IconFontColor, IconShape, RgbColor,
     };
-    use volttray_app::diag_export::{
-        diag_export_filename_local, read_log_tail, ChannelEnumResult, DiagExport, EnumSnapshot,
-        LocalTimeParts, LOG_TAIL_MAX_LINES,
-    };
+    use volttray_app::diag_export::{ChannelEnumResult, EnumSnapshot};
     use volttray_app::{
         identity_confirmed, pick_promotion, repin, wake_action, wake_arm_set, Alert, AliasSlot,
         AppCore, ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition, Observer,
@@ -137,6 +142,9 @@ mod imp {
     use crate::rawinput;
     use crate::single::{acquire, acquire_restart_child, RestartAcquire, SingleInstance};
     use crate::toast;
+    // E8：persist / export 叶子模块自本文件拆出（结构搬动、行为不变）。
+    use crate::export::{export_diag, run_stats_export};
+    use crate::persist::{persist_bool, write_tmp_rename};
     #[cfg(windows)]
     use crate::APPEARANCE_FALLBACK_NOTE;
 
@@ -193,7 +201,8 @@ mod imp {
     /// R-11（v0.3.17 真机终审）：帧级遥测（诊断导出 summary 追加字段）。
     /// 写 / 读计数、feature_index 分类、平均写间隔——在 SharedChannel 的
     /// write / read 上挂钩（get_feature_report 为控制传输、注册期一次性
-    /// 事务，不计入）。进程级静态量避免跨线程签名穿线；const fn new 依赖
+    /// 事务，不计入）。E8（红蓝对抗终审）：原进程级静态量已收编进
+    /// Telemetry（由 run 持有、Arc 穿线，见下方）；const fn new 依赖
     /// Mutex / BTreeMap / AtomicU64 的 const 构造（与
     /// APPEARANCE_FALLBACK_NOTE 同款，工具链 1.90 均支持）。
     struct FrameStatsInner {
@@ -204,9 +213,9 @@ mod imp {
         feature_rx: std::collections::BTreeMap<String, u64>,
     }
 
-    struct FrameStats {
-        tx: AtomicU64,
-        rx: AtomicU64,
+    pub(crate) struct FrameStats {
+        pub(crate) tx: AtomicU64,
+        pub(crate) rx: AtomicU64,
         inner: Mutex<FrameStatsInner>,
     }
 
@@ -253,7 +262,7 @@ mod imp {
             }
         }
 
-        fn avg_tx_interval_ms(&self) -> Option<u64> {
+        pub(crate) fn avg_tx_interval_ms(&self) -> Option<u64> {
             let g = self.inner.lock().ok()?;
             if g.tx_interval_count == 0 {
                 None
@@ -262,14 +271,14 @@ mod imp {
             }
         }
 
-        fn feature_tx(&self) -> std::collections::BTreeMap<String, u64> {
+        pub(crate) fn feature_tx(&self) -> std::collections::BTreeMap<String, u64> {
             self.inner
                 .lock()
                 .map(|g| g.feature_tx.clone())
                 .unwrap_or_default()
         }
 
-        fn feature_rx(&self) -> std::collections::BTreeMap<String, u64> {
+        pub(crate) fn feature_rx(&self) -> std::collections::BTreeMap<String, u64> {
             self.inner
                 .lock()
                 .map(|g| g.feature_rx.clone())
@@ -277,11 +286,11 @@ mod imp {
         }
     }
 
-    static FRAME_STATS: FrameStats = FrameStats::new();
-
     /// 同一接收器通道的句柄共享：多个槽位（设备）共用一对 HID collection。
+    /// E8：遥测计数器随通道句柄共享（原全局 FRAME_STATS 静态量，
+    /// 行为不变——同一 Telemetry 实例的 frames）。
     #[derive(Clone)]
-    struct SharedChannel(Arc<Mutex<HidDeviceChannel>>);
+    struct SharedChannel(Arc<Mutex<HidDeviceChannel>>, Arc<FrameStats>);
 
     impl HidChannel for SharedChannel {
         fn write(&mut self, d: &[u8]) -> Result<usize, IoError> {
@@ -292,7 +301,7 @@ mod imp {
                 .map_err(|_| IoError::Other("channel mutex poisoned".into()))?
                 .write(d);
             if r.is_ok() {
-                FRAME_STATS.note_tx(d, Instant::now());
+                self.1.note_tx(d, Instant::now());
             }
             r
         }
@@ -305,7 +314,7 @@ mod imp {
                 .read(buf, t);
             if let Ok(n) = &r {
                 if *n > 0 {
-                    FRAME_STATS.note_rx(&buf[..*n]);
+                    self.1.note_rx(&buf[..*n]);
                 }
             }
             r
@@ -363,74 +372,15 @@ mod imp {
     }
 
     /// WP-A：墙钟 unix 秒（持久化 last_seen 用；取不到返回 0，不 panic）。
-    fn wall_secs() -> u64 {
+    pub(crate) fn wall_secs() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
 
-    /// WP-B：本地时区偏移（分钟；UTC+8 = 480）——CSV/HTML 时间戳渲染用。
-    /// GetLocalTime vs GetSystemTime 的分钟差（系统已把夏令时折算进本地
-    /// 时间）；纯算术实现（days-from-civil，与 app 层 civil_from_days 互
-    /// 逆），不引入额外 Win32 依赖。SYSTEMTIME 两 API 均无失败路径。
-    fn local_offset_minutes() -> i32 {
-        fn st_minutes(st: &windows::Win32::Foundation::SYSTEMTIME) -> i64 {
-            let y = st.wYear as i64 - if st.wMonth <= 2 { 1 } else { 0 };
-            let era = if y >= 0 { y } else { y - 399 } / 400;
-            let yoe = y - era * 400;
-            let mp = (st.wMonth as i64 + 9) % 12;
-            let doy = (153 * mp + 2) / 5 + st.wDay as i64 - 1;
-            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-            let days = era * 146097 + doe - 719468;
-            days * 1440 + st.wHour as i64 * 60 + st.wMinute as i64
-        }
-        // SAFETY(E9): GetLocalTime / GetSystemTime 均无参、返回 POD SYSTEMTIME 值，无指针契约。
-        let (local, utc) = unsafe {
-            (
-                GetLocalTime(),
-                windows::Win32::System::SystemInformation::GetSystemTime(),
-            )
-        };
-        (st_minutes(&local) - st_minutes(&utc)) as i32
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
+    pub(crate) fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// 平面 TOML 的标量键就地改写；键不存在则追加到文件尾（配置所有权在 app，
-    /// 托盘/设置窗口只触发持久化）。读取失败（如文件不存在）则只写该键。
-    fn persist_kv(path: &Path, key: &str, value: &str) {
-        // v0.3.17（一轮 P0-⑤）：落盘改 tmp→rename 原子写（写中途崩溃
-        // 不留半截 TOML）；键匹配由前缀改等号锚定（避免「thresholds」
-        // 误中同前缀键）；写失败落 bootlog，不再静默吞错。
-        if let Ok(text) = std::fs::read_to_string(path) {
-            let mut out = String::with_capacity(text.len() + 16);
-            let mut done = false;
-            for line in text.lines() {
-                let line_key = line.trim_start().split('=').next().map(str::trim);
-                if !done && line_key == Some(key) {
-                    out.push_str(&format!("{key} = {value}"));
-                    done = true;
-                } else {
-                    out.push_str(line);
-                }
-                out.push('\n');
-            }
-            if !done {
-                out.push_str(&format!("{key} = {value}\n"));
-            }
-            if let Err(e) = write_tmp_rename(path, &out) {
-                bootlog::note(&format!("persist {key} to {} failed: {e}", path.display()));
-            }
-        } else if let Err(e) = write_tmp_rename(path, &format!("{key} = {value}\n")) {
-            bootlog::note(&format!("persist {key} to {} failed: {e}", path.display()));
-        }
-    }
-
-    fn persist_bool(path: &Path, key: &str, value: bool) {
-        persist_kv(path, key, if value { "true" } else { "false" });
     }
 
     fn alert_text(alert: Alert, name: &str) -> (String, String) {
@@ -826,18 +776,38 @@ mod imp {
         true
     }
 
-    /// R-11（v0.3.17）：唤醒路径遥测（诊断导出 summary 追加字段）——
-    /// 进程级静态计数，IO 线程写、导出时读，避免跨线程签名穿线。
+    /// R-11（v0.3.17）：唤醒路径遥测（诊断导出 summary 追加字段）。
+    /// E8（红蓝对抗终审）：原 WAKE_* 进程级静态量与 FRAME_STATS 一并
+    /// 收编进具名 struct（Telemetry）——由 run() 创建、经 Arc 穿线到
+    /// io_loop / pump / export_diag，取代全局静态可变状态；计数语义
+    /// 与读写时点逐字节不变。
     /// arm_all 装填数 / 唤醒成功数 / attribution miss 子分类（no-path /
     /// zero-match / no-fingerprint / ambiguous；E11 把原 no-match 桶
     /// 拆为零候选匹配与指纹不可解析两类，与「多候选同指纹」的歧义
     /// 相区分）。
-    static WAKE_ARM_ALL_FILLS: AtomicU64 = AtomicU64::new(0);
-    static WAKE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-    static WAKE_MISS_NO_PATH: AtomicU64 = AtomicU64::new(0);
-    static WAKE_MISS_ZERO_MATCH: AtomicU64 = AtomicU64::new(0);
-    static WAKE_MISS_NO_FINGERPRINT: AtomicU64 = AtomicU64::new(0);
-    static WAKE_MISS_AMBIGUOUS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) struct Telemetry {
+        pub(crate) frames: Arc<FrameStats>,
+        pub(crate) wake_arm_all_fills: AtomicU64,
+        pub(crate) wake_successes: AtomicU64,
+        pub(crate) wake_miss_no_path: AtomicU64,
+        pub(crate) wake_miss_zero_match: AtomicU64,
+        pub(crate) wake_miss_no_fingerprint: AtomicU64,
+        pub(crate) wake_miss_ambiguous: AtomicU64,
+    }
+
+    impl Telemetry {
+        pub(crate) fn new() -> Self {
+            Self {
+                frames: Arc::new(FrameStats::new()),
+                wake_arm_all_fills: AtomicU64::new(0),
+                wake_successes: AtomicU64::new(0),
+                wake_miss_no_path: AtomicU64::new(0),
+                wake_miss_zero_match: AtomicU64::new(0),
+                wake_miss_no_fingerprint: AtomicU64::new(0),
+                wake_miss_ambiguous: AtomicU64::new(0),
+            }
+        }
+    }
 
     /// R-4（v0.3.17）：attribution miss 日志采样——BT/有线系统性失配
     /// 场景 miss 随每次鼠标活动高频出现，逐条落 bootlog 会刷屏：每个
@@ -890,6 +860,9 @@ mod imp {
         cfg_path: PathBuf,
         enum_snap: Arc<Mutex<Option<EnumSnapshot>>>,
         channel_map_miss: Arc<AtomicU64>,
+        // E8：遥测状态（原 FRAME_STATS / WAKE_* 进程级静态量）由 run
+        // 创建并穿线——具名 struct 由 main 持有，取代全局静态。
+        telemetry: Arc<Telemetry>,
         // WP-B（I-02）：Shutdown 落盘完成的回执——GUI 菜单退出 /
         // WM_ENDSESSION 承接窗口据此等待 run_stop + 双 store flush 完成。
         shutdown_ack: mpsc::Sender<()>,
@@ -1162,7 +1135,10 @@ mod imp {
                                                 "hid reopen ok (forced enum): pid=0x{:04X} tag={}",
                                                 state.info.pid, state.info.tag
                                             ));
-                                            state.shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                                            state.shared = SharedChannel(
+                                                Arc::new(Mutex::new(ch)),
+                                                telemetry.frames.clone(),
+                                            );
                                             // 新句柄重新裁决活性；槽位连败清零。
                                             state.liveness = ChannelLiveness::new();
                                             // v0.3.11（F2/F3）：扫槽连败同步清零；
@@ -1282,7 +1258,10 @@ mod imp {
                                                 state.info.pid,
                                                 state.info.tag
                                             ));
-                                            state.shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                                            state.shared = SharedChannel(
+                                                Arc::new(Mutex::new(ch)),
+                                                telemetry.frames.clone(),
+                                            );
                                             // 新句柄重新裁决活性；各类连败清零。
                                             state.liveness = ChannelLiveness::new();
                                             for s in &mut state.slots {
@@ -1356,7 +1335,8 @@ mod imp {
                                 open: "ok".to_string(),
                                 error: None,
                             });
-                            let shared = SharedChannel(Arc::new(Mutex::new(ch)));
+                            let shared =
+                                SharedChannel(Arc::new(Mutex::new(ch)), telemetry.frames.clone());
                             let mut slots = Vec::new();
                             // R-1/R-2（v0.3.17）：新通道首轮全量扫描，边效应
                             // 逐槽累积后直接写入新通道状态（首轮无冷却——
@@ -1678,7 +1658,7 @@ mod imp {
                                 // R-3/R-11（v0.3.17）：唤醒探测（休眠或装填
                                 // 灰显）成功计数，供诊断导出 summary。
                                 if sleeping || armed_gray {
-                                    WAKE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                                    telemetry.wake_successes.fetch_add(1, Ordering::Relaxed);
                                 }
                                 // WP-A：轮询成功读数写入持久化（同上节流）。
                                 let _ =
@@ -2122,7 +2102,9 @@ mod imp {
                                             // R-4/R-11（v0.3.17）：miss 子
                                             // 分类计数 + 采样日志（每分
                                             // 钟 1 条+计数）。
-                                            WAKE_MISS_AMBIGUOUS.fetch_add(1, Ordering::Relaxed);
+                                            telemetry
+                                                .wake_miss_ambiguous
+                                                .fetch_add(1, Ordering::Relaxed);
                                             if let Some(line) = wake_miss_sampler.note_miss(
                                                     "wake channel attribution miss (ambiguous); fallback arm-all",
                                                     Instant::now(),
@@ -2138,7 +2120,9 @@ mod imp {
                                             // E11：零候选匹配（系统性失配：
                                             // BT / 有线 / 他机接收器）与指
                                             // 纹不可解析分桶，各自独立计数。
-                                            WAKE_MISS_ZERO_MATCH.fetch_add(1, Ordering::Relaxed);
+                                            telemetry
+                                                .wake_miss_zero_match
+                                                .fetch_add(1, Ordering::Relaxed);
                                             if let Some(line) = wake_miss_sampler.note_miss(
                                                     "wake channel attribution miss (zero-match); fallback arm-all",
                                                     Instant::now(),
@@ -2153,7 +2137,8 @@ mod imp {
                                             channel_map_miss.fetch_add(1, Ordering::Relaxed);
                                             // E11：指纹不可解析（缺失/畸形）
                                             // 独立计数。
-                                            WAKE_MISS_NO_FINGERPRINT
+                                            telemetry
+                                                .wake_miss_no_fingerprint
                                                 .fetch_add(1, Ordering::Relaxed);
                                             if let Some(line) = wake_miss_sampler.note_miss(
                                                     "wake channel attribution miss (no-fingerprint); fallback arm-all",
@@ -2169,7 +2154,7 @@ mod imp {
                                 }
                                 None => {
                                     channel_map_miss.fetch_add(1, Ordering::Relaxed);
-                                    WAKE_MISS_NO_PATH.fetch_add(1, Ordering::Relaxed);
+                                    telemetry.wake_miss_no_path.fetch_add(1, Ordering::Relaxed);
                                     if let Some(line) = wake_miss_sampler.note_miss(
                                             "wake channel attribution miss (no raw path); fallback arm-all",
                                             Instant::now(),
@@ -2189,7 +2174,9 @@ mod imp {
                             }
                             if attribution != "hit" {
                                 // R-11：arm-all 装填数（诊断导出）。
-                                WAKE_ARM_ALL_FILLS.fetch_add(ids.len() as u64, Ordering::Relaxed);
+                                telemetry
+                                    .wake_arm_all_fills
+                                    .fetch_add(ids.len() as u64, Ordering::Relaxed);
                             }
                             for id in &ids {
                                 // WP-C：装填同时把该设备到期点提到「尽快」
@@ -2274,101 +2261,6 @@ mod imp {
                 }
             }
         }
-    }
-
-    /// WP-B 统计导出（IO 线程后台执行，v3 P2-③）：导出前先强制 flush
-    ///（缓冲事件不落空，v3「导出前先 flush」）→ 读双文件（current +
-    /// archive）→ 分段归因 →（可选）FNV-1a 哈希序匿名化 → 渲染。
-    /// CSV 主产物写用户在 Save-As 确认的路径（E5 起同样走 tmp→rename
-    /// 原子写，写中途失败不留半截 CSV）；JSON / HTML 主干跟随 CSV 最终
-    /// 确认文件名（v3 L111）；三件套各自 tmp→rename 落盘、失败清 tmp、
-    /// 互不影响。只读本机文件 + 渲染写盘，零设备查询（红线）。
-    /// 返回给用户的结果文案（成功列文件、失败给原因、部分成功如实分列）。
-    fn run_stats_export(
-        store: &mut volttray_app::stats::StatsStore,
-        req: &crate::statsexport::StatsExportRequest,
-    ) -> String {
-        use volttray_app::attribution as attr;
-        if let Err(e) = store.shutdown_flush(Instant::now(), wall_secs() as i64) {
-            bootlog::note(&format!("stats export: pre-export flush failed: {e}"));
-        }
-        let events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
-        let segments = attr::build_segments(&events);
-        let anon = if req.anonymize {
-            Some(attr::anonymize_map(&attr::event_keys(&events)))
-        } else {
-            None
-        };
-        let offset = local_offset_minutes();
-        let mut done: Vec<String> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        // E5（P1a）：CSV 主产物同样走 tmp→rename 原子写。
-        match write_tmp_rename(
-            &req.csv_path,
-            &attr::render_csv(&segments, anon.as_ref(), offset),
-        ) {
-            Ok(()) => done.push(req.csv_path.display().to_string()),
-            Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
-        }
-        let stem = req.csv_path.with_extension("");
-        if req.json {
-            let p = stem.with_extension("json");
-            let content = attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
-            match write_tmp_rename(&p, &content) {
-                Ok(()) => done.push(p.display().to_string()),
-                Err(e) => failed.push(format!("{}: {e}", p.display())),
-            }
-        }
-        if req.html {
-            let p = stem.with_extension("html");
-            let data = attr::build_report_data(
-                &events,
-                &segments,
-                anon.as_ref(),
-                offset,
-                wall_secs() as i64,
-            );
-            let content = attr::render_html(&data);
-            match write_tmp_rename(&p, &content) {
-                Ok(()) => done.push(p.display().to_string()),
-                Err(e) => failed.push(format!("{}: {e}", p.display())),
-            }
-        }
-        if failed.is_empty() {
-            format!("导出完成：\n{}", done.join("\n"))
-        } else if done.is_empty() {
-            format!("导出失败：\n{}", failed.join("\n"))
-        } else {
-            format!(
-                "部分完成：\n已导出：{}\n失败：{}",
-                done.join("；"),
-                failed.join("；")
-            )
-        }
-    }
-
-    /// tmp→rename 落盘：写中途失败不留半截目标文件；失败清 tmp。
-    /// rename 在 Windows 上原子覆盖既有目标，失败时旧文件保留、错误
-    /// 向上返回。
-    /// E5（P1a，红蓝对抗终审）：tmp 名带 pid＋进程内计数器唯一后缀——
-    /// 同路径并发写（导出与配置落盘竞争等）不再共用同一 tmp 名互踩。
-    pub(crate) fn write_tmp_rename(path: &Path, content: &str) -> std::io::Result<()> {
-        static TMP_SEQ: AtomicU32 = AtomicU32::new(0);
-        let mut tmp_os = path.as_os_str().to_owned();
-        tmp_os.push(format!(
-            ".tmp-{}-{}",
-            std::process::id(),
-            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let tmp = PathBuf::from(tmp_os);
-        let result = (|| {
-            std::fs::write(&tmp, content)?;
-            std::fs::rename(&tmp, path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result
     }
 
     /// 配置热重载处理（P1-2：所有权在 app 层）。从 io 循环体抽出，
@@ -2688,6 +2580,10 @@ mod imp {
         let (cmd_tx, cmd_rx) = mpsc::channel::<IoCmd>();
         // WP-A：通道归因失配计数（诊断导出可见，v3 红队 P2-6）。
         let channel_map_miss = Arc::new(AtomicU64::new(0));
+        // E8（红蓝对抗终审）：帧级（FRAME_STATS）与唤醒路径（WAKE_*）
+        // 遥测原为进程级静态量，现收编进 Telemetry 由 run 持有，经 Arc
+        // 穿线到 io_loop（SharedChannel 挂钩）与 pump（诊断导出读取）。
+        let telemetry = Arc::new(Telemetry::new());
         // WP-B（I-02）：Shutdown 落盘回执通道——io_loop 在 run_stop +
         // 双 store flush 完成后回执；ack 接收端交给 WM_ENDSESSION 承接
         // 窗口（GUI 菜单退出经同一 hook 等待）。
@@ -2707,6 +2603,7 @@ mod imp {
                 tid: unsafe { GetCurrentThreadId() },
             };
             let channel_map_miss_io = channel_map_miss.clone();
+            let telemetry_io = telemetry.clone();
             std::thread::spawn(move || {
                 io_loop(
                     core,
@@ -2716,6 +2613,7 @@ mod imp {
                     path,
                     enum_snap,
                     channel_map_miss_io,
+                    telemetry_io,
                     ack_tx,
                 )
             });
@@ -2905,6 +2803,7 @@ mod imp {
                         &observer,
                         &enum_snap,
                         &channel_map_miss,
+                        &telemetry,
                         &config_arc,
                         &cfg_path,
                         &exe,
@@ -2961,6 +2860,7 @@ mod imp {
         observer: &Arc<Mutex<Observer>>,
         enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
         channel_map_miss: &Arc<AtomicU64>,
+        telemetry: &Telemetry,
         cfg_arc: &Arc<RwLock<Config>>,
         cfg_path: &Path,
         exe: &Path,
@@ -3260,7 +3160,7 @@ mod imp {
                 // 位图边长（cur_size 随 DPI/配置变化在事件循环中维护）。
                 crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, *cur_size, &preview);
             } else if e.id == ids.diag {
-                export_diag(observer, enum_snap, channel_map_miss);
+                export_diag(observer, enum_snap, channel_map_miss, telemetry);
             } else if e.id == ids.stats_export {
                 // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
                 crate::statsexport::begin_export(cmd_tx);
@@ -3502,228 +3402,6 @@ mod imp {
         let _ = tray.set_tooltip(Some(&tip));
     }
 
-    /// v0.3.3 #2：把 os error 翻译成可读错误（保留原始错误供诊断）。
-    fn friendly_io_error(e: &std::io::Error) -> String {
-        use std::io::ErrorKind;
-        match e.kind() {
-            ErrorKind::NotFound => "系统找不到指定的路径（目录不存在）".to_string(),
-            ErrorKind::PermissionDenied => "没有写入权限（请检查目录权限）".to_string(),
-            _ => e.to_string(),
-        }
-    }
-
-    /// 诊断导出落盘（v0.3.3 #2，可测试纯函数）：
-    /// 导出前 `create_dir_all` 确保目录存在（干净机器无历史目录也能导出），
-    /// 写入失败返回可读错误（含原始 os error）而非裸错误码。
-    fn write_diag_export(dir: &Path, filename: &str, json: &str) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            format!(
-                "无法创建导出目录 {}：{}；原始错误：{e}",
-                dir.display(),
-                friendly_io_error(&e)
-            )
-        })?;
-        let path = dir.join(filename);
-        std::fs::write(&path, json).map_err(|e| {
-            format!(
-                "无法写入 {}：{}；原始错误：{e}",
-                path.display(),
-                friendly_io_error(&e)
-            )
-        })?;
-        Ok(path)
-    }
-
-    /// v0.3.15：「另存为」对话框选导出路径（GetSaveFileNameW）。
-    fn pick_save_path(default_name: &str) -> Option<PathBuf> {
-        pick_save_path_with_filter(
-            default_name,
-            "JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0",
-            "json",
-        )
-    }
-
-    /// 「另存为」对话框（过滤器/默认扩展名可配；WP-B CSV 导出复用）。
-    /// 返回 None = 用户取消或对话框出错——两种都不写任何文件、不弹错误
-    /// （对话框出错留 bootlog 便于诊断）。OFN_NOCHANGEDIR 保证对话框
-    /// 不污染进程工作目录（IO 线程的相对路径语义不受影响）。
-    pub(crate) fn pick_save_path_with_filter(
-        default_name: &str,
-        filter: &str,
-        def_ext: &str,
-    ) -> Option<PathBuf> {
-        let mut file_buf: Vec<u16> = vec![0u16; 260];
-        let default_wide = wide(default_name);
-        let copy_len = default_wide.len().min(file_buf.len());
-        file_buf[..copy_len].copy_from_slice(&default_wide[..copy_len]);
-        let filter = wide(filter);
-        let def_ext = wide(def_ext);
-        // windows 0.62 的 OPENFILENAMEW（x86_64 变体）不实现 Default——
-        // 含裸指针字段，需 zeroed 后逐字段赋值。
-        // SAFETY(E9): OPENFILENAMEW 含裸指针字段不实现 Default，zeroed 后立即逐字段赋值且先写 lStructSize；后续赋值覆盖全部被引用成员。
-        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.lpstrFile = PWSTR(file_buf.as_mut_ptr());
-        ofn.nMaxFile = file_buf.len() as u32;
-        ofn.lpstrFilter = PCWSTR(filter.as_ptr());
-        ofn.nFilterIndex = 1;
-        ofn.lpstrDefExt = PCWSTR(def_ext.as_ptr());
-        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
-        // SAFETY(E9): ofn 已按契约初始化（lStructSize 正确、lpstrFile/nMaxFile 与 file_buf 容量配对）；file_buf 在调用期间存活。
-        let ok = unsafe { GetSaveFileNameW(&mut ofn) };
-        if !ok.as_bool() {
-            // SAFETY(E9): CommDlgExtendedError 无参、返回错误码值；仅在 GetSaveFileNameW 返回失败后调用。
-            let err = unsafe { CommDlgExtendedError() };
-            if err.0 != 0 {
-                bootlog::note(&format!(
-                    "save-as dialog error: commdlg extended error {}",
-                    err.0
-                ));
-            }
-            return None;
-        }
-        let len = file_buf
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(file_buf.len());
-        Some(PathBuf::from(String::from_utf16_lossy(&file_buf[..len])))
-    }
-
-    /// 导出落盘到用户选定路径（v0.3.15）：复用 write_diag_export 的
-    /// 目录自建 + 可读报错。**不做任何自动清理**——导出文件由用户自选
-    /// 位置、自行管理，本函数绝不删除/清理同目录的其它导出文件（含
-    /// %APPDATA% 下的历史导出）。
-    fn finalize_diag_export(path: &Path, json: &str) -> Result<PathBuf, String> {
-        let dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("导出路径不含有效文件名：{}", path.display()))?;
-        write_diag_export(dir, filename, json)
-    }
-
-    /// 取消路径的可测内核（v0.3.15）：None = 用户取消 → 不写任何文件、
-    /// 返回 None；Some(path) → 落盘并返回结果。
-    fn export_diag_to(path: Option<&Path>, json: &str) -> Option<Result<PathBuf, String>> {
-        path.map(|p| finalize_diag_export(p, json))
-    }
-
-    /// 诊断导出（P1-6：脱敏；v0.3.12 D-69：导出重构为对象——devices +
-    /// log_tail + last_enum + exported_at/app_version；v0.3.15：保存位置
-    /// 由用户经「另存为」对话框自选，取消则不写文件、不弹错误）。
-    /// **导出永远成功**：任何子项失败（日志缺失/锁中毒/枚举未发生）
-    /// 降级为空 + reason，绝不整体报错（v0.3.2 的 os error 3 教训）。
-    fn export_diag(
-        observer: &Arc<Mutex<Observer>>,
-        enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
-        channel_map_miss: &Arc<AtomicU64>,
-    ) {
-        // devices：原事件流导出（脱敏逻辑不动）；锁中毒降级为空数组 + reason。
-        // T-02a：同一次持锁内顺带收集设备名（事件流 DeviceFound；EnumSnapshot
-        // 本身无设备名字段——快照侧无名可取，事件流为唯一来源；锁中毒时收集为
-        // 空数组，仅 <USER> 规则生效，残余登记 T-02b 审计与对账跟踪）。
-        let (devices, devices_reason, device_names) = match observer.lock() {
-            Ok(o) => {
-                let mut names: Vec<String> = Vec::new();
-                for ev in o.events() {
-                    if let DiagKind::DeviceFound { name, .. } = &ev.kind {
-                        if !name.is_empty() && !names.iter().any(|n| n == name) {
-                            names.push(name.clone());
-                        }
-                    }
-                }
-                (o.export_value(true), None, names)
-            }
-            Err(_) => (
-                serde_json::Value::Array(Vec::new()),
-                Some("observer lock poisoned".to_string()),
-                Vec::new(),
-            ),
-        };
-        // log_tail：bootlog 登记的真实日志路径（APPDATA → EXE 目录 → TEMP
-        // 逐级兜底后的实际落点）；文件不存在/不可读由 read_log_tail 降级。
-        let log_tail = read_log_tail(
-            std::path::Path::new(&bootlog::path_str()),
-            LOG_TAIL_MAX_LINES,
-        );
-        // last_enum：最近一次枚举快照（内存状态）；未枚举为 null。
-        let (last_enum, last_enum_reason) = match enum_snap.lock() {
-            Ok(g) => (g.clone(), None),
-            Err(_) => (None, Some("enum snapshot lock poisoned".to_string())),
-        };
-        let exported_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let json = DiagExport {
-            devices,
-            devices_reason,
-            log_tail,
-            last_enum,
-            last_enum_reason,
-            channel_map_miss: channel_map_miss.load(Ordering::Relaxed),
-            frame_tx: FRAME_STATS.tx.load(Ordering::Relaxed),
-            frame_rx: FRAME_STATS.rx.load(Ordering::Relaxed),
-            avg_tx_interval_ms: FRAME_STATS.avg_tx_interval_ms(),
-            feature_index_tx: FRAME_STATS.feature_tx(),
-            feature_index_rx: FRAME_STATS.feature_rx(),
-            arm_all_fills: WAKE_ARM_ALL_FILLS.load(Ordering::Relaxed),
-            wake_successes: WAKE_SUCCESSES.load(Ordering::Relaxed),
-            wake_miss_no_path: WAKE_MISS_NO_PATH.load(Ordering::Relaxed),
-            wake_miss_zero_match: WAKE_MISS_ZERO_MATCH.load(Ordering::Relaxed),
-            wake_miss_no_fingerprint: WAKE_MISS_NO_FINGERPRINT.load(Ordering::Relaxed),
-            wake_miss_ambiguous: WAKE_MISS_AMBIGUOUS.load(Ordering::Relaxed),
-            exported_at,
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-        }
-        .to_json_string_with(&device_names);
-        // v0.3.15：保存位置由用户经「另存为」对话框自选；取消则不写任何
-        // 文件、不弹错误，仅留 bootlog。导出文件由用户自行管理——本路径
-        // 不做任何自动清理（含 %APPDATA% 下的历史导出文件）。
-        // 第 7 项：默认文件名改本地时间可读格式（GetLocalTime 取时，
-        // 格式化纯逻辑在 app 层跨平台可测）；JSON 内 exported_at 字段
-        // 保留 unix 秒不动（程序消费）。同名碰撞由对话框
-        // OFN_OVERWRITEPROMPT 覆盖前确认兜底（见 diag_export.rs 论证）。
-        // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
-        let local = unsafe { GetLocalTime() };
-        let default_name = diag_export_filename_local(LocalTimeParts {
-            year: local.wYear,
-            month: local.wMonth,
-            day: local.wDay,
-            hour: local.wHour,
-            minute: local.wMinute,
-            second: local.wSecond,
-            millis: local.wMilliseconds,
-        });
-        let Some(chosen) = pick_save_path(&default_name) else {
-            bootlog::note("diag export cancelled by user (save-as dialog)");
-            return;
-        };
-        let msg = match export_diag_to(Some(&chosen), &json) {
-            Some(Ok(path)) => format!(
-                "诊断已导出（设备事件流 + 日志尾部 {} 行 + 最近枚举快照）：\n{}",
-                LOG_TAIL_MAX_LINES,
-                path.display()
-            ),
-            Some(Err(e)) => format!("诊断导出失败：{e}"),
-            None => unreachable!("Some(path) always yields Some(result)"),
-        };
-        let text = wide(&msg);
-        let title = wide("LogiVoltTray 诊断");
-        // SAFETY(E9): text/title 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数为值类型。
-        unsafe {
-            MessageBoxW(
-                None,
-                PCWSTR(text.as_ptr()),
-                PCWSTR(title.as_ptr()),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
-    }
-
     #[cfg(test)]
     mod e10_regression_tests {
         use super::*;
@@ -3793,15 +3471,16 @@ mod imp {
             assert_eq!(s.note_miss("m", t0 + Duration::from_secs(62)), None);
         }
 
-        /// R-11：帧遥测计数 / feature_index 分类 / 平均写间隔。静态量进程
-        /// 共享——BF-6：全部断言改为相对增量 / 快照重算（并发测试可能先
-        /// 写入同类帧与间隔样本，绝对断言会假失败）。
+        /// R-11：帧遥测计数 / feature_index 分类 / 平均写间隔。E8：原全局
+        /// 静态 FRAME_STATS 已收编进 Telemetry（由 run 持有）；本用例改用
+        /// 独立实例，相对增量 / 快照重算断言（BF-6）口径原样保留。
         #[test]
         fn frame_stats_counts_and_averages() {
-            let tx0 = FRAME_STATS.tx.load(Ordering::Relaxed);
-            let rx0 = FRAME_STATS.rx.load(Ordering::Relaxed);
+            let frame_stats = FrameStats::new();
+            let tx0 = frame_stats.tx.load(Ordering::Relaxed);
+            let rx0 = frame_stats.rx.load(Ordering::Relaxed);
             let (f_tx0, f_rx0, sum0, cnt0) = {
-                let g = FRAME_STATS.inner.lock().unwrap();
+                let g = frame_stats.inner.lock().unwrap();
                 (
                     g.feature_tx.get("0x10").copied().unwrap_or(0),
                     g.feature_rx.get("0x10").copied().unwrap_or(0),
@@ -3810,13 +3489,13 @@ mod imp {
                 )
             };
             let t0 = Instant::now();
-            FRAME_STATS.note_tx(&[0x10, 0x00, 0x10], t0);
-            FRAME_STATS.note_tx(&[0x10, 0x00, 0x10], t0 + Duration::from_millis(500));
-            FRAME_STATS.note_rx(&[0x11, 0x00, 0x10]);
-            assert_eq!(FRAME_STATS.tx.load(Ordering::Relaxed), tx0 + 2);
-            assert_eq!(FRAME_STATS.rx.load(Ordering::Relaxed), rx0 + 1);
+            frame_stats.note_tx(&[0x10, 0x00, 0x10], t0);
+            frame_stats.note_tx(&[0x10, 0x00, 0x10], t0 + Duration::from_millis(500));
+            frame_stats.note_rx(&[0x11, 0x00, 0x10]);
+            assert_eq!(frame_stats.tx.load(Ordering::Relaxed), tx0 + 2);
+            assert_eq!(frame_stats.rx.load(Ordering::Relaxed), rx0 + 1);
             {
-                let g = FRAME_STATS.inner.lock().unwrap();
+                let g = frame_stats.inner.lock().unwrap();
                 assert_eq!(g.feature_tx.get("0x10"), Some(&(f_tx0 + 2)));
                 assert_eq!(g.feature_rx.get("0x10"), Some(&(f_rx0 + 1)));
                 // 平均间隔按快照重算：本用例新增 1 个 500ms 样本。
@@ -3824,7 +3503,7 @@ mod imp {
                 assert_eq!(g.tx_interval_count, cnt0 + 1);
             }
             assert_eq!(
-                FRAME_STATS.avg_tx_interval_ms(),
+                frame_stats.avg_tx_interval_ms(),
                 Some((sum0 + 500) / (cnt0 + 1))
             );
         }
@@ -3892,211 +3571,6 @@ mod imp {
             let base = menu_content_sig(None, 60, false, false, false, None, &[], false);
             let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true);
             assert_ne!(base, with_failure);
-        }
-    }
-
-    #[cfg(test)]
-    mod diag_export_tests {
-        use super::*;
-
-        fn temp_root(tag: &str) -> PathBuf {
-            let mut p = std::env::temp_dir();
-            p.push(format!(
-                "volttray-diag-test-{}-{tag}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-            p
-        }
-
-        /// #2 回归：目标目录（含多级嵌套）不存在时导出仍成功——
-        /// 真机「系统找不到指定的路径。(os error 3)」的根因即缺 create_dir_all。
-        #[test]
-        fn export_creates_missing_nested_dirs() {
-            let root = temp_root("nested");
-            let dir = root.join("a").join("b").join("c");
-            let path = write_diag_export(&dir, "LogiVoltTray-diag-export-1.json", "[]")
-                .expect("export should succeed on missing dirs");
-            assert!(path.is_file());
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                "[]",
-                "exported content must match"
-            );
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// #2：导出目录被同名文件挡住时，错误可读且含原始错误。
-        #[test]
-        fn export_blocked_by_file_gives_readable_error() {
-            let root = temp_root("blocked");
-            std::fs::create_dir_all(&root).unwrap();
-            let blocker = root.join("blocker");
-            std::fs::write(&blocker, b"i am a file").unwrap();
-            let err = write_diag_export(&blocker, "x.json", "[]")
-                .expect_err("export into a file path must fail");
-            assert!(
-                err.contains("无法创建导出目录"),
-                "readable error expected, got: {err}"
-            );
-            assert!(err.contains("原始错误"), "raw error retained: {err}");
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// #2：导出文件名统一为 LogiVoltTray- 前缀（#1 命名一致性）。
-        #[test]
-        fn export_filename_uses_logivolttray_prefix() {
-            let root = temp_root("prefix");
-            let path = write_diag_export(&root, "LogiVoltTray-diag-export-42.json", "{}").unwrap();
-            assert!(path
-                .to_string_lossy()
-                .contains("LogiVoltTray-diag-export-42.json"));
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// v0.3.15：用户在「另存为」对话框取消 → 不写任何文件、不报错
-        /// （None 路径的可测内核）；Some 路径正常落盘。
-        #[test]
-        fn cancel_path_writes_nothing() {
-            let root = temp_root("cancel");
-            let target = root.join("sub").join("out.json");
-            assert!(
-                export_diag_to(None, "{}").is_none(),
-                "cancel must not attempt any write"
-            );
-            assert!(!root.exists(), "cancel must not create the target dir/file");
-            let written = export_diag_to(Some(&target), "{}")
-                .expect("Some(path) yields a result")
-                .expect("write to chosen path succeeds");
-            assert!(written.is_file());
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// v0.3.15（19:17 用户拍板）：导出成功路径**不删除任何已有导出
-        /// 文件**——同目录的历史导出与无关文件逐字节保持原样（软件不做
-        /// 任何形式的自动清理，文件由用户自行管理）。
-        #[test]
-        fn save_success_leaves_sibling_exports_untouched() {
-            let root = temp_root("siblings");
-            std::fs::create_dir_all(&root).unwrap();
-            let old1 = root.join("LogiVoltTray-diag-export-1.json");
-            let old2 = root.join("LogiVoltTray-diag-export-2.json");
-            let unrelated = root.join("unrelated.txt");
-            std::fs::write(&old1, b"{\"old\":1}").unwrap();
-            std::fs::write(&old2, b"{\"old\":2}").unwrap();
-            std::fs::write(&unrelated, b"keep me").unwrap();
-            let target = root.join("LogiVoltTray-diag-export-3.json");
-            let written = finalize_diag_export(&target, "{}").expect("export succeeds");
-            assert!(written.is_file());
-            assert_eq!(std::fs::read(&old1).unwrap(), b"{\"old\":1}");
-            assert_eq!(std::fs::read(&old2).unwrap(), b"{\"old\":2}");
-            assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep me");
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// T-01(a) 故障注入：rename 失败时旧目标逐字节保留、返回 Err、
-        /// tmp 被清理。注入形态＝目标被目录占位（Linux EISDIR / Windows
-        /// Access Denied，跨平台必失败；Windows 句柄占用形态不可移植构造，
-        /// 由 CI windows 环境承载）。
-        #[test]
-        fn write_tmp_rename_failure_keeps_old_target_and_cleans_tmp() {
-            let root = temp_root("t01a");
-            std::fs::create_dir_all(&root).unwrap();
-            let path = root.join("target.json");
-            std::fs::create_dir(&path).unwrap();
-            let inner = path.join("keep.txt");
-            std::fs::write(&inner, b"old-bytes").unwrap();
-            let result = write_tmp_rename(&path, "new-content");
-            assert!(result.is_err(), "rename 到目录占位目标必须返回 Err");
-            assert!(inner.is_file(), "旧目标（目录形态及其内容）必须保留");
-            assert_eq!(
-                std::fs::read(&inner).unwrap(),
-                b"old-bytes",
-                "旧目标逐字节保留"
-            );
-            // E5：tmp 名带 pid＋计数器唯一后缀，按前缀检查残留。
-            assert!(
-                !std::fs::read_dir(&root)
-                    .unwrap()
-                    .filter_map(|e| e.ok())
-                    .any(|e| e
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("target.json.tmp")),
-                "失败后 tmp 必须被清理"
-            );
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// T-01(b) 原子性：目标已存在时覆盖写，任何可观察时刻目标存在且
-        /// 内容完整——成功＝新值；成功后无 tmp 残留（失败＝旧值由 (a) 承载）。
-        #[test]
-        fn write_tmp_rename_overwrite_is_atomic() {
-            let root = temp_root("t01b");
-            std::fs::create_dir_all(&root).unwrap();
-            let path = root.join("target.json");
-            std::fs::write(&path, "old-content").unwrap();
-            write_tmp_rename(&path, "new-content").expect("覆盖写必须成功");
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                "new-content",
-                "成功后目标＝新值"
-            );
-            // E5：tmp 名带 pid＋计数器唯一后缀，按前缀检查残留。
-            assert!(
-                !std::fs::read_dir(&root)
-                    .unwrap()
-                    .filter_map(|e| e.ok())
-                    .any(|e| e
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("target.json.tmp")),
-                "成功后无 tmp 残留"
-            );
-            let _ = std::fs::remove_dir_all(&root);
-        }
-
-        /// E5（P1a）：双线程同路径并发写——tmp 名带 pid＋计数器唯一
-        /// 后缀，两写者不共用 tmp 名互踩；每次 rename 原子覆盖，任何
-        /// 可观察时刻目标都是某一写者的完整内容（非半截/混杂），全程
-        /// 无 tmp 残留。
-        #[test]
-        fn write_tmp_rename_concurrent_same_path() {
-            let root = temp_root("t01c");
-            std::fs::create_dir_all(&root).unwrap();
-            let path = root.join("target.csv");
-            let mut handles = Vec::new();
-            for writer in 0..2u32 {
-                let p = path.clone();
-                handles.push(std::thread::spawn(move || {
-                    for round in 0..50u32 {
-                        write_tmp_rename(&p, &format!("writer-{writer}-round-{round}"))
-                            .expect("concurrent write must succeed");
-                    }
-                }));
-            }
-            for h in handles {
-                h.join().unwrap();
-            }
-            // 终态：目标存在，内容为某一写者某一轮的完整值。
-            let content = std::fs::read_to_string(&path).unwrap();
-            let complete =
-                (0..2u32).any(|w| (0..50u32).any(|r| content == format!("writer-{w}-round-{r}")));
-            assert!(complete, "目标必须是某一完整写入值，实际: {content:?}");
-            // 无 tmp 残留（按前缀检查）。
-            assert!(
-                !std::fs::read_dir(&root)
-                    .unwrap()
-                    .filter_map(|e| e.ok())
-                    .any(|e| e
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("target.csv.tmp")),
-                "并发写后无 tmp 残留"
-            );
-            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }
