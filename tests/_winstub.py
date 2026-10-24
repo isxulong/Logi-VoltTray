@@ -13,6 +13,48 @@
                           可用 HANDLERS / DEFAULT_RETURNS 定制返回值
   * sys.modules['winreg'] -> 内存版注册表（HKCU 子树，路径即句柄）
   * sys.modules['hid']    -> 空 HID 后端（enumerate 返回空）
+
+桩行为对照（E20，2026-10-24 红蓝对抗终审补注）
+=============================================
+每条桩与真实 Windows 行为的对应关系，以及「不像真的」的已知边界。
+改桩或被桩绊住时先读这张表：对不上的差异就是「测试在验证一个不存在
+的世界」——E20/A-R8 关注的正是这类缺口代价（uhid 真机 runner 上线前，
+本套件只覆盖纯逻辑层，内核设备层行为一律不在断言范围内）。
+
+ctypes.WINFUNCTYPE -> CFUNCTYPE
+  真实：WINFUNCTYPE 使用 WINAPI stdcall 调用约定（仅 Windows 存在）。
+  桩：Linux 无 stdcall，退化为 CFUNCTYPE（cdecl）。
+  边界：只影响调用约定，不影响参数个数与返回值语义；回调被真实
+  Windows 以 stdcall 调用的 ABI 差异本桩不覆盖。
+
+ctypes.WinDLL -> FakeDLL（CALLS / HANDLERS / DEFAULT_RETURNS）
+  真实：LoadLibrary 加载系统 DLL，API 返回句柄 / 错误码 / 设
+  last-error；句柄值由系统分配、不可预知。
+  桩：DEFAULT_RETURNS 里的句柄值（100/55/0x500/0xABC/77 等）是
+  随便取的「非零魔法数」，只为让产品代码走「成功」分支；未登记的
+  API 一律返回 0——对「返回非 0 即成功」的 API 是失败分支，对
+  「返回 0 即失败」的 BOOL 类 API 恰好也是失败分支，方向一致。
+  边界：不模拟 last-error、不模拟句柄生命周期（真实句柄会失效，
+  见 E2）；需要失败路径时用 HANDLERS 显式覆写，别依赖魔法数方向。
+
+FakeWinreg（内存版 HKCU）
+  真实：winreg 句柄是系统对象；OpenKey 不存在抛
+  FileNotFoundError(OSError(2))；枚举越界抛 OSError(22)；
+  Run 键在正常系统上总是存在。
+  桩：句柄 = 规范化小写路径字符串；OpenKey/QueryValueEx/DeleteValue
+  对不存在的键抛同样的 OSError(2)，EnumKey/EnumValue 越界抛
+  OSError(22)——errno 与真实一致，断言 errno 的用例有效。
+  边界：① 只覆盖 HKCU，其它根键不存在；② 不模拟权限错误
+  （OSError(5)）；③ 不模拟其它进程并发改注册表；④ 大小写归一
+  与真实 Windows 一致（键名不区分大小写）。
+
+hid 后端（空枚举）
+  真实：hid.enumerate 列出本机 HID 设备；device.open_path 打开
+  设备节点读写报告。
+  桩：enumerate 恒返回空列表（等同「没插任何设备」）；open_path
+  直接抛 OSError。
+  边界：设备插拔、报告字节流、句柄失效（E2）等一切设备层行为
+  不在本桩覆盖范围——那正是 uhid 真机 runner（E20 排期项）要补的层。
 """
 import ctypes
 import sys

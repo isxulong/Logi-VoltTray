@@ -204,6 +204,50 @@ jobs:
         uses: raven-actions/actionlint@v2
         continue-on-error: true
 
+  # E20（红蓝对抗终审 P2b 批，2026-10-24）：纯逻辑链 criterion 微基准进 CI。
+  # 首版口径（终审报告 E20 条目原文）：只跑数、不设阈值门禁——先把三条
+  # 纯逻辑链（frame 编解码 / 脱敏 / stats JSONL）的基线数字跑进 CI 日志，
+  # 阈值与回归门禁待积累若干轮基线后另行评审。bench 编译失败或运行
+  # 崩溃仍会令本 job 变红（这是代码正确性信号，不是性能信号）。
+  # 测量参数收窄（measurement-time 1s / warm-up 0.5s / sample-size 10），
+  # 单次约 10 秒内跑完，不拖慢 CI 关键路径；本地开发仍可用默认参数
+  # 跑完整测量。
+  microbench:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: volttray
+    steps:
+      - uses: actions/checkout@v4
+
+      # app bench 链路经 volttray-device → transport(hid 特性) → hidapi，
+      # 其 build.rs 需要系统 libudev（同 ubuntu / fuzz-smoke job 的已知前提）。
+      - name: install system deps (libudev for hidapi)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - uses: dtolnay/rust-toolchain@1.90.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: volttray
+
+      - name: criterion microbenches (numbers only, no threshold)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo bench --workspace --locked -- \
+            --measurement-time 1 --warm-up-time 0.5 --sample-size 10 \
+            2>&1 | tee ../microbench.log
+
+      - name: upload bench log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microbench-log
+          path: microbench.log
+          if-no-files-found: ignore
+          retention-days: 30
+
   # E19（红蓝对抗终审 P2b 批，2026-10-24）：decisions.md 冻结为只追加——
   # PR 级阻断检查：volttray/docs/decisions.md 的 diff 出现删除行即红
   # （numstat 删除列非 0）。新决策以新编号追加表尾；推翻既有条目用新

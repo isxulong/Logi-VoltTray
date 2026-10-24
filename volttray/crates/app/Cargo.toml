@@ -12,6 +12,14 @@ volttray-device = { path = "../device" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 
+[dev-dependencies]
+criterion = "0.5"
+
+# E20：纯逻辑链微基准（redact_text / stats parse roundtrip），CI 跑数
+[[bench]]
+name = "logic_chains"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
