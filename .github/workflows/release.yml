@@ -164,13 +164,20 @@ jobs:
           /c/Windows/System32/tar.exe -xf "$zip" -C "$dest"
           test -x "$dest/minisign-win64/x86_64/minisign.exe"
           echo "$dest/minisign-win64/x86_64" >> "$GITHUB_PATH"
-          minisign -v
+          # GITHUB_PATH 仅对后续步生效（第四轮演练实证：同步内 minisign -v
+          # 报 command not found, exit 127），本步冒烟须用全路径直接调用。
+          "$dest/minisign-win64/x86_64/minisign.exe" -v
 
       - name: minisign sign and self-verify
         if: env.MINISIGN_SECRET_KEY != ''
         shell: bash
         run: |
           set -euo pipefail
+          # PATH 双保险：GITHUB_PATH 跨步生效是主路径；此处再显式补一遍
+          # （cygpath 转 POSIX，避免 Windows 盘符冒号切碎 PATH），
+          # 使本步不依赖跨步 PATH 传递机制的细节。
+          export PATH="$(cygpath -u "$RUNNER_TEMP")/minisign-bin/minisign-win64/x86_64:$PATH"
+          minisign -v
           # 契约：启用签名必须同步提交公钥（用户验签入口，README 验证段引用）
           test -f ../minisign.pub || { echo "::error::已配置签名密钥但仓库根缺 minisign.pub 公钥——启用批次必须同步提交公钥"; exit 1; }
           key_file="$RUNNER_TEMP/minisign.key"
