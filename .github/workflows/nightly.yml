@@ -54,6 +54,14 @@ jobs:
         with:
           components: rust-src
 
+      # E16 扩面副作用修复（2026-10-24，run 40076969587 实证）：fuzz crate
+      # 新增 volttray-device/app 依赖后，包级依赖对所有 bin 生效——
+      # frame_fuzz 构建也会编译 hidapi，其 build.rs 需系统库 libudev；
+      # 本 job 此前只跑 protocol 无此依赖，缺装即构建失败。与 ci.yml
+      # fuzz-smoke / ubuntu job 同法安装。
+      - name: install system deps (libudev for hidapi)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
       # 协议层 nightly 回归：真实门禁，失败即红（PR#6 裁决；此前
       # continue-on-error 吞错）。批④融合注记：0007 原设计保留步级
       # continue-on-error（协议抖动不遮蔽 fuzz 信号），与已合入的真实
@@ -122,7 +130,7 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set +e -uo pipefail
@@ -252,7 +260,7 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set +e -uo pipefail
@@ -404,7 +412,7 @@ jobs:
         if: steps.drift-check.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.runId }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set +e -uo pipefail
