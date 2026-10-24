@@ -16,6 +16,8 @@ Logitech's official software has no tray battery number — this app fills the g
 
 **Download**: see the [latest release](https://github.com/isxulong/Logi-VoltTray/releases/latest) — grab `volttray-tray.exe` (~1.4 MB) and you're done; see the [Releases page](https://github.com/isxulong/Logi-VoltTray/releases) for older versions. Windows 10 / 11 (x64), double-click to run — no installer, no admin rights needed.
 
+**Integrity check (optional but recommended)**: every release ships `volttray-tray.exe.sha256.txt`; compare it with `Get-FileHash .\volttray-tray.exe -Algorithm SHA256` in PowerShell. The release pipeline is minisign-signing-ready but signing is not enabled yet (no signing key configured); once enabled, releases will additionally ship `volttray-tray.exe.minisig` — verify with `minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig` (the `minisign.pub` public key will be committed to the repo root with the enabling batch).
+
 > **An unsigned EXE may be blocked by Windows SmartScreen on first run** (the publisher has no reputation built up yet). If the blue "Windows protected your PC" prompt appears: click "**More info**" → "**Run anyway**" to allow it; only allow this one EXE of this program — do not loosen the system's blocking of other unknown programs based on this.
 
 ## Features

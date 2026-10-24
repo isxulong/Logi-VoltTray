@@ -99,6 +99,20 @@
   对账核对 [07-unsafe-ledger.md](07-unsafe-ledger.md) 台账计数与全仓实测
   unsafe 数一致（实测命令与口径见台账「计数口径」节）；unsafe 代码增减
   未同批更新 SAFETY(E9) 注释与台账计数的，打回。
+- E18 minisign 签名登记（红蓝对抗终审 P2b 批，2026-10-24 登记）：
+  release.yml 已加签名步——未配置 MINISIGN_SECRET_KEY 仓库密钥时跳过
+  签名照常发布（fail-open，与 T-15 未签名披露现状兼容）；配置后自动
+  启用，签名产出 .minisig 资产并立即用公钥自验（fail-closed，验不过
+  即发布失败）。启用签名时维护者三动作缺一不可：① 仓库 Secrets 配置
+  MINISIGN_SECRET_KEY；② 公钥提交到仓库根 minisign.pub（workflow 断言
+  其存在，缺失即红）；③ README 双语验证段公钥说明同步更新。
+- E18 检查更新降级确认（A-R10② 按 F-BvA-5 降级，2026-10-24 登记）：
+  「检查更新」维持 T-07 已实施的零网络形态（菜单固定项「检查更新
+  （当前 v{X}）」内嵌编译期版本号显示 → ShellExecuteW 打开
+  /releases/latest，仅常量 URL、无任何联网请求代码路径；2026-10-24
+  实测 menu.rs L176-177 / main.rs L3262 与登记一致）。终审降级口径
+  「版本显示＋发布页醒目化」已就该形态就位，本项确认不引入联网路径，
+  无新增代码改动。
 
 **N-3 降级必附取证（规则行原文）**：
 
