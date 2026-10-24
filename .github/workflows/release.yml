@@ -158,7 +158,11 @@ jobs:
           curl -fsSL --retry 3 -o "$zip" "https://github.com/jedisct1/minisign/releases/download/${ver}/minisign-${ver}-win64.zip"
           echo "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479  $zip" | sha256sum -c -
           mkdir -p "$dest"
-          tar --force-local -xf "$zip" -C "$dest"
+          # git-bash 自带的 GNU tar（C:\Program Files\Git\usr\bin\tar.exe）不能解 zip
+          # （第三轮演练实证：tar: This does not look like a tar archive）；
+          # Windows 系统自带的 bsdtar（System32\tar.exe）原生支持 zip，显式调用它。
+          /c/Windows/System32/tar.exe -xf "$zip" -C "$dest"
+          test -x "$dest/minisign-win64/x86_64/minisign.exe"
           echo "$dest/minisign-win64/x86_64" >> "$GITHUB_PATH"
           minisign -v
 
