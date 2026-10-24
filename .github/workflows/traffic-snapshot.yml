@@ -112,17 +112,19 @@ jobs:
       # P0-2（C1 冲突五裁决：时钟自动化不等观察期——观察期 ≥ T-14 到期日，
       # 到期无执行主体即静默过期）：T-14/T-09 到期检查挂本 workflow 每日跑
       # （C-05：周一改每日，覆盖 T-14 裁决截止 2026-11-06 前的零信号窗口）。
-      # C-10 单源：到期日不设本地常量，启动时从
-      # docs/experience/06-release-reconciliation.md F.1 时钟表对应行 grep
-      # 解析加粗日期（**YYYY-MM-DD**）——只改 06 跑批日期即跟随，解析失败
-      # ::error 并非 0 退出（时钟失效不得静默）。T-14 口径＝裁决截止
-      # 2026-11-06＋禁止到期自动接受（C-03 签发口径，单一文本以 06 为准）。
-      # **首月 advisory 只报不开单**（REPORT_ONLY_UNTIL）；期满后的处置
-      # 走 C-05 评审判据：仅当 06 F.1 登记「时钟评审结论＝同意升级」才执行
-      # 开单（去重与 N-2 同法：label 精确查），否则仅向对账 issue（label
-      # clock-review-due 的未结单）追加评论，无单可评论时 run 页留痕。
-      # issues:write 已自本 job 移除（见 permissions 注记），评审通过后由
-      # 维护者恢复；恢复前写操作失败自动降级为 run 页留痕、不算红。
+      # E19（红蓝对抗终审 P2b 批，2026-10-24）：机器可读字段迁出为
+      # 结构化 YAML——单源改为 docs/experience/reconciliation-clocks.yaml
+      # （JSON 双合法，python3 标准库 json 解析、零第三方依赖）；
+      # 06 F.1 时钟表自此为人类可读镜像，冲突以 YAML 为准。status 字段
+      # 消歧挂起态：suspended 时钟不产生到期信号（修复 T-14 已挂起但
+      # 旧 grep 口径仍会从 06 文本解出 2026-11-06 致误报到期的活体缺陷）。
+      # **首月 advisory 只报不开单**（YAML advisory.report_only_until）；
+      # 期满后的处置走 C-05 评审判据：仅当 06 F.1 登记「时钟评审结论＝
+      # 同意升级」才执行开单（去重与 N-2 同法：label 精确查），否则仅向
+      # 对账 issue（label clock-review-due 的未结单）追加评论，无单可
+      # 评论时 run 页留痕。issues:write 已自本 job 移除（见 permissions
+      # 注记），评审通过后由维护者恢复；恢复前写操作失败自动降级为
+      # run 页留痕、不算红。
       - name: T-14/T-09 clock due check (daily; first-month advisory, report-only)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,24 +132,35 @@ jobs:
         run: |
           set -uo pipefail
           CLOCK_FILE="docs/experience/06-release-reconciliation.md"
-          # C-10：到期日单源＝06 F.1 时钟表该时钟行的加粗日期（**YYYY-MM-DD**）
-          parse_due() {
-            grep -E "^\| $1 " "$CLOCK_FILE" \
-              | grep -oE '\*\*20[0-9]{2}-[0-9]{2}-[0-9]{2}\*\*' \
-              | head -1 | tr -d '*'
-          }
-          T14_DUE=$(parse_due 'T-14')
-          T09_DUE=$(parse_due 'T-09')
-          if [ -z "$T14_DUE" ] || [ -z "$T09_DUE" ]; then
-            echo "::error::时钟单源解析失败（T14='${T14_DUE}' T09='${T09_DUE}'）——06 F.1 时钟表行或加粗到期日缺失，须人工修复（C-10）"
+          CLOCKS_YAML="docs/experience/reconciliation-clocks.yaml"
+          # E19：时钟单源＝结构化 YAML（json 解析）。输出三行：
+          # T14_DUE（空=挂起/无到期日）/ T09_DUE / REPORT_ONLY_UNTIL
+          mapfile -t CLOCK_OUT < <(python3 - "$CLOCKS_YAML" <<'PYEOF'
+          import json, sys
+          d = json.load(open(sys.argv[1], encoding="utf-8"))
+          clocks = {c["id"]: c for c in d["clocks"]}
+          def due(cid):
+              c = clocks.get(cid)
+              if not c or c.get("status") != "active" or not c.get("due"):
+                  return ""
+              return c["due"]
+          print(due("T-14"))
+          print(due("T-09"))
+          print(d["advisory"]["report_only_until"])
+          PYEOF
+          )
+          T14_DUE="${CLOCK_OUT[0]:-}"
+          T09_DUE="${CLOCK_OUT[1]:-}"
+          REPORT_ONLY_UNTIL="${CLOCK_OUT[2]:-}"
+          if [ -z "$T09_DUE" ] || [ -z "$REPORT_ONLY_UNTIL" ]; then
+            echo "::error::时钟单源解析失败（T14='${T14_DUE}' T09='${T09_DUE}' until='${REPORT_ONLY_UNTIL}'）——reconciliation-clocks.yaml 结构缺失，须人工修复（E19/C-10）"
             exit 1
           fi
-          REPORT_ONLY_UNTIL="2026-11-23"
           today=$(date -u +%F)
           reached() { [ "$1" = "$2" ] || [ "$1" \> "$2" ]; return; }
-          echo "今日（UTC）：${today}｜T-14 到期 ${T14_DUE}（自 06 时钟表解析）｜T-09 到期 ${T09_DUE}（同上）｜advisory 只报期至 ${REPORT_ONLY_UNTIL}"
+          echo "今日（UTC）：${today}｜T-14 到期 ${T14_DUE:-（挂起，无信号）}（自 reconciliation-clocks.yaml 解析）｜T-09 到期 ${T09_DUE}（同上）｜advisory 只报期至 ${REPORT_ONLY_UNTIL}"
           due=""
-          if reached "$today" "$T14_DUE"; then due="T-14"; fi
+          if [ -n "$T14_DUE" ] && reached "$today" "$T14_DUE"; then due="T-14"; fi
           if reached "$today" "$T09_DUE"; then
             if [ -n "$due" ]; then due="${due} + T-09"; else due="T-09"; fi
           fi

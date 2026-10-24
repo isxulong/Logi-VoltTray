@@ -204,6 +204,38 @@ jobs:
         uses: raven-actions/actionlint@v2
         continue-on-error: true
 
+  # E19（红蓝对抗终审 P2b 批，2026-10-24）：decisions.md 冻结为只追加——
+  # PR 级阻断检查：volttray/docs/decisions.md 的 diff 出现删除行即红
+  # （numstat 删除列非 0）。新决策以新编号追加表尾；推翻既有条目用新
+  # 条目「作废」注记表达。仅 PR 触发（push main 为已评审合并结果，
+  # 同一 PR 门禁口径）；文件未改动时直接绿。
+  decisions-append-only:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: decisions.md append-only check
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          stat=$(git diff --numstat "origin/${{ github.base_ref }}...HEAD" -- volttray/docs/decisions.md || true)
+          if [ -z "$stat" ]; then
+            echo "decisions.md 未改动，通过"
+            exit 0
+          fi
+          added=$(printf '%s' "$stat" | awk '{print $1}')
+          deleted=$(printf '%s' "$stat" | awk '{print $2}')
+          echo "decisions.md diff：+${added} -${deleted}"
+          if [ "$deleted" != "0" ]; then
+            echo "::error::decisions.md 已冻结为只追加（E19）——本 PR 删除了 ${deleted} 行既有内容。新决策请以新编号追加表尾；推翻既有条目用新条目「作废」注记表达"
+            exit 1
+          fi
+          echo "只追加检查通过（+${added} -0）"
+
   # P2-7 红线守卫（C1 冲突一裁决：红线核验先 advisory——静态模式检查
   # report-only 挂 CI，不阻断；统计口径与升级条件登记于
   # docs/experience/03-release-quality-gate.md「红线守卫（advisory）」节）。

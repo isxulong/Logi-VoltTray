@@ -26,10 +26,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # T-05「30 晚」时钟起算日＝本 workflow（真实 fuzz 版）合入日。
-  # 维护者合入时若晚于此日期，请把本常量改为合入日。F-A10 裁决：
-  # 常量仅作下限，实际晚数按 run createdAt 实算，issue 正文写实际晚数。
-  FUZZ_CLOCK_START: "2026-10-20"
+  # E19（红蓝对抗终审 P2b 批，2026-10-24）：T-05「30 晚」时钟起算日
+  # 不再硬编码于此——单源为 docs/experience/reconciliation-clocks.yaml
+  # 的 T-05 行 start 字段，30-nights 评审步启动时用 python3 标准库
+  # json 解析读取（workflow 零时钟常量，承接 C-10 单源口径）。
 
 jobs:
   fuzz-smoke:
@@ -191,6 +191,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          # E19：起算日单源＝reconciliation-clocks.yaml T-05 行（json 解析，
+          # 零依赖）；解析失败 ::error 并非 0 退出（时钟失效不得静默）。
+          FUZZ_CLOCK_START=$(python3 -c "
+          import json
+          d = json.load(open('docs/experience/reconciliation-clocks.yaml', encoding='utf-8'))
+          c = next(c for c in d['clocks'] if c['id'] == 'T-05')
+          assert c['status'] == 'active' and c['start'], 'T-05 时钟非 active 或缺 start'
+          print(c['start'])
+          " 2>/dev/null) || { echo "::error::T-05 起算日单源解析失败——reconciliation-clocks.yaml T-05 行缺失/挂起，须人工修复（E19/C-10）"; exit 1; }
+          echo "T-05 起算日（自 reconciliation-clocks.yaml 解析）：$FUZZ_CLOCK_START"
           gh label create ci-review-due \
             --color FBCA04 \
             --description "30 晚到期评审（N-2 / T-05）" \

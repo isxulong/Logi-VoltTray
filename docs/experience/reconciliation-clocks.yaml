@@ -1,0 +1,41 @@
+{
+  "schema": "reconciliation-clocks/v1",
+  "updated": "2026-10-24",
+  "说明": "发布对账时钟的机器可读单源（E19，2026-10-24 红蓝对抗终审 P2b 批）。本文件为 JSON 双合法 YAML：workflow 一律用 python3 标准库 json 解析，不引入 PyYAML 依赖。06 文档 F.1 时钟表自此为人类可读镜像——两处冲突时以本文件为准；改时钟只改本文件，workflow 不得再另写常量（承接 C-10 单源口径）。status 取值：active=在跑、到期产信号；suspended=挂起、不产生到期信号（用户拍板暂缓类）。due 为 null 表示无到期日（挂起态）。",
+  "advisory": {
+    "report_only_until": "2026-11-23",
+    "说明": "首月 advisory 只报不开单截止日（P0-2 / C-05）：期满后仅当 06 F.1 以独立行登记「时钟评审结论＝同意升级」才自动开单，否则仅向对账 issue 追加评论。"
+  },
+  "clocks": [
+    {
+      "id": "T-14",
+      "name": "命名与商标评估",
+      "start": "2026-10-21",
+      "due": null,
+      "status": "suspended",
+      "owner": "维护者",
+      "reminder_workflow": "traffic-snapshot",
+      "note": "2026-10-24 用户决策登记：暂不更名，时钟挂起，重新评估时点待定；原到期日 2026-11-06 已失效（取代 2026-10-23 咨询法务路径）。挂起期间不产生 T-14 到期信号，原「逾期不裁决即阻塞渠道扩张」处置不生效；重新评估时点确定后回本文件重新登记（status 改 active 并填 due）。"
+    },
+    {
+      "id": "T-05",
+      "name": "fuzz 30 晚",
+      "start": "2026-10-20",
+      "due": "2026-11-19",
+      "status": "active",
+      "owner": "维护者",
+      "reminder_workflow": "nightly",
+      "note": "起算日＝T-05 fuzz 接电合入日；30 晚为常量下限，到期判据按最近一次 nightly run 的 createdAt 校核实际运行晚数（F-A10），issue 正文写实际晚数。"
+    },
+    {
+      "id": "T-09",
+      "name": "英文评审",
+      "start": "2026-10-21",
+      "due": "2027-01-19",
+      "status": "active",
+      "owner": "维护者",
+      "reminder_workflow": "traffic-snapshot",
+      "note": "英文版上线日（README.en-US.md 合入 main）+ 90 天。"
+    }
+  ]
+}
