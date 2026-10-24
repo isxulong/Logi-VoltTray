@@ -1,5 +1,8 @@
-//! 单实例（评审 P1-3）：命名 mutex + 命名事件。
-//! 第二实例激活第一实例后以退出码 0 退出（1s 内，无窗口、无提示）。
+//! 单实例（评审 P1-3）：命名 mutex。
+//! 第二实例发现已有实例在运行后以退出码 0 退出（1s 内，无窗口、无提示）。
+//!
+//! E14：删除「命名激活事件」死代码——事件被 create/signal 但全仓
+//! 无任何监听方（无 WaitForSingleObject/OpenEventW），信号永不被人接收。
 //!
 //! v0.3.22（质检复核 P0-1）：「立即重启」子实例带环境标记启动，识别后
 //! 轮询等待旧实例释放互斥体（≤ [`RESTART_WAIT_TIMEOUT`]）再进主流程——
@@ -11,10 +14,9 @@ use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
-use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, SetEvent};
+use windows::Win32::System::Threading::CreateMutexW;
 
 const MUTEX_NAME: &str = "Local\\LogiVoltTray.SingleInstance";
-const EVENT_NAME: &str = "Local\\LogiVoltTray.Activate";
 
 /// 重启子实例等待旧实例释放互斥体的超时上限：旧实例优雅退出路径为
 /// IoCmd::Shutdown（IO 线程 recv 被命令即时打断）+ ENDSESSION_HOOK 应答
@@ -33,7 +35,7 @@ fn wide(s: &str) -> Vec<u16> {
 pub enum SingleInstance {
     /// 首个实例：持有 mutex 句柄直到进程退出。
     First(HANDLE),
-    /// 已有实例在运行：已发出激活事件，应立即 exit(0)。
+    /// 已有实例在运行：应立即 exit(0)。
     Second,
 }
 
@@ -65,18 +67,7 @@ fn try_acquire() -> Result<Option<HANDLE>, String> {
 pub fn acquire() -> Result<SingleInstance, String> {
     match try_acquire()? {
         Some(h) => Ok(SingleInstance::First(h)),
-        None => {
-            // SAFETY(E9): ev_name 为 NUL 结尾宽字符缓冲、存活至调用返回；事件句柄用毕 CloseHandle，失败仅退化激活通知。
-            unsafe {
-                let ev_name = wide(EVENT_NAME);
-                if let Ok(ev) = CreateEventW(None, false, false, PCWSTR::from_raw(ev_name.as_ptr()))
-                {
-                    let _ = SetEvent(ev);
-                    let _ = CloseHandle(ev);
-                }
-            }
-            Ok(SingleInstance::Second)
-        }
+        None => Ok(SingleInstance::Second),
     }
 }
 
