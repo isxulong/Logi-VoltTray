@@ -17,6 +17,7 @@ pub mod persist;
 pub mod physkey;
 pub mod reconnect;
 pub mod redact;
+pub mod settings_logic;
 pub mod settings_text;
 pub mod stats;
 pub mod wakechannel;

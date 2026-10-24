@@ -54,8 +54,14 @@ use volttray_app::config::{
     ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_DEFAULT, ICON_TEXT_SCALE_MAX,
     ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
 };
+// E23（报告口径 A-R4② 第 2 步）：阈值校验 / 档位映射 / applied 日志行
+// 拼写同样抽离到 app crate（跨平台受测）；本文件只剩 Win32 控件装配。
+use volttray_app::settings_logic::{
+    parse_tier_threshold, retier_thresholds, thresholds_strictly_increasing,
+    TIER_THRESHOLD_ERR_NOT_INCREASING,
+};
 use volttray_app::settings_text::{
-    fine_tune_gate_text, lab_hint_text, tier_hint_dynamic, LAB_HINT_TEXT,
+    fine_tune_gate_text, lab_hint_text, settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -518,45 +524,6 @@ impl Ctx {
             ));
         }
         crate::bootlog::note(&settings_applied_note(&prev, cfg));
-    }
-}
-
-/// 「settings applied」日志行（v0.3.14，B9）：列出发生变化的用户可感知键
-/// （阈值/闪烁/静音/通知/轮询/自启 + 外观键）；无变化时明确标注。
-fn settings_applied_note(prev: &Config, next: &Config) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    macro_rules! cmp {
-        ($field:ident) => {
-            if prev.$field != next.$field {
-                parts.push(format!(
-                    "{} {:?}->{:?}",
-                    stringify!($field),
-                    prev.$field,
-                    next.$field
-                ));
-            }
-        };
-    }
-    cmp!(low_threshold);
-    cmp!(blink_enabled);
-    cmp!(notification_silent);
-    cmp!(notifications_enabled);
-    cmp!(poll_interval_secs);
-    cmp!(autostart);
-    cmp!(icon_shape);
-    cmp!(icon_background);
-    cmp!(icon_font_color);
-    cmp!(icon_text_scale);
-    cmp!(icon_bg_scale);
-    cmp!(experimental_persist_last_known);
-    cmp!(experimental_stats);
-    cmp!(experimental_per_device_polling);
-    cmp!(experimental_bluetooth_wired);
-    cmp!(ui_fine_tune_expanded);
-    if parts.is_empty() {
-        "settings applied (no tracked key changed)".to_string()
-    } else {
-        format!("settings applied: {}", parts.join(", "))
     }
 }
 
@@ -2835,24 +2802,9 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 return;
             }
             let n = FONT_TIER_MIN_TIERS + idx as usize;
-            let mut ths = cfg.icon_font_tier_thresholds.clone();
-            while ths.len() + 1 > n {
-                ths.pop();
-            }
-            while ths.len() + 1 < n {
-                let lo = ths.last().map(|t| *t as i32).unwrap_or(0);
-                let slots = n - ths.len() - 1;
-                let next = if slots > 0 {
-                    (99 - lo) / (slots as i32 + 1) + lo
-                } else {
-                    (99 + lo) / 2
-                };
-                let next = next.clamp(lo + 1, FONT_TIER_THRESHOLD_MAX as i32) as u8;
-                if next as i32 <= lo {
-                    break; // 无严格递增空间；normalize 会兜底。
-                }
-                ths.push(next);
-            }
+            // E23 第 2 步：均分/弹尾逻辑逐字抽离到 app::settings_logic
+            // （含末档 99 时 clamp panic 的既有缺陷语义，见该函数注释）。
+            let ths = retier_thresholds(&cfg.icon_font_tier_thresholds, n);
             let (t2, c2, _) = normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
             cfg.icon_font_tier_thresholds = t2;
             cfg.icon_font_tier_colors = c2;
@@ -2869,15 +2821,11 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
                 set_tier_error(hwnd, ctx, i, None); // 输入中间态
                 return;
             }
-            let v: u8 = match text.parse::<i64>() {
-                Ok(v)
-                    if (FONT_TIER_THRESHOLD_MIN as i64..=FONT_TIER_THRESHOLD_MAX as i64)
-                        .contains(&v) =>
-                {
-                    v as u8
-                }
-                _ => {
-                    set_tier_error(hwnd, ctx, i, Some("⚠ 需为 1–99 整数"));
+            // E23 第 2 步：解析与区间校验抽离到 app::settings_logic（文案常量同源）。
+            let v: u8 = match parse_tier_threshold(&text) {
+                Ok(v) => v,
+                Err(msg) => {
+                    set_tier_error(hwnd, ctx, i, Some(msg));
                     return;
                 }
             };
@@ -2886,8 +2834,8 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             }
             let mut ths = cfg.icon_font_tier_thresholds.clone();
             ths[i] = v;
-            if !ths.windows(2).all(|w| w[0] < w[1]) {
-                set_tier_error(hwnd, ctx, i, Some("⚠ 需严格递增"));
+            if !thresholds_strictly_increasing(&ths) {
+                set_tier_error(hwnd, ctx, i, Some(TIER_THRESHOLD_ERR_NOT_INCREASING));
                 return;
             }
             cfg.icon_font_tier_thresholds = ths;
