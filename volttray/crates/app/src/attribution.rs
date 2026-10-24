@@ -768,11 +768,24 @@ fn build_recent_rates(
 pub const CSV_HEADER: &str = "device_key,display_name,segment_type,start_ts,end_ts,duration_min,start_pct,end_pct,delta_pct,rate_pct_per_hour,note";
 
 /// CSV 字段转义（含 `,` `"` 换行时加引号、内引号双写）。
+///
+/// E12（报告口径收窄）：公式注入兜底仅针对 `+` / `-` 两前缀加 `'`
+/// 引前缀——`=` 与 `@` 在设备名 sanitize 白名单阶段已被替换为 `?`
+/// （见 device::sanitize::is_allowed），不可能活到导出侧；`+`/`-`
+/// 是白名单放行字符（电量百分比、型号名常见），需在导出侧兜底。
+/// 本守卫只覆盖用户可见/可被引用的 CSV 导出（render_csv），不影响
+/// 内部诊断 JSON。
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    // 先加公式注入引前缀，再走引号包裹——`'+-` 开头即被表格软件当纯文本。
+    let guarded = if s.starts_with('+') || s.starts_with('-') {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
     }
 }
 
@@ -1522,6 +1535,22 @@ mod tests {
     }
 
     // -- CSV 导出 ------------------------------------------------------------
+
+    #[test]
+    fn csv_field_prefix_guard_formula_injection() {
+        // E12：`+`/`-` 开头字段加 `'` 引前缀（表格软件按纯文本处理）。
+        assert_eq!(csv_field("+cmd"), "'+cmd");
+        assert_eq!(csv_field("-5%"), "'-5%");
+        // 引前缀与引号包裹的组合：含逗号的 `+` 开头字段。
+        assert_eq!(csv_field("+a,b"), "\"'+a,b\"");
+        // 收窄口径：`=`/`@` 不加前缀（sanitize 已保证其到不了导出侧，
+        // 此处仅验证 csv_field 本身不对它们加前缀）。
+        assert_eq!(csv_field("=1+1"), "=1+1");
+        assert_eq!(csv_field("@x"), "@x");
+        // 普通字段不变；`+` 不在开头不触发。
+        assert_eq!(csv_field("MX Master 3+"), "MX Master 3+");
+        assert_eq!(csv_field(""), "");
+    }
 
     #[test]
     fn csv_golden_bom_header_escaping_and_unknown_rate_blank() {

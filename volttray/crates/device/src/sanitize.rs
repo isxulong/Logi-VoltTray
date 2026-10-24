@@ -11,6 +11,11 @@ pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 pub const FALLBACK_DEVICE_NAME: &str = "未知设备";
 
 fn is_allowed(c: char) -> bool {
+    // E12 对账：`+`/`-` 放行是有意的——型号名与习惯写法常见（如
+    // "MX Master 3+", 电量 "-5%"），公式注入风险由导出侧兜底
+    // （attribution::csv_field 对 `+`/`-` 开头字段加 `'` 引前缀）。
+    // 反之 `=`/`@` 不在白名单（被替换为 `?`），永远到不了导出侧，
+    // 故 CSV 守卫收窄为只覆盖 `+`/`-` 两前缀。
     c.is_alphanumeric()
         || matches!(
             c,
