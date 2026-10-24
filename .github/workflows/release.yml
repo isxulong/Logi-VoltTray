@@ -11,7 +11,16 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      # E18 签名链演练（2026-10-24）：dry_run=true 时走完 ci-gate / 构建 /
+      # 签名 / 公钥自验全部步骤，但跳过 Release 创建与资产上传——
+      # 不产生任何真实 tag / Release，专用于正式发版前的签名链验证。
+      dry_run:
+        description: "演练模式：走完构建/签名/自验，跳过 Release 创建与资产上传"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -187,8 +196,11 @@ jobs:
       # 固有，见其源码 revisit 注）；tag 一发一跑属预期形态，可接受。
       # E18：上传步按是否配置签名密钥分两支（files 列表是静态声明，无法用
       # 表达式拼接），资产清单差异仅在 .minisig 一项。
+      # dry_run 演练：github.event.inputs 在 tag push 时为 null，
+      # `null != 'true'` 恒真——正式 tag 发布行为完全不变；
+      # 仅手动 dispatch 且 dry_run=true 时跳过上传（E18 演练护栏）。
       - name: upload release assets (unsigned)
-        if: env.MINISIGN_SECRET_KEY == ''
+        if: env.MINISIGN_SECRET_KEY == '' && github.event.inputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           body_path: ${{ runner.temp }}/release-body.md
@@ -198,7 +210,7 @@ jobs:
             volttray/target/release/volttray-tray.exe.sha256.txt
 
       - name: upload release assets (signed)
-        if: env.MINISIGN_SECRET_KEY != ''
+        if: env.MINISIGN_SECRET_KEY != '' && github.event.inputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           body_path: ${{ runner.temp }}/release-body.md
