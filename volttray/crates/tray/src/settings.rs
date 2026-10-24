@@ -45,12 +45,17 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::icon::{cache_from_config, IconColor};
 use volttray_app::autostart;
+// E23（报告口径 A-R4② 第 1 步）：纯逻辑文案拼写已抽离到 app crate
+//（跨平台可测）；本文件只保留 Win32 侧的控件装配与调用。
 use volttray_app::config::{
     colorref_to_rgb, font_tier_for_percent, normalize_font_tiers, rgb_to_colorref, Config,
     IconBackground, IconFontColor, IconShape, RgbColor, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS,
     FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN,
     ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_DEFAULT, ICON_TEXT_SCALE_MAX,
     ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
+};
+use volttray_app::settings_text::{
+    fine_tune_gate_text, lab_hint_text, tier_hint_dynamic, LAB_HINT_TEXT,
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -280,50 +285,10 @@ const COVER_HINT_TEXT: &str = "背景覆盖度 100% = 满出血（覆盖整个�
 /// 宽度随客户区 = cw-104；v0.3.12 修复：此前单行高 14px 在窗口右缘截断；
 /// v0.3.17 R-9 追加保活扫描说明后升为三行）。
 const INTERVAL_HINT_TEXT: &str = "轮询本身几乎不消耗鼠标电量（每次查询仅约 2 个射频数据包）；间隔只需保证显示足够新鲜。休眠中的设备不会被主动唤醒查询。设备活动期间另有独立的连接保活扫描，其频率与间隔设置无关。";
-/// v0.3.22（D-87/D-88）：实验室 hint 终版文案——如实说明可逐项关闭、
-/// 尚未完成全量真机验证、反馈渠道与生效方式（不承诺「零事故」）。
-const LAB_HINT_TEXT: &str = "实验室（试验功能）：可逐项关闭；尚未完成全量真机验证，如遇异常请关闭对应功能并通过 Issues 反馈。改动保存后重启生效，可点『立即重启』立即应用。";
-/// 四项有未保存改动时追加的行（D-88：改动保存后需重启方完全生效）。
-const LAB_DIRTY_TEXT: &str = "已修改，重启后生效。";
 /// 闸门旁小字（D-87：收起仅隐藏选项，已开启的功能继续生效——收起≠关闭）。
 const GATE_NOTE_TEXT: &str = "收起仅隐藏选项，已开启的功能继续生效";
 /// 实验室分组框标题（D-87：组名统一「实验室（试验功能）」）。
 const LAB_GROUP_TITLE: &str = "实验室（试验功能）";
-/// 分档说明示例（v0.3.6 规范偏差修正：按当前档数/阈值实时拼写，替代静态常量）。
-/// 例：thresholds = [20, 50] →「阈值 1–99 严格递增；电量 ≤ 数值归入对应档（20/50 → 0–20 / 21–50 / 51–100）」。
-fn tier_hint_dynamic(thresholds: &[u8]) -> String {
-    let ths = thresholds
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join("/");
-    let mut parts: Vec<String> = Vec::new();
-    let mut lo: i32 = 0;
-    for &t in thresholds {
-        parts.push(format!("{lo}–{t}"));
-        lo = t as i32 + 1;
-    }
-    parts.push(format!("{lo}–100"));
-    format!(
-        "阈值 {FONT_TIER_THRESHOLD_MIN}–{FONT_TIER_THRESHOLD_MAX} 严格递增；电量 ≤ 数值归入对应档（{ths} → {}）",
-        parts.join(" / ")
-    )
-}
-
-/// 闸门复选框文案（D-87）：入口行用「精细化设置」交互语义 + 常驻计数。
-fn fine_tune_gate_text(enabled: usize) -> String {
-    format!("精细化设置（试验功能，已开启 {enabled}/4 项）")
-}
-
-/// 实验室 hint 动态拼写（D-88）：四项有未保存改动时追加「已修改，重启后生效」。
-fn lab_hint_text(dirty: bool) -> String {
-    if dirty {
-        format!("{LAB_HINT_TEXT}\n{LAB_DIRTY_TEXT}")
-    } else {
-        LAB_HINT_TEXT.to_string()
-    }
-}
-
 /// 四项是否有未保存改动（D-88）：与进程内首次打开设置窗口时的基线比对。
 fn lab_dirty(ctx: &Ctx) -> bool {
     let base = LAB_BASELINE.lock().ok().and_then(|g| *g);
@@ -3050,48 +3015,5 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
         } else {
             refresh_preview_and_hints(hwnd, ctx);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{fine_tune_gate_text, lab_hint_text, tier_hint_dynamic, LAB_HINT_TEXT};
-
-    #[test]
-    fn tier_hint_dynamic_spells_ranges() {
-        assert_eq!(
-            tier_hint_dynamic(&[20, 50]),
-            "阈值 1–99 严格递增；电量 ≤ 数值归入对应档（20/50 → 0–20 / 21–50 / 51–100）"
-        );
-        assert_eq!(
-            tier_hint_dynamic(&[10, 30, 50, 70]),
-            "阈值 1–99 严格递增；电量 ≤ 数值归入对应档（10/30/50/70 → 0–10 / 11–30 / 31–50 / 51–70 / 71–100）"
-        );
-    }
-
-    /// v0.3.22（D-87）：闸门计数常驻动态显示——N/4 实时拼写。
-    #[test]
-    fn fine_tune_gate_text_spells_count() {
-        assert_eq!(
-            fine_tune_gate_text(0),
-            "精细化设置（试验功能，已开启 0/4 项）"
-        );
-        assert_eq!(
-            fine_tune_gate_text(4),
-            "精细化设置（试验功能，已开启 4/4 项）"
-        );
-        assert_eq!(
-            fine_tune_gate_text(2),
-            "精细化设置（试验功能，已开启 2/4 项）"
-        );
-    }
-
-    /// v0.3.22（D-88）：hint 终版口径 + 未保存改动动态追加行。
-    #[test]
-    fn lab_hint_text_marks_dirty() {
-        assert!(!lab_hint_text(false).contains("已修改，重启后生效"));
-        assert!(lab_hint_text(true).contains("已修改，重启后生效"));
-        assert!(lab_hint_text(false).contains("实验室（试验功能）"));
-        assert!(LAB_HINT_TEXT.contains("尚未完成全量真机验证"));
     }
 }
