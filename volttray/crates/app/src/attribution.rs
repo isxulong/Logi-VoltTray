@@ -1586,7 +1586,7 @@ footer table{font-size:12px}
 var D=JSON.parse(document.getElementById("volttray-data").textContent);
 var PALETTE=["#2b6cb0","#c53030","#2f855a","#b7791f","#6b46c1","#c05621","#2c7a7b","#97266d"];
 var TYPE_COLOR={"active":"#2b6cb0","sleep":"#6b46c1","charging":"#2f855a","unknown":"#a0aec0"};
-var TYPE_LABEL={"active":"app 运行","sleep":"休眠","charging":"充电","unknown":"未知"};
+var TYPE_LABEL={"active":"app 运行时段（监控覆盖）","sleep":"休眠","charging":"充电","unknown":"未知"};
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 function el(tag,attrs,parent){var e=document.createElementNS("http://www.w3.org/2000/svg",tag);for(var k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
 function offSecs(){var m=D.meta.tz_offset;var sign=m[0]==="-"?-1:1;var p=m.slice(1).split(":");return ((+p[0])*60+(+p[1]))*sign*60;}
@@ -1813,7 +1813,7 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
     var pct=el("text",{x:x+6,y:y+RH-7,"font-size":10,fill:"#888"},svg);
     pct.textContent=Math.round((v.active||0)/tot*100)+"/"+Math.round((v.sleep||0)/tot*100)+"/"+Math.round((v.charging||0)/tot*100)+"/"+Math.round((v.unknown||0)/tot*100)+"%";
   });
-  document.getElementById("c3legend").innerHTML='<span><i style="background:#2b6cb0"></i>app 运行</span>'
+  document.getElementById("c3legend").innerHTML='<span><i style="background:#2b6cb0"></i>app 运行时段（监控覆盖）</span>'
     +'<span><i style="background:#6b46c1"></i>休眠</span><span><i style="background:#2f855a"></i>充电</span>'
     +'<span><i style="background:#a0aec0"></i>未知</span>';
 })();
