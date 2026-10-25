@@ -190,16 +190,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
+        # 治理自检步与 job 默认工作目录（volttray/）解耦——clocks 单源在
+        # 仓库根，相对路径须在仓库根解析（run 40176674164 FileNotFoundError
+        # 实证）。步级钉根目录，步内其余命令（gh label/run/issue）与 cwd
+        # 无关，一处钉死、步内路径口径统一。
+        working-directory: ${{ github.workspace }}
         run: |
           # E19：起算日单源＝reconciliation-clocks.yaml T-05 行（json 解析，
           # 零依赖）；解析失败 ::error 并非 0 退出（时钟失效不得静默）。
+          # 不吞 stderr：python traceback 直进 step 日志，真实异常不再被
+          # 通用文案掩盖（E19「不得静默」含解析失败可见）。
           FUZZ_CLOCK_START=$(python3 -c "
           import json
           d = json.load(open('docs/experience/reconciliation-clocks.yaml', encoding='utf-8'))
           c = next(c for c in d['clocks'] if c['id'] == 'T-05')
           assert c['status'] == 'active' and c['start'], 'T-05 时钟非 active 或缺 start'
           print(c['start'])
-          " 2>/dev/null) || { echo "::error::T-05 起算日单源解析失败——reconciliation-clocks.yaml T-05 行缺失/挂起，须人工修复（E19/C-10）"; exit 1; }
+          ") || { echo "::error::T-05 起算日单源解析失败——reconciliation-clocks.yaml T-05 行缺失/挂起，须人工修复（E19/C-10）"; exit 1; }
           echo "T-05 起算日（自 reconciliation-clocks.yaml 解析）：$FUZZ_CLOCK_START"
           gh label create ci-review-due \
             --color FBCA04 \
