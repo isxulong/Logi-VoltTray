@@ -97,6 +97,12 @@ v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24
   - ④ CSV `rate_pct_per_hour` 加 60s 最小段时长护栏（`MIN_RATE_DURATION_SECS`），短段速率返回 None（CSV 留空 / JSON null）。
   - ⑤ stats 段类型 `active` 口径定为「app 运行中且未判充电/休眠」，**不改名**（CSV/JSON schema 已对外稳定、recheck.py 质检与 E10 对账按现列名取值；改名属 HTML 报告重构范围，由报告层映射展示文案）——口径单一来源：`attribution.rs` `SegmentType::Active` 注释与本条。
 
+- **统计 HTML 重构批观察项（P2 ×4，登记于 2026-10-25）**：
+  - ① `pre_registration_offline` 判定用 `.any()` OR 语义，未复刻 upsert 各分支的优先级——存在与主路径判序不一致的残余风险，后续版本复核是否需按分支优先级复刻。
+  - ② `RecvTimeoutError::Disconnected` 退出路径不冲出采样器尾部——E10 对账公式（计数器值 = 可见 miss 行数 + Σ suppressed 汇报）仅对正常 Shutdown 收尾的会话成立，异常断开会话需另行对账口径。
+  - ③ `pre_registration_offline` proven-match（Rebound 对应）条件缺专属单测——现有测试未直接锁定该条件分支，后续补测。
+  - ④ `RecentRate` 汇总速率仅有 `hours > 0` 守卫、无最短总时长护栏——**注：统计 HTML 重构批（本次提交）已将「近7天活跃耗速率」摘要卡整体移除**，本观察项随移除自然消解，登记留痕备查。
+
 ## v0.3.22
 
 实验室（试验功能）默认开启 + 设置窗口「精细化设置」闸门：四项试验功能默认态回摆为开（D-85，项目所有者 2026-10-23 终审），配套 Q3 一次性提示、一键对齐与「立即重启」。本版为 D-84 质量加固批上叠加的单一特性批（D-89 显式修订：原计划 v0.3.22 为纯质量批，主 AD 终审后叠加本特性）。
