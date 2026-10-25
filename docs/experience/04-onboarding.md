@@ -56,12 +56,14 @@ cargo build --release --locked -p volttray-tray
 - 关键依赖速览：tray-icon 0.26 / muda（托盘与菜单）、windows crate（Win32 API）、hidapi（HID 通道），均只在 `cfg(windows)` 目标下启用。
 - release profile：体积优先（`opt-level="z"` + LTO + 单 codegen unit + strip，单文件 EXE ≤ 5MB 目标）；**`panic = "unwind"` 是有意选择**（PRD 要求 GUI 边界用 `catch_unwind`，不能开 abort——这也是 E1 中「线程 panic 进程不死」的制度背景）。
 - 无本地 Rust 环境时：fork 后 push 触发 CI，从云端 artifact 取 EXE。
+- 非 Windows 环境预检：用 zig 交叉 check 路径（交叉目标 `cargo check`，详见 [01 E16](01-engineering-lessons.md) 与 [03 门禁 B5](03-release-quality-gate.md)）。「fork 后 push 触发 CI」仅适用于你自己 fork 的仓库——向本仓库 push 默认一律禁止，须维护者当轮明确指令（边界见 [AGENTS.md §4](../../AGENTS.md)）。
 
 ### 本地与 CI 工具导读
 
 - **verify.sh（本地一键自检）**：仓库根 `bash verify.sh`（`--quick` 跳过交叉编译 check）一键跑 PR 门禁三件套——`cargo fmt --check` / `clippy -D warnings` / `cargo test --locked`——外加 release 目标交叉编译 check 与 commit trailer 契约 lint（提示模式）。脚本只读、不改任何文件；覆盖范围声明见脚本头注释（windows 真机环境、协议冻结 python 测试等不在其覆盖范围，完整门禁以 CI 为准）。
 - **fuzz（协议帧模糊测试）**：`volttray/fuzz/`（cargo-fuzz），目标 `frame_fuzz` 打协议帧解析，本地跑 `cargo fuzz run frame_fuzz`（需 nightly 工具链）；`.github/workflows/nightly.yml` 每晚自动跑 5 分钟真实烟测，失败自动开单。「30 晚」时钟自该 workflow 合入日起算，判据与时钟挂载见 [06 F.1](06-release-reconciliation.md)。
 - **fixtures 再生成**：协议黄金样例与测试数据由 `volttray/fixtures/gen_golden.py` 生成（产出 `fixtures/golden/` 向量等），协议编解码行为改动后重跑该脚本再生成，勿手改 golden 文件。
+- **git 端点失效时的核对 / 推送范式**：沙箱或受限网络下 github.com 的 git 端点可能 502 / TLS 不可用——一律改走 api.github.com：读取用 codeload tarball 或 REST API，全量核对 commit / tag target 用 Git Data API（blobs → tree → commit → update ref，fast-forward、绝不 force push）。该范式经 2026-10-25 经验库红蓝对抗修订批 A/B 双方独立互证（611 commits 全核、结论一致），作为可复用经验段落入册。
 - **audit.yml 周检结果查看**：cargo audit 供应链周检（`.github/workflows/audit.yml`，每周一跑），结果在仓库 Actions 页的 audit 工作流运行记录中查看；扫描失败或发现漏洞均自动开单（label 查重防噪）。
 
 ## 4. 测试与验证分层
@@ -118,7 +120,7 @@ cargo build --release --locked -p volttray-tray
 | `last_enum` | 同一台鼠标出现在多条通道（有线模式枚举出 7 个 USB 接口 MI_00~MI_06、各注册一条）→ 确诊 T6 重复条目（E17），无需再查他处 |
 | `devices` 为空数组 | 不等于 bug：先回第一步确认物理情境（E4） |
 | `devices` 事件流 | 「电量显示不准 / 跳变」类报障：文件夹暂无已定性根因——按 E7 纪律先取证（事件流中的连续读数、电量来源回退路径、版本号与轮询档位），如实标注「未定性」，不凭猜测给用户结论 |
-| 蓝牙/有线诊断导出处理（T-08 触发式归因） | 收到 ≥1 份蓝牙或直连（实验性通道）诊断导出 → 按既有原因码归因：RELEASES.md v0.3.9 段五分类（query_timeout / io_error / error_response / no_battery_features / device_gone）＋ diag_export.rs wake miss 子分类（no_path / no_match / ambiguous），结果登记对账表 T-08 行并留痕（验收＝首单登记记录）。**30 天零样本则维持现状披露，不做降级动作**（K-4，不设兜底时钟——不做任何未验证蓝牙/有线代码通路改动） |
+| 蓝牙/有线诊断导出处理（T-08＝[06](06-release-reconciliation.md) 对账表登记位编号，非操作指令；触发式归因） | 收到 ≥1 份蓝牙或直连（实验性通道）诊断导出 → 按既有原因码归因：RELEASES.md v0.3.9 段五分类（query_timeout / io_error / error_response / no_battery_features / device_gone）＋ diag_export.rs wake miss 子分类（no_path / no_match / ambiguous），结果登记对账表 T-08 行并留痕（验收＝首单登记记录）。**30 天零样本则维持现状披露，不做降级动作**（K-4，不设兜底时钟——不做任何未验证蓝牙/有线代码通路改动） |
 
 **第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复已随 v0.3.16 发布**——对 ≤v0.3.15 的用户可直接建议升级至 ≥v0.3.16（T6 修复本体见 D-70/D-71；v0.3.16 发布说明未单列该修复，发布状态依 v0.3.15…v0.3.16 提交区间核实：修复提交 `5e265e26b0b`、`700ccf80bd0` 在区间内）；开机自启勾选了却不自启 = exe 换版致注册表指向旧路径（v0.3.19 U-7），≥v0.3.19 启动期自动对账修复，旧版本手动关→开一次即可。
 
@@ -190,10 +192,14 @@ cargo build --release --locked -p volttray-tray
 | 连败 | 连续失败计数；按「轮」裁决、跨槽位去重，纯超时不计入（D-67） |
 | 休眠 | 三层定义：射频静默（物理事实：设备不再发射射频信号）/ 程序判定态（sleeping，软件按连败与超时规则判定）/ 托盘显示态（用户可见图标）；三层之间存在时间差，托盘显示滞后 ≤ 轮询周期量级属已知口径（HANDOVER §3.1 实证最长约 60 分钟，修复前） |
 | 在线 / 灰显 | 托盘图标的两种显示态：在线＝设备被判定活跃、正常显示；灰显＝设备被判定休眠（sleeping）后的灰色显示 |
+| 主 AD | 多智能体编排中的主协调角色，与「组长」「派发人」同义（职责定义见 [docs/ai-orchestration.md](../ai-orchestration.md)） |
+| 监控 / 巡检 | 同义互见：对链路运行状态的周期看护；方法论条目见 [02 E11](02-collaboration-playbook.md)，平台侧操作形态见 [docs/ai-orchestration.md](../ai-orchestration.md) ③ 巡检清单 |
+| 窗口 | 三义界定：修复窗口（集中修一类缺陷的代码改动期）/ 发布窗口（发版执行期）/ 对账窗口（发布后登记期）；06 对账表状态列口径用「待发布」 |
+| 一轮 / 二轮证据、相位一 / 二 | 红蓝对抗证据分级口径：一轮证据＝内部协作记录（内部可信、外部免责，仓内无锚点）；二轮证据＝可经仓库独立复核的证据；相位一 / 二＝整改批执行阶段划分；P2-8＝整改批 P2 批第 8 项（证据分级口径条目，定义落点见 [02 E8](02-collaboration-playbook.md) 首现注记），区别于 P0/P1/P2 严重级别 |
 | 黄金样例 / fixtures | `protocol` crate 的已知输入输出对照数据（`volttray/fixtures/`），锁定协议编解码行为 |
 | proptest | 属性测试：随机生成输入，验证协议解析不 panic、编解码往返一致 |
 | 门禁 | 发布前逐条核验的放行清单（见 [03](03-release-quality-gate.md)） |
-| fmt 回推 | CI 自动 `cargo fmt` 并把结果回推 main 的机制，会造成「main HEAD ≠ 构建提交」的错位（E5） |
+| fmt 回推 | **历史机制，v0.3.17 起废除**（改 `cargo fmt --check` 不一致即失败，E31 / D-79）：原 CI 自动 `cargo fmt` 并把结果回推 main，会造成「main HEAD ≠ 构建提交」的错位（E5） |
 | 未验证项 | 发布说明中如实标注未能验证的边界（门禁 D2） |
 
 ## 12. 上手第一周建议路径

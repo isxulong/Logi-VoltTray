@@ -6,6 +6,8 @@
 
 **按用户影响排序的三大事故**：**E1**（开机早期静默 panic，重启后永不识别设备）、**E2**（0 槽位 + 死缓存句柄死锁，托盘永久「?」）、**E3 的 P1**（多设备同睡误判句柄死，触碰零鼠标电池红线）。新手优先吸收这三条。
 
+> 注（2026-10-25 修订批）：E40–E42 为协作方法论条目，按增补批次就地入册；为保全既有锚点与索引不移册，主题归口见 [02](02-collaboration-playbook.md)。
+
 ---
 
 ## E1. Windows 开机时长与 `Instant` 算术陷阱
@@ -96,28 +98,18 @@
 
 ## E5. CI / GitHub 实战陷阱（沙箱与 API 环境）
 
-**教训**：CI 自动回推会让「main HEAD」与「交付二进制的构建提交」错位，取证口径必须先对齐；GitHub API 权限是分层的，同一 token 不同端点可能部分 403/401；受限网络环境下 git 协议不可用时要会走 REST API 备选通道。
+**教训**：引用「CI 全绿」必须先对齐 green run 的 head_sha 与交付提交（main HEAD 与构建提交可能错位）；GitHub API 权限分层（同一 token 下 runs/jobs 可查、logs 端点可能 403、artifact 直连下载可能 401，备选 nightly.link 免登录镜像做哈希比对）；git HTTPS 不可用的环境（TLS/502）改走 REST API（`GET /contents/<path>` 取 sha → `PUT` 写回；建分支用 `POST /git/refs`）。发布三件套（tag→commit、附件哈希三方一致、EXE 内嵌版本资源）逐条独立核验，不互相替代。
 
-**真实案例与要点**：
+**核验方法链**：取 green run 的 head_sha 与交付提交比对（不同则用整树 diff 证明语义等价，并在交付中说明错位）；tag 指向用 `git ls-remote --tags` 或 API 比对 tag 的 commit sha；版本资源由 `CARGO_PKG_VERSION` 自动派生（v0.3.8 起，D-64）。误判代价：「HEAD 全绿」可能是错位证据，tag 偏差会让二进制溯源锚错提交。
 
-- **fmt bot 回推错位**：本仓库 CI（`.github/workflows/ci.yml`）的 fmt 步骤会自动 `cargo fmt` 并把格式化提交回推 main（`style: apply cargo fmt (CI auto-fix)`）。后果：main HEAD 经常比「交付二进制的构建提交」新一个**无 CI 的提交**。取证口径：取最近一个**有 CI 的提交**，用整树 diff（token 多重集比对）证明它与 HEAD 语义等价，并在交付中说明这一错位——否则「HEAD 全绿」是错位的证据。
+**历史注记（已废除机制）**：CI fmt 步骤曾自动 `cargo fmt` 并回推 main（`style: apply cargo fmt (CI auto-fix)`），造成「main HEAD ≠ 构建提交」错位；v0.3.17 起改为 `cargo fmt --check` 不一致即失败、作者本地修复（E31 / D-79），回推错位不再产生。操作 Runbook 细节见 git 历史。
 > 注（2026-10-19）：本要点所述 fmt 自动回推机制已自 v0.3.17 废除（改为 `cargo fmt --check`、不一致即失败由作者本地修复，见 E31 / D-79）。本要点保留为历史案例；「引用 CI 全绿先对齐 head_sha」的取证教训仍然有效。
-- **API 权限分层**：同一 token 下 actions runs/jobs 可查，但 logs 端点可能 403、artifact 直连下载可能 401。备选：artifact 可用 nightly.link 免登录镜像下载做哈希比对。
-- **git HTTPS 不可用的环境**：部分沙箱 / 受限网络 git HTTPS 完全不可用（TLS/502）。推送代码改走 GitHub contents REST API：`GET /contents/<path>` 取 sha → `PUT /contents/<path>`（base64 内容）；建分支用 `POST /git/refs`。
-- **发布规范（本项目确立）**：
-  - 版本号升级做**独立 chore 提交**（workspace `Cargo.toml` + `Cargo.lock` 同步），tag 指向该提交；
-  - Release 附件哈希**三方一致**：发布者报告、审查者亲算、交付者复验；
-  - EXE 内嵌版本资源（FileVersion）也要核对（v0.3.8 起由 `CARGO_PKG_VERSION` 自动派生，杜绝手工同步脱节，D-64）。
 
 > 注（2026-10-23）：上组发布规范中「tag 指向版本号 chore 提交」为规范口径，实际执行存在偏差实例——**v0.3.19 的 tag 实际指向 clippy fix-forward 提交 `48676bf138c9`**，而非版本号 chore 提交 `1dd9856492f4`（实际链序：`e974c736aa` → `1dd9856492f4` chore(release): v0.3.19 → `e702bdec4b` rustfmt fix-forward → `48676bf138c9` clippy fix-forward，tag 打在链尾，与 E32 所记 v0.3.19 两次 fix-forward 一致）。tag 一经发布不可动，此处如实登记指向偏差；对 v0.3.19 做二进制 / 提交溯源时，以 tag 实际指向的 `48676bf138c9` 为准。
 
-**可执行做法**：
+**变更注记（2026-10-25 修订批，指令 31）**：本条自约 30 行压缩——tag 偏差教训主体与核验方法链保留正文，已废除 fmt 回推机制的操作细节压为上文历史注记；带日期戳的证据行一字未动。
 
-1. 引用「CI 全绿」作为证据时，先确认 green run 的 head_sha 与你交付的提交是同一个，或证明语义等价。
-2. 取证链路上每个端点失败时先判断是权限分层还是数据不存在，备选通道（镜像下载 / REST API）常备。
-3. 发布三件套（tag→commit、哈希、版本资源）逐条独立核验，不互相替代。
-
-**溯源**：`.github/workflows/ci.yml`（fmt auto-fix 段）；`volttray/docs/decisions.md` D-64；`volttray/RELEASES.md` 各版本「未验证项」段。
+**溯源**：`.github/workflows/ci.yml`（fmt 历史段见 git 历史）；`volttray/docs/decisions.md` D-64；`volttray/RELEASES.md` 各版本「未验证项」段。
 
 ---
 
@@ -162,6 +154,8 @@
 
 **溯源**：`volttray/RELEASES.md` v0.3.15（CI clippy 翻车与修复记录）；`volttray/docs/decisions.md` D-70（T6 前置交叉验证）。
 
+**相关条目**：E17（本文件）、[02 E22](02-collaboration-playbook.md)（主题相近，互链检索；不合并、不移册、不改编号）
+
 ---
 
 ## E17. 设备身份必须锚定物理设备，而不是某次枚举的通道快照
@@ -188,6 +182,8 @@
 **发布状态**：修复**已随 v0.3.16 发布**（与 [04 §7 第三步](04-onboarding.md) 口径一致：修复提交 `5e265e26b0b`、`700ccf80bd0` 在 v0.3.15…v0.3.16 提交区间内）——对 ≤v0.3.15 的用户可建议升级至 ≥v0.3.16。
 
 **适用边界**：物理键本身也可能读不到（设备休眠、瞬时 IO 失败）——此时按「身份不明」处理、保持试探态，不可退化回通道快照当身份（D-71 P2-3 按已知限制记录）。
+
+**相关条目**：E16（本文件）、[02 E22](02-collaboration-playbook.md)（主题相近，互链检索；不合并、不移册、不改编号）
 
 ---
 
@@ -259,6 +255,8 @@
 
 **溯源**：`volttray/RELEASES.md` v0.3.15（日志运行期轮转、诊断导出另存为）。
 
+**相关条目**：[06 发布对账](06-release-reconciliation.md)（机制本体；互链检索，不合并、不移册、不改编号）
+
 ---
 
 ## E27. 派生阈值必须锚定调度源，墙钟派生与调度语义脱钩必出结构性矛盾
@@ -295,6 +293,8 @@
 3. 缩字 / 缩放类逻辑锁单调性测试；渲染断言用像素级测试（墨迹落块）。
 
 **溯源**：`volttray/RELEASES.md` v0.3.18 U-1 / U-4 / U-5、v0.3.17 R-5 / R-6；commits `7c057e685e`、`5ed38b5460`、`23809cc680`、`0ca7223d0e`。
+
+**相关条目**：[02 E12](02-collaboration-playbook.md)（主题相近，互链检索；不合并、不移册、不改编号）
 
 ---
 
@@ -415,7 +415,7 @@
 
 **教训**：GitHub Actions job 级 `defaults.run.working-directory` 对步内所有相对路径生效——在 volttray/ 下 `open('docs/...')` 静默错位成 FileNotFoundError；而 `2>/dev/null` 把真实异常吞掉后，治理告警报出错误对象（「时钟数据缺失」），排查需逐层剥。告警的阻断力（exit 1）与异常的可见性（真实错误上日志）必须同时保留，缺后者则「不静默」沦为「报假警」。
 
-**真实案例**：2026-10-25 nightly run 40176674164 转红——fuzz 本体全绿，红的是 E19 批新引入的 30-nights 评审步（该步首次实战即踩坑；前一晚 cd77a925 版还是硬编码起算日、无此步）。修复 b9cdb71：步级 working-directory 钉回仓库根 + 移除 stderr 吞没；workflow_dispatch 复跑 run 40179126476 全绿，评审步正常输出起算日与「未到期」。
+**真实案例**：2026-10-25 nightly run 40176674164 转红——fuzz 本体全绿，红的是改进项 E19 批新引入的 30-nights 评审步（该步首次实战即踩坑；前一晚 cd77a925 版还是硬编码起算日、无此步）。修复 b9cdb71：步级 working-directory 钉回仓库根 + 移除 stderr 吞没；workflow_dispatch 复跑 run 40179126476 全绿，评审步正常输出起算日与「未到期」。
 
 **可执行做法**：
 

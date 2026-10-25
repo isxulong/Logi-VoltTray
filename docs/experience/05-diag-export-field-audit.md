@@ -1,4 +1,4 @@
-# 05 · 诊断导出字段审计（T-02b）
+# 诊断导出字段审计（T-02b）
 
 > 定位：P1 · 审查文档 + 可回归测试。审计对象＝诊断导出 JSON（「导出诊断信息…」菜单产生的文件）的全部序列化字段，逐字段登记内容来源 / 泄露面评估 / 已覆盖的 redact 规则。三处必查意外泄露点专节见第三节。
 >
@@ -91,7 +91,7 @@ BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{0000
 
 真机导出样例复检：**未执行**（本审计基于源码实证，真机导出行为未验证，见 commit 的 Not-Verified trailer）。
 
-### E17 增补（2026-10-24，A-R11 落地）
+## E17 增补（2026-10-24，A-R11 落地）
 
 - **结构化脱敏注册表**：两条全文级规则升格为 `redact.rs` 的编译期常量注册表 `REDACTION_RULES`（稳定 id `R1-user-path` / `R2-device-name`＋口径＋本文档锚点），由测试 `redaction_rules_registry_is_pinned` 钉板——规则删改/重排即测试失败，强制回本表同步。
 - **整值替换优先**：规则二替换执行顺序改为按名字长度降序（编号仍按收集顺序），修复互为子串设备名的半替换失真（原「MX Keys 先于 MX Keys Mini 收集 → 设备1 Mini」残留）；安全性两序等价，仅可读性变化。由 `whole_value_priority_replaces_longest_first` 钉板。

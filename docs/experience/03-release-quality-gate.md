@@ -45,7 +45,7 @@
 | D9 | **渠道扩张动作前核验商标裁决状态**（T-14）：任何渠道扩张（上架 winget / 商店 / 第三方分发）前，发布对账时必须核验 T-14 商标与命名评估的裁决状态（单源＝[reconciliation-clocks.yaml](reconciliation-clocks.yaml) T-14 行，F 节已迁至 [06-release-reconciliation.md](06-release-reconciliation.md)，其常设区 T-14 行为人类可读镜像）。注（2026-10-24 修订）：T-14 时钟经用户决策挂起（暂不更名，单源＝reconciliation-clocks.yaml），原「到期未裁决即阻塞」处置不生效；渠道扩张前核验 T-14 状态的义务不变，挂起期间核验通过即放行，重新激活后恢复到期判据 | 查 reconciliation-clocks.yaml T-14 行与 06 常设区 T-14 裁决记录 | 未裁决先上架、或把「到期」当「接受」 |
 | D10 | **发布契约断言绿**（相位二）：release.yml 的 `release-contract` 步骤全绿——资产名/数量/sha256 格式/自启注册表路径静态断言（`volttray-tray.exe` 品牌纪元内冻结） | 看 release run 的 release-contract 步 | 构建成功但契约断言红也放行（U-7/D-83 类对账失效） |
 
-#### D8 附：注入防御人工核验清单模板（C-08）
+### D8 附：注入防御人工核验清单模板（C-08）
 
 > 目标：未参与本版处置的人照本模板执行一次，能产出可判定记录。
 
@@ -103,7 +103,7 @@ AGENTS.md §4 注入防御条目在新模型/平台下仍然成立，重验结�
 
 ---
 
-### 门禁拦过的真实问题（保持清单诚实的证据）
+## 门禁拦过的真实问题（保持清单诚实的证据）
 
 - **v0.3.9 打回（P1）**：多设备同睡误判死句柄 → 违反零鼠标电池红线，返工后以 v0.3.10 发布（详见 [01 E3](01-engineering-lessons.md#e3-hid-协议与鼠标休眠的工程现实)）。
 - **fmt 错位取证**：交付二进制的构建提交 ≠ main HEAD（fmt bot 自动回推），用整树 diff 证明语义等价后在交付中说明（详见 [01 E5](01-engineering-lessons.md#e5-ci--github-实战陷阱沙箱与-api-环境)）。

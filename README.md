@@ -123,7 +123,7 @@ cargo build --release --locked -p volttray-tray
 
 | 文档 | 何时调用本条 |
 | --- | --- |
-| [README.md（知识库导航）](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/README.md) | 查 E1–E38 经验条目的一句话索引与编号 |
+| [README.md（知识库导航）](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/README.md) | 查经验条目的一句话索引与编号（条目范围以该库 README 索引为准） |
 | [01 工程经验教训](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/01-engineering-lessons.md) | 真机事故复盘、改代码前查对应教训、报障归因（QPC 下溢 / 死句柄 / 设备休眠等） |
 | [02 协作方法论](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/02-collaboration-playbook.md) | 证据纪律（E7）、红蓝对抗、收口纪律、决策与版本后经验回写机制（E26） |
 | [03 发布质量门禁](https://github.com/isxulong/Logi-VoltTray/blob/main/docs/experience/03-release-quality-gate.md) | 发布前逐条核验；引用测试数等关键数字时的取数纪律（C2） |
