@@ -961,12 +961,14 @@ fn build_avg_estimate(
     cards: &[DailyCard],
     sticky_days: &BTreeSet<String>,
 ) -> AvgEstimate {
-    // 上界样本：非粘滞、非稀疏日的实测斜率。
+    // 上界样本：非粘滞、非稀疏日的实测斜率。规格 §3③ 仅授权
+    // 「剔除粘滞标记日」——零斜率的非粘滞有效日必须进入中位数样本
+    // （复核批 F1：删去 *v > 0.0 过滤，该过滤把 0 斜率有效日错当
+    // 粘滞日剔除）。
     let slopes: Vec<f64> = cards
         .iter()
         .filter(|c| !c.sticky && !c.sparse)
         .filter_map(|c| c.slope_pct_per_hour)
-        .filter(|v| *v > 0.0)
         .collect();
     let valid_days = slopes.len();
     let median_slope = median(slopes);
@@ -1302,13 +1304,20 @@ pub fn build_report_data(
     let run_spans_by_day = build_run_spans_by_day(events, offset_minutes);
     let now_ref = events.iter().map(|e| e.ts()).max().unwrap_or(generated_ts);
     let today = fmt_local_date(now_ref, offset_minutes);
-    // 活动位图积累天数（取各设备事件最大值；缺口卡判定）。
-    let mut activity_days = 0usize;
+    // 活动位图积累天数（跨事件按 date 去重并集；缺口卡判定）。
+    // 复核批 F2：旧口径取「单事件 days.len() 最大值」——boundary/
+    // run_stop 分次冲刷后同一日会散在多个事件里、单事件又可能携带
+    // 多日，最大值既可能低估也可能高估；按 date 去重并集才是
+    // 「已积累多少天」的真实口径。
+    let mut activity_day_set: BTreeSet<&str> = BTreeSet::new();
     for ev in events {
         if let StatsEvent::ActivityBuckets { days, .. } = ev {
-            activity_days = activity_days.max(days.len());
+            for d in days {
+                activity_day_set.insert(d.date.as_str());
+            }
         }
     }
+    let activity_days = activity_day_set.len();
     let days_covered = covered_days(segments, offset_minutes).len() as i64;
     let sparse_note = if segments.is_empty() {
         None
@@ -2800,17 +2809,18 @@ mod filename_tests {
         assert!(gap["text"].as_str().unwrap().contains("尚无静止/活动字段"));
         assert_eq!(report["meta"]["activity_days"].as_i64().unwrap(), 0);
         // 位图积累 ≥7 天 → 缺口闭合标记翻转。
-        let day = ActivityDay {
-            date: "2026-10-24".to_string(),
+        let mkday = |d: u8| ActivityDay {
+            date: format!("2026-10-{d:02}"),
             bitmap_hex: "0".repeat(crate::stats::ACTIVITY_BITMAP_HEX_LEN),
         };
+        let days7: Vec<ActivityDay> = (18..=24).map(mkday).collect();
         let ev2 = vec![
             ev_poll(1000, "d1", 90),
             ev_poll(8200, "d1", 88),
             StatsEvent::ActivityBuckets {
                 ts: 8300,
                 physical_key: "d1".into(),
-                days: vec![day; 7],
+                days: days7,
             },
         ];
         let report2 = build_report_data(&ev2, &segs, None, CST, 9000);
@@ -2876,6 +2886,53 @@ mod filename_tests {
         assert_eq!(est.upper_pct_per_day, Some(24.0));
         assert_eq!(est.valid_days, 1);
         assert_eq!(est.sticky_days, 1);
+    }
+
+    #[test]
+    fn avg_estimate_zero_slope_valid_day_included() {
+        // 复核批 F1 回归：零斜率的非粘滞有效日必须计入中位数样本——
+        // 规格 §3③ 仅授权剔除「粘滞标记日」。样本 [1.0, 0.0]：
+        // 该日计入 valid_days，且中位数被其拉低至 0.5（旧的
+        // *v > 0.0 过滤口径下 valid_days=1、中位 1.0）。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 3 * 86400, "d1", 80)];
+        let cards = vec![
+            card(&fmt_local_date(d0, CST), 3, Some(1.0), false, false),
+            card(&fmt_local_date(d0 + 86400, CST), 0, Some(0.0), false, false),
+        ];
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert_eq!(est.valid_days, 2, "0 斜率有效日须计入样本");
+        assert_eq!(est.median_slope_pct_per_hour, Some(0.5));
+        assert_eq!(est.upper_pct_per_day, Some(12.0));
+    }
+
+    #[test]
+    fn activity_days_cross_event_date_union() {
+        // 复核批 F2 回归：activity_days = 跨事件按 date 去重并集。
+        // 事件 A 携带 {D1, D2}、事件 B 携带 {D2, D3}（boundary 冲刷把
+        // 同一日散入多事件的典型形态）→ 并集 {D1,D2,D3} = 3；
+        // 旧「单事件最大值」口径给出 2，漏计 D3。
+        let mkday = |d: u8| ActivityDay {
+            date: format!("2026-10-{d:02}"),
+            bitmap_hex: "0".repeat(crate::stats::ACTIVITY_BITMAP_HEX_LEN),
+        };
+        let events = vec![
+            ev_poll(1000, "d1", 90),
+            ev_poll(8200, "d1", 88),
+            StatsEvent::ActivityBuckets {
+                ts: 8300,
+                physical_key: "d1".into(),
+                days: vec![mkday(22), mkday(23)],
+            },
+            StatsEvent::ActivityBuckets {
+                ts: 8400,
+                physical_key: "d1".into(),
+                days: vec![mkday(23), mkday(24)],
+            },
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 9000);
+        assert_eq!(report["meta"]["activity_days"].as_i64().unwrap(), 3);
     }
 
     #[test]
