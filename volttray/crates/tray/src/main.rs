@@ -1025,6 +1025,11 @@ mod imp {
             )),
         }
         stats_store.note_run_start(wall_secs() as i64, Instant::now());
+        // 融合稿 Phase 1：静止/活动分钟位图桶（RawInput 系统事件驱动，
+        // 纯内存计数、零新增设备查询——D-33 红线；不落盘高频事件，
+        // run_stop 时并入桶摘要进 stats 事件流）。
+        let mut activity_buckets =
+            volttray_app::stats::MinuteBuckets::new(crate::export::local_offset_minutes() as i64);
         // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
         // 一次的例行枚举在集合未变时不重复全量落盘（单会话日志体积上限）。
         let mut last_enum_sig: Option<String> = None;
@@ -1068,6 +1073,12 @@ mod imp {
                     }
                     if let Some(line) = wake_steady_sampler.leave_steady() {
                         bootlog::note(&line);
+                    }
+                    // 融合稿 Phase 1：run_stop 并入活动桶摘要（不落盘高频
+                    // 事件，仅收尾把分钟位图并入事件流；同值快照去重）。
+                    let bucket_ts = wall_secs() as i64;
+                    for (dev, days) in activity_buckets.take_snapshot() {
+                        stats_store.note_activity_buckets(&dev, days, bucket_ts, Instant::now());
                     }
                     // WP-B：run_stop 生命周期事件 + 强制落盘（每次运行 2 行之一）。
                     stats_store.note_run_stop(wall_secs() as i64, Instant::now());
@@ -2144,6 +2155,11 @@ mod imp {
                     Ok(IoCmd::WakeSignal(raw_path)) => {
                         // E22：记录唤醒信号时刻，供重枚举唤醒恢复窗口判定。
                         last_wake_signal_at = Some(Instant::now());
+                        // 融合稿 Phase 1：RawInput 已观测到罗技鼠标活动 →
+                        // 对应本地分钟桶置位（系统事件推送消费，零设备 I/O）。
+                        if let Some(path) = &raw_path {
+                            activity_buckets.mark(path, wall_secs() as i64);
+                        }
                         // v0.3.11（F5）：0 注册槽位时（重启后鼠标休眠、槽位
                         // 空，未注册设备收不到唤醒探测资格）——唤醒信号 =
                         // Raw Input 已观测到罗技鼠标活动，设备已被用户物理
@@ -2361,6 +2377,17 @@ mod imp {
                         }
                         if let Some(line) = wake_steady_sampler.leave_steady() {
                             bootlog::note(&line);
+                        }
+                        // 融合稿 Phase 1：run_stop 并入活动桶摘要（同上，
+                        // 循环顶 Shutdown 同口径）。
+                        let bucket_ts = wall_secs() as i64;
+                        for (dev, days) in activity_buckets.take_snapshot() {
+                            stats_store.note_activity_buckets(
+                                &dev,
+                                days,
+                                bucket_ts,
+                                Instant::now(),
+                            );
                         }
                         // WP-B：run_stop 生命周期事件 + 强制落盘。
                         stats_store.note_run_stop(wall_secs() as i64, Instant::now());

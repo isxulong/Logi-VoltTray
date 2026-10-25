@@ -46,7 +46,13 @@ pub(crate) fn run_stats_export(
     if let Err(e) = store.shutdown_flush(Instant::now(), wall_secs() as i64) {
         bootlog::note(&format!("stats export: pre-export flush failed: {e}"));
     }
-    let events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
+    let mut events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
+    // 融合稿 Phase 1「含活动统计」勾选项（默认开）：取消勾选时从导出
+    // 事件流剔除 activity_buckets 摘要。编排（flush→load→分段→渲染）
+    // 不变，仅此一处数据选择。
+    if !req.include_activity {
+        events.retain(|e| !matches!(e, volttray_app::stats::StatsEvent::ActivityBuckets { .. }));
+    }
     let segments = attr::build_segments(&events);
     let anon = if req.anonymize {
         Some(attr::anonymize_map(&attr::event_keys(&events)))
@@ -105,7 +111,7 @@ pub(crate) fn run_stats_export(
 /// GetLocalTime vs GetSystemTime 的分钟差（系统已把夏令时折算进本地
 /// 时间）；纯算术实现（days-from-civil，与 app 层 civil_from_days 互
 /// 逆），不引入额外 Win32 依赖。SYSTEMTIME 两 API 均无失败路径。
-fn local_offset_minutes() -> i32 {
+pub(crate) fn local_offset_minutes() -> i32 {
     fn st_minutes(st: &windows::Win32::Foundation::SYSTEMTIME) -> i64 {
         let y = st.wYear as i64 - if st.wMonth <= 2 { 1 } else { 0 };
         let era = if y >= 0 { y } else { y - 399 } / 400;

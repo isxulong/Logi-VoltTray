@@ -73,6 +73,7 @@ const EVENT_RUN_START: &str = "run_start";
 const EVENT_RUN_STOP: &str = "run_stop";
 const EVENT_BOUNDARY: &str = "boundary";
 const EVENT_SLEEP_ENTER: &str = "sleep_enter";
+const EVENT_ACTIVITY_BUCKETS: &str = "activity_buckets";
 
 /// 统计目录：`%LOCALAPPDATA%\LogiVoltTray\`（与 last_known.json 同目录，
 /// 无 LOCALAPPDATA 时退回当前目录，与 persist::default_path 同款兜底）。
@@ -107,7 +108,20 @@ pub struct BoundaryDevice {
     pub charging: bool,
 }
 
-/// stats.jsonl 事件（四类型统一；序列化按 v3 schema 逐类型定制）。
+/// activity_buckets 事件携带的「单设备单日分钟位图」（schema ⑤子结构）。
+///
+/// 1440 bit/天（180 字节），bit=1 表示该分钟内有鼠标输入系统事件
+/// （RawInput 推送，零新增设备查询，D-33 红线）；bitmap_hex 为 360 个
+/// 十六进制字符的小端位序编码（bit i = 当日内第 i 分钟）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityDay {
+    /// 本地日期（YYYY-MM-DD，按采集侧 tz_offset 切日界）。
+    pub date: String,
+    /// 360 hex chars = 180 bytes = 1440 bit。
+    pub bitmap_hex: String,
+}
+
+/// stats.jsonl 事件（五类型统一；序列化按 v3 schema 逐类型定制）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatsEvent {
     Read(ReadEvent),
@@ -125,6 +139,13 @@ pub enum StatsEvent {
         ts: i64,
         physical_key: String,
     },
+    /// 静止/活动分钟位图桶摘要（融合稿 Phase 1）：高频 RawInput 事件
+    /// 不逐条落盘，仅按设备×日聚合成位图后于 run_stop 并入事件流。
+    ActivityBuckets {
+        ts: i64,
+        physical_key: String,
+        days: Vec<ActivityDay>,
+    },
 }
 
 impl StatsEvent {
@@ -135,7 +156,8 @@ impl StatsEvent {
             StatsEvent::RunStart { ts }
             | StatsEvent::RunStop { ts }
             | StatsEvent::Boundary { ts, .. }
-            | StatsEvent::SleepEnter { ts, .. } => *ts,
+            | StatsEvent::SleepEnter { ts, .. }
+            | StatsEvent::ActivityBuckets { ts, .. } => *ts,
         }
     }
 
@@ -143,7 +165,8 @@ impl StatsEvent {
     pub fn physical_key(&self) -> Option<&str> {
         match self {
             StatsEvent::Read(e) => Some(&e.physical_key),
-            StatsEvent::SleepEnter { physical_key, .. } => Some(physical_key),
+            StatsEvent::SleepEnter { physical_key, .. }
+            | StatsEvent::ActivityBuckets { physical_key, .. } => Some(physical_key),
             _ => None,
         }
     }
@@ -176,6 +199,17 @@ impl StatsEvent {
                 "ts": ts,
                 "physical_key": physical_key,
                 "event": EVENT_SLEEP_ENTER,
+            })
+            .to_string(),
+            StatsEvent::ActivityBuckets {
+                ts,
+                physical_key,
+                days,
+            } => serde_json::json!({
+                "ts": ts,
+                "event": EVENT_ACTIVITY_BUCKETS,
+                "physical_key": physical_key,
+                "days": days,
             })
             .to_string(),
         }
@@ -224,6 +258,26 @@ impl StatsEvent {
                 let physical_key = obj.get("physical_key")?.as_str()?.to_string();
                 Some(StatsEvent::SleepEnter { ts, physical_key })
             }
+            Some(EVENT_ACTIVITY_BUCKETS) => {
+                let physical_key = obj.get("physical_key")?.as_str()?.to_string();
+                let days: Vec<ActivityDay> =
+                    serde_json::from_value(obj.get("days")?.clone()).ok()?;
+                // 逐日子结构校验：date 为 YYYY-MM-DD 形态、bitmap_hex 为
+                // 360 个十六进制字符（1440 bit 位图）；任一不符按坏行处理。
+                for d in &days {
+                    if !is_local_date(&d.date)
+                        || d.bitmap_hex.len() != ACTIVITY_BITMAP_HEX_LEN
+                        || !d.bitmap_hex.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return None;
+                    }
+                }
+                Some(StatsEvent::ActivityBuckets {
+                    ts,
+                    physical_key,
+                    days,
+                })
+            }
             // 未知事件类型：坏行跳过（前向兼容的保守口径——不认识即不采信）。
             Some(_) => None,
         }
@@ -234,6 +288,96 @@ impl StatsEvent {
 /// 单事件约 170B 的容量估算依赖此截断）。
 fn truncate_name(name: &str) -> String {
     name.chars().take(MAX_NAME_CHARS).collect()
+}
+
+/// 分钟位图桶：每日分钟数（融合稿 Phase 1：1440 bit/天/设备）。
+pub const ACTIVITY_MINUTES_PER_DAY: usize = 1440;
+/// 位图字节数（180 B/天）。
+pub const ACTIVITY_BITMAP_BYTES: usize = ACTIVITY_MINUTES_PER_DAY / 8;
+/// 位图 hex 编码长度（360 字符/天）。
+pub const ACTIVITY_BITMAP_HEX_LEN: usize = ACTIVITY_BITMAP_BYTES * 2;
+
+/// YYYY-MM-DD 形态校验（仅形态，不做历法有效性判定——采集侧按本地
+/// 日界生成，消费侧只做透明搬运）。
+fn is_local_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
+/// 静止/活动分钟位图内存桶（融合稿 Phase 1）。
+///
+/// 纯计数路径：只消费 RawInput 系统事件推送的时间戳，**不发起任何
+/// 设备 I/O / HID 查询**（D-33 红线，`device_queries` 计数器恒 0，
+/// 由测试钉死）；不落盘高频事件，仅由调用方在 run_stop 时取走快照
+/// 并入 stats 事件流。时区偏移注入构造，跨平台可测。
+#[derive(Debug)]
+pub struct MinuteBuckets {
+    /// 本地时区偏移（分钟，东八区 = 480），用于把 epoch 秒切到本地日界。
+    tz_offset_minutes: i64,
+    /// device → date → 1440 bit 位图。
+    days: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, [u8; ACTIVITY_BITMAP_BYTES]>,
+    >,
+    /// 设备查询计数器（红线哨兵）：本结构任何路径不得使其 >0。
+    device_queries: usize,
+}
+
+impl MinuteBuckets {
+    pub fn new(tz_offset_minutes: i64) -> Self {
+        MinuteBuckets {
+            tz_offset_minutes,
+            days: std::collections::BTreeMap::new(),
+            device_queries: 0,
+        }
+    }
+
+    /// 记录一次鼠标输入系统事件：对应本地日的对应分钟置位。
+    /// ts 为 epoch 秒；同一分钟重复事件幂等。
+    pub fn mark(&mut self, physical_key: &str, ts: i64) {
+        let local = ts + self.tz_offset_minutes * 60;
+        if local < 0 {
+            return;
+        }
+        let day_secs = 86_400i64;
+        let day_idx = local.div_euclid(day_secs);
+        let minute = (local.rem_euclid(day_secs) / 60) as usize;
+        let date = crate::attribution::fmt_local_date(day_idx * day_secs, 0);
+        let day = self
+            .days
+            .entry(physical_key.to_string())
+            .or_default()
+            .entry(date)
+            .or_insert([0u8; ACTIVITY_BITMAP_BYTES]);
+        day[minute / 8] |= 1 << (minute % 8);
+    }
+
+    /// 取走全部桶快照（drain）：返回 device → 该设备各日位图列表。
+    /// 返回后内部清空（调用方负责把快照并入事件流）。
+    pub fn take_snapshot(&mut self) -> Vec<(String, Vec<ActivityDay>)> {
+        let mut out = Vec::new();
+        for (device, days) in std::mem::take(&mut self.days) {
+            let list = days
+                .into_iter()
+                .map(|(date, bitmap)| ActivityDay {
+                    date,
+                    bitmap_hex: bitmap.iter().map(|b| format!("{b:02x}")).collect(),
+                })
+                .collect();
+            out.push((device, list));
+        }
+        out
+    }
+
+    /// 红线哨兵读数：本结构全程不得触发设备查询（测试断言用）。
+    pub fn device_queries(&self) -> usize {
+        self.device_queries
+    }
 }
 
 /// 启动加载结果。
@@ -281,6 +425,9 @@ pub struct StatsStore {
     last_fsync: Option<Instant>,
     /// 变化驱动过滤：本会话各键最近一次已记录（落 buf）的读数。
     last_recorded: HashMap<String, (u8, bool)>,
+    /// 活动桶摘要去重：本会话各键最近一次已记录的位图快照（与
+    /// last_recorded 同款的「同值不重记」纪律，融合稿 Phase 1 去重逻辑复用）。
+    last_buckets: HashMap<String, Vec<ActivityDay>>,
     /// 回退键冲突集合（R5-I-01 对齐：冲突设备不记录统计）。
     conflicted: HashSet<String>,
     /// 轮转护栏信号位：预计越过水位（≥9MB）而未触顶时置位，GUI 取走
@@ -314,6 +461,7 @@ impl StatsStore {
             writes_since_fsync: 0,
             last_fsync: None,
             last_recorded: HashMap::new(),
+            last_buckets: HashMap::new(),
             conflicted: HashSet::new(),
             rotation_notice: false,
             rotation_warned: false,
@@ -422,6 +570,39 @@ impl StatsStore {
     /// run_stop 生命周期事件（正常退出 / WM_ENDSESSION 承接路径）。
     pub fn note_run_stop(&mut self, ts: i64, now: Instant) {
         self.push_event(StatsEvent::RunStop { ts }, now);
+    }
+
+    /// 活动桶摘要事件（融合稿 Phase 1）：run_stop 时由调用方从
+    /// MinuteBuckets 取快照并入事件流。去重纪律复用 last_recorded
+    /// 同款「同值不重记」：与上次快照完全一致则跳过（静止全天桶
+    /// 内容不变，避免每次 run 重复落相同位图）。冲突键不记录。
+    pub fn note_activity_buckets(
+        &mut self,
+        physical_key: &str,
+        days: Vec<ActivityDay>,
+        ts: i64,
+        now: Instant,
+    ) -> bool {
+        if !self.enabled || self.conflicted.contains(physical_key) {
+            return false;
+        }
+        if days.is_empty() {
+            return false;
+        }
+        if self.last_buckets.get(physical_key) == Some(&days) {
+            return false;
+        }
+        self.last_buckets
+            .insert(physical_key.to_string(), days.clone());
+        self.push_event(
+            StatsEvent::ActivityBuckets {
+                ts,
+                physical_key: physical_key.to_string(),
+                days,
+            },
+            now,
+        );
+        true
     }
 
     /// sleep_enter 事件（2 次超时判定休眠时落盘；判定本就发生，仅多
@@ -727,6 +908,14 @@ mod tests {
                 ts: 1_760_000_004,
                 physical_key: "u123".into(),
             },
+            StatsEvent::ActivityBuckets {
+                ts: 1_760_000_005,
+                physical_key: "u123".into(),
+                days: vec![ActivityDay {
+                    date: "2026-10-24".into(),
+                    bitmap_hex: "0f".repeat(ACTIVITY_BITMAP_BYTES),
+                }],
+            },
         ];
         for ev in cases {
             let line = ev.to_json_line();
@@ -772,6 +961,24 @@ mod tests {
             StatsEvent::parse_line(r#"{"ts":1,"event":"run_stop","extra":true}"#),
             Some(StatsEvent::RunStop { ts: 1 })
         );
+        // activity_buckets：bitmap_hex 长度不符 → 坏行
+        assert!(StatsEvent::parse_line(
+            r#"{"ts":1,"event":"activity_buckets","physical_key":"u","days":[{"date":"2026-10-24","bitmap_hex":"0f"}]}"#
+        )
+        .is_none());
+        // activity_buckets：date 形态不符 → 坏行
+        assert!(StatsEvent::parse_line(
+            &format!(
+                r#"{{"ts":1,"event":"activity_buckets","physical_key":"u","days":[{{"date":"10-24","bitmap_hex":"{}"}}]}}"#,
+                "00".repeat(ACTIVITY_BITMAP_BYTES)
+            )
+        )
+        .is_none());
+        // activity_buckets：缺 days → 坏行
+        assert!(StatsEvent::parse_line(
+            r#"{"ts":1,"event":"activity_buckets","physical_key":"u"}"#
+        )
+        .is_none());
     }
 
     #[test]
@@ -1116,5 +1323,105 @@ mod tests {
         assert!(
             StatsEvent::parse_line("{\"ts\":1001,\"event\":\"future_event\",\"x\":1}").is_none()
         );
+    }
+
+    // ── 融合稿 Phase 1：分钟位图桶测试网（§7 三项） ──
+
+    /// activity_bucket_marks_active_minute——注入模拟事件后对应分钟桶置位。
+    #[test]
+    fn activity_bucket_marks_active_minute() {
+        // UTC+8（480 分钟）：ts 取 2026-10-24 10:30:45 +08:00。
+        // 该时刻 epoch = 2026-10-24 02:30:45 UTC。
+        let ts = 1_792_809_045i64; // 2026-10-24T02:30:45Z
+        let mut buckets = MinuteBuckets::new(480);
+        buckets.mark("mouse-1", ts);
+        // 同一分钟重复事件幂等
+        buckets.mark("mouse-1", ts + 10);
+        let snapshot = buckets.take_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        let (device, days) = &snapshot[0];
+        assert_eq!(device, "mouse-1");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].date, "2026-10-24");
+        assert_eq!(days[0].bitmap_hex.len(), ACTIVITY_BITMAP_HEX_LEN);
+        // 解码位图：仅第 630 分钟（10:30）置位
+        let mut bits = vec![false; ACTIVITY_MINUTES_PER_DAY];
+        let hex = &days[0].bitmap_hex;
+        for i in 0..ACTIVITY_MINUTES_PER_DAY {
+            let byte = u8::from_str_radix(&hex[(i / 8) * 2..(i / 8) * 2 + 2], 16).unwrap();
+            bits[i] = byte & (1 << (i % 8)) != 0;
+        }
+        assert!(bits[630], "10:30 对应分钟桶应置位");
+        assert_eq!(bits.iter().filter(|b| **b).count(), 1, "仅一个分钟桶置位");
+        // drain 后内部清空
+        assert!(buckets.take_snapshot().is_empty());
+    }
+
+    /// activity_bucket_zero_when_silent——无事件分钟桶为 0（静止语义）。
+    #[test]
+    fn activity_bucket_zero_when_silent() {
+        let mut buckets = MinuteBuckets::new(480);
+        // 完全无事件：快照为空（全天静止不落任何桶）。
+        assert!(buckets.take_snapshot().is_empty());
+        // 只标一个分钟：同日其余 1439 个分钟桶全部为 0（静止语义）。
+        let ts = 1_792_809_045i64; // 2026-10-24T02:30:45Z → 10:30 +08
+        buckets.mark("mouse-1", ts);
+        let snapshot = buckets.take_snapshot();
+        let hex = &snapshot[0].1[0].bitmap_hex;
+        let set_bits = (0..ACTIVITY_MINUTES_PER_DAY)
+            .filter(|i| {
+                let byte = u8::from_str_radix(&hex[(i / 8) * 2..(i / 8) * 2 + 2], 16).unwrap();
+                byte & (1 << (i % 8)) != 0
+            })
+            .count();
+        assert_eq!(set_bits, 1, "无事件分钟桶必须保持 0");
+    }
+
+    /// activity_bucket_no_device_io——纯计数路径断言不触发任何 HID 查询
+    /// （mock 计数器断言，D-33 红线哨兵）。
+    #[test]
+    fn activity_bucket_no_device_io() {
+        let mut buckets = MinuteBuckets::new(480);
+        buckets.mark("mouse-1", 1_792_809_045);
+        buckets.mark("mouse-2", 1_792_809_100);
+        let _ = buckets.take_snapshot();
+        assert_eq!(
+            buckets.device_queries(),
+            0,
+            "分钟位图桶纯计数路径不得触发任何设备查询"
+        );
+    }
+
+    /// note_activity_buckets 去重纪律（复用 last_recorded 同款同值不重记）
+    /// + 冲突键不记录 + 落盘可解析回归。
+    #[test]
+    fn activity_buckets_dedup_and_roundtrip_via_store() {
+        let dir = tmpdir("buckets");
+        let mut st = StatsStore::with_tuning(&dir, fast_tuning());
+        let t0 = Instant::now();
+        let days = vec![ActivityDay {
+            date: "2026-10-24".into(),
+            bitmap_hex: "00".repeat(ACTIVITY_BITMAP_BYTES),
+        }];
+        // 首次记录
+        assert!(st.note_activity_buckets("u1", days.clone(), 100, t0));
+        // 同值快照不重记（去重）
+        assert!(!st.note_activity_buckets("u1", days.clone(), 200, t0));
+        // 空快照不记
+        assert!(!st.note_activity_buckets("u1", vec![], 300, t0));
+        // 冲突键不记
+        st.set_conflicted(HashSet::from(["bad".to_string()]));
+        assert!(!st.note_activity_buckets("bad", days.clone(), 400, t0));
+        // 内容变化后记录
+        let days2 = vec![ActivityDay {
+            date: "2026-10-24".into(),
+            bitmap_hex: format!("01{}", "00".repeat(ACTIVITY_BITMAP_BYTES - 1)),
+        }];
+        assert!(st.note_activity_buckets("u1", days2, 500, t0));
+        st.shutdown_flush(t0, 600).unwrap();
+        let events = load_events(&dir);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], StatsEvent::ActivityBuckets { .. }));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
