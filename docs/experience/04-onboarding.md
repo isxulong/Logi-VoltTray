@@ -83,7 +83,7 @@ cargo build --release --locked -p volttray-tray
 
 1. 版本号独立 chore 提交：只改 `volttray/Cargo.toml`（workspace 统一版本）+ `Cargo.lock`；
 2. push 触发 CI：`cargo fmt --check`（不一致即失败、作者本地修复）、`clippy -D warnings`、全量测试、release 构建并上传 artifact；
-3. 打 tag 指向 chore 提交；从 CI artifact 取 EXE 传 Release；
+3. 打 tag 指向 chore 提交（已知例外登记见 [01 E5 注](01-engineering-lessons.md)：v0.3.19 的 tag 实际指向 clippy fix-forward 提交 48676bf138c9）；从 CI artifact 取 EXE 传 Release；
 4. Release 说明：中文、「能干什么 / 修了什么 / 要注意什么」三段、未验证项单列、附 sha256 与构建 head_sha；
 5. 发布前照 [03 发布质量门禁](03-release-quality-gate.md) 逐条核验；
 6. 发布后按 [02 E26](02-collaboration-playbook.md#e26-版本发布后经验回写机制用户常设规则) 把本版本链路的有价值经验回写进本知识库（用户常设规则，首个适用版本 v0.3.16；仅文档提交，不发版、不改版本号）。
@@ -92,7 +92,7 @@ cargo build --release --locked -p volttray-tray
 
 ## 6. 红线清单（先过红线，再谈功能）
 
-1. **零鼠标电池**：对判定休眠的设备零主动查询、零探测保活；休眠恢复只走 Windows Raw Input 被动事件；新增任何 HID 交互先论证射频成本（D-33）。
+1. **零鼠标电池**：对判定休眠的设备零主动查询、零探测保活；休眠恢复只走 Windows Raw Input 被动事件；新增任何 HID 交互先论证射频成本（D-33）。红线状态按「有无在册未修复项」标注——当前在册未修复同族项见 [HANDOVER §3.1](../HANDOVER.md)：P0（wake-force 重枚举）/ P1（在线灰显装填探测绕开轮询档），修复后随 E26 回写核销。
 2. **诊断导出永不失败**：任何子项失败降级为空 + reason，不设整体报错出口（E4 / D-69）。
 3. **渲染 / 启动失败永不杀进程**：失败先落日志、用出厂默认重试，仅系统级故障才退出（D-64，B-1 硬约束）。
 4. **常量单一来源**：业务常量只定义一处（反面教材：轮询档位曾两处定义后漂移，D-62 收敛）。
@@ -121,6 +121,8 @@ cargo build --release --locked -p volttray-tray
 | 蓝牙/有线诊断导出处理（T-08 触发式归因） | 收到 ≥1 份蓝牙或直连（实验性通道）诊断导出 → 按既有原因码归因：RELEASES.md v0.3.9 段五分类（query_timeout / io_error / error_response / no_battery_features / device_gone）＋ diag_export.rs wake miss 子分类（no_path / no_match / ambiguous），结果登记对账表 T-08 行并留痕（验收＝首单登记记录）。**30 天零样本则维持现状披露，不做降级动作**（K-4，不设兜底时钟——不做任何未验证蓝牙/有线代码通路改动） |
 
 **第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复已随 v0.3.16 发布**——对 ≤v0.3.15 的用户可直接建议升级至 ≥v0.3.16（T6 修复本体见 D-70/D-71；v0.3.16 发布说明未单列该修复，发布状态依 v0.3.15…v0.3.16 提交区间核实：修复提交 `5e265e26b0b`、`700ccf80bd0` 在区间内）；开机自启勾选了却不自启 = exe 换版致注册表指向旧路径（v0.3.19 U-7），≥v0.3.19 启动期自动对账修复，旧版本手动关→开一次即可。
+
+**已知口径（修复前）**：托盘状态滞后 ≤ 轮询周期量级属已知口径——HANDOVER §3.1 实证：导出窗口内鼠标 12:30 射频静默→13:30 翻 sleeping→14:33 唤醒，电量 70%→70%，空闲期主机流量 0.18 次/分；托盘显示滞后最长约 60 分钟（「鼠标很久没休眠」观感的来源；已实证鼠标休眠正常、属用户错觉）。遇「鼠标很久没休眠」类观感报障，先按本口径解释，不当缺陷排查。
 
 **边界**：排查动作同样受红线约束——不要在软件侧为排查增加对休眠设备的主动探测（红线 1 / D-33）。
 
@@ -186,6 +188,8 @@ cargo build --release --locked -p volttray-tray
 | QPC | Windows 高精度计数器，`Instant` 的时钟源，自开机起算——开机早期用 `Instant` 减 Duration 会下溢（E1） |
 | 活性裁决 | `app` 层对「通道句柄是否还活着」的纯逻辑判定（`ChannelLiveness` / `SlotScanStreak`，E2/E3） |
 | 连败 | 连续失败计数；按「轮」裁决、跨槽位去重，纯超时不计入（D-67） |
+| 休眠 | 三层定义：射频静默（物理事实：设备不再发射射频信号）/ 程序判定态（sleeping，软件按连败与超时规则判定）/ 托盘显示态（用户可见图标）；三层之间存在时间差，托盘显示滞后 ≤ 轮询周期量级属已知口径（HANDOVER §3.1 实证最长约 60 分钟，修复前） |
+| 在线 / 灰显 | 托盘图标的两种显示态：在线＝设备被判定活跃、正常显示；灰显＝设备被判定休眠（sleeping）后的灰色显示 |
 | 黄金样例 / fixtures | `protocol` crate 的已知输入输出对照数据（`volttray/fixtures/`），锁定协议编解码行为 |
 | proptest | 属性测试：随机生成输入，验证协议解析不 panic、编解码往返一致 |
 | 门禁 | 发布前逐条核验的放行清单（见 [03](03-release-quality-gate.md)） |

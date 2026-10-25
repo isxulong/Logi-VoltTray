@@ -11,12 +11,14 @@
 
 - 统计方式：`grep -rn 'unsafe' volttray/crates/*/src/*.rs`，人工剔除非代码命中
   （注释 / 文档中的 "unsafe" 字样，如 `autostart.rs` L278–279 的说明性 doc 注释）。
-- 实测总数 **97 处**＝70 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
+- 实测总数 **96 处**＝69 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
   `unsafe extern "system" fn`（后者为 windows crate 回调签名要求）。
-- 终审报告口径为「90 处」，实测 97，差 7。两数并存登记、以实测为准；差异未
-  逐条回溯（报告统计时点与本窗口基线之间可能存在代码漂移），作为已知差异
+- 终审报告口径为「90 处」，台账初建（2026-10-24）实测 97，差 7；差异未
+  逐条回溯（报告统计时点与当时基线之间可能存在代码漂移），作为已知差异
   披露，不影响逐块登记的完整性。
-- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（97）。任一处新增 /
+- 变更注记（2026-10-25 复核）：main.rs / single.rs 重构净减、export.rs 新增入册，
+  实测总数 97→96，本表已同步；以最新实测为准。
+- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（96）。任一处新增 /
   删除 unsafe 代码，必须同批增删对应 SAFETY 注释并更新本台账。
 
 ## 分布（按文件）
@@ -26,14 +28,15 @@
 | crates/app/src/aumid.rs | 2 | 0 | 0 | 2 |
 | crates/app/src/autostart.rs | 5 | 0 | 0 | 5 |
 | crates/tray/src/bootlog.rs | 5 | 0 | 0 | 5 |
+| crates/tray/src/export.rs | 6 | 0 | 0 | 6 |
 | crates/tray/src/icon.rs | 3 | 0 | 0 | 3 |
-| crates/tray/src/main.rs | 17 | 0 | 0 | 17 |
+| crates/tray/src/main.rs | 11 | 0 | 0 | 11 |
 | crates/tray/src/rawinput.rs | 4 | 0 | 1 | 5 |
 | crates/tray/src/settings.rs | 23 | 18 | 5 | 46 |
-| crates/tray/src/single.rs | 3 | 0 | 0 | 3 |
+| crates/tray/src/single.rs | 2 | 0 | 0 | 2 |
 | crates/tray/src/statsexport.rs | 7 | 0 | 3 | 10 |
 | crates/tray/src/timelocal.rs | 1 | 0 | 0 | 1 |
-| **合计** | **70** | **18** | **9** | **97** |
+| **合计** | **69** | **18** | **9** | **96** |
 
 ## 注释约定
 
