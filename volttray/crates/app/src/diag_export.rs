@@ -147,7 +147,19 @@ pub struct DiagExport {
     /// attribution miss 子分类：无 Raw Input 路径（no-path）。
     pub wake_miss_no_path: u64,
     /// attribution miss 子分类：零候选匹配（zero-match；E11 自 no-match
-    /// 拆出——系统性失配：BT / 有线 / 他机接收器，候选集为空）。
+    /// 拆出——设备指纹可解析但本机接收器候选无一匹配，含候选集非空但
+    /// 指纹全不中的情形；并非「候选集为空」）。
+    ///
+    /// 计数口径（小修批第 3 项文档化，2026-10-25 批次）：
+    /// - 粒度：每次唤醒信号的归因事件 +1（非每秒/每帧）；
+    /// - 生命周期：per-run——计数器随进程启动清零（Telemetry 每 run
+    ///   重建），diag 导出值为「本次运行至今」的累计，跨运行不可加总；
+    /// - 日志侧：miss 行由双采样器限速（MissLogSampler 60s 窗口首条 +
+    ///   SteadyDecisionSampler 按桶采样），压制数随汇报行带出，会话
+    ///   收尾经 flush_tail / leave_steady 冲出尾部，因此对账公式为
+    ///   计数器值 = 可见 miss 行数 + Σ suppressed 汇报（含尾部行）。
+    ///   注意 miss 采样器跨 4 个 miss 子类合并压制，子类级对账以
+    ///   diag 计数器为准、日志为佐证。
     pub wake_miss_zero_match: u64,
     /// attribution miss 子分类：指纹不可解析（no-fingerprint；E11 自
     /// no-match 拆出——设备指纹缺失或畸形，未进入匹配）。
@@ -157,6 +169,10 @@ pub struct DiagExport {
     /// E22：唤醒信号窗口内经整轮重枚举恢复注册的累计数——与
     /// wake_successes（唤醒探测直接命中）区分，归因「信号来了但
     /// 归因/探测没抓住、靠重枚举捞回」的恢复路径。
+    /// 小修批第 2 项（2026-10-25 批次）：此前该路径的计数从未接线
+    /// （upsert 后设备已 Online，事后状态检查恒 false 导致恒 0），
+    /// 已改为 upsert 前捕获 pre-registration 离线态后接线，v0.3.23
+    /// 真机「日志两次恢复成功、计数恒 0」的矛盾自此版本代码起消除。
     pub wake_recovery_via_reenum: u64,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,

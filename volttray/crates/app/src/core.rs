@@ -337,6 +337,32 @@ impl AppCore {
         UpsertOutcome::Inserted
     }
 
+    /// 注册前离线判定（小修批第 2 项）：`upsert_device` 之前调用，回答
+    /// 「这台设备对应的在册条目当前是否处于 Sleeping / Disconnected」。
+    ///
+    /// 必须在 upsert 前取数的原因：upsert 的 MergedVirtual 分支会把虚拟
+    /// 条目状态直接迁移为 Online（`mark_online`），事后再读在册状态恒为
+    /// 在线——v0.3.23 真机反证：两次 no-device 恢复（日志有
+    /// `no-device: exited`）但 `wake_recovery_via_reenum` 恒 0，根因即
+    /// 调用点在 upsert 之后读状态。
+    ///
+    /// 身份匹配口径与 `upsert_device` 三条分支一一对应：同端点 id
+    /// （Updated）／虚拟条目同物理键（MergedVirtual）／proven 物理键相等
+    /// （Rebound）；全新插入（Inserted）无在册条目，返回 false。
+    pub fn pre_registration_offline(&self, device: &Device) -> bool {
+        self.entries.iter().any(|e| {
+            let same_identity = e.device.id == device.id
+                || (e.is_virtual && e.device.physical_key.as_str() == device.physical_key.as_str())
+                || (device.physical_key.is_proven()
+                    && e.device.physical_key.proven_matches(&device.physical_key));
+            same_identity
+                && matches!(
+                    e.device.state,
+                    DeviceState::Sleeping | DeviceState::Disconnected
+                )
+        })
+    }
+
     /// 把在册条目的端点 id 重绑到新端点并迁移全部主机侧状态（T6）。
     ///
     /// 迁移清单：端点 id / device_index / link、低电追踪器键（`lowbats`）、
@@ -1891,6 +1917,42 @@ mod tests {
         assert!(matches!(outcome2, UpsertOutcome::MergedVirtual { .. }));
         assert_eq!(core2.entries().len(), 1);
         assert!(!core2.entries()[0].is_virtual);
+    }
+
+    /// 小修批第 2 项（P2-1 修复）：注册前离线判定必须捕获 upsert 前
+    /// 状态——虚拟条目（Sleeping）在 upsert 前判 true；upsert 归并后
+    /// 条目状态已迁 Online，同键再判为 false。这正是 v0.3.23 真机
+    /// wake_recovery_via_reenum 恒 0 的根因场景（原实现在 upsert 后
+    /// 读状态，MergedVirtual 路径恒判在线）。
+    #[test]
+    fn pre_registration_offline_captures_state_before_upsert() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        assert!(core.seed_virtual(&persisted("AAAA0001", "MX Master 3", 55)));
+        let d = dev_with_unit("ep9", 3, "AAAA0001");
+        assert!(
+            core.pre_registration_offline(&d),
+            "虚拟条目 Sleeping → upsert 前判离线"
+        );
+        let outcome = core.upsert_device(d.clone());
+        assert!(matches!(outcome, UpsertOutcome::MergedVirtual { .. }));
+        assert!(
+            !core.pre_registration_offline(&d),
+            "归并后状态已迁 Online → 不再判离线（旧实现在此恒 false）"
+        );
+    }
+
+    /// 小修批第 2 项：同端点 id（Updated 路径，真实条目 Sleeping）与
+    /// 全新插入（Inserted，无在册条目）的判定边界。
+    #[test]
+    fn pre_registration_offline_updated_and_inserted_paths() {
+        let (mut core, _now) = sleeping_core("a");
+        // 同 id 在册且 Sleeping → true。
+        assert!(core.pre_registration_offline(&dev("a", 1)));
+        // 全新插入（无在册条目）→ false。
+        assert!(!core.pre_registration_offline(&dev("zzz", 9)));
+        // Online 在册 → false。
+        core.upsert_device(dev("b", 2));
+        assert!(!core.pre_registration_offline(&dev("b", 2)));
     }
 
     /// R5-I-01 键冲突条款：≥2 个真实条目共享同一 Name 回退键 → 冲突；

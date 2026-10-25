@@ -629,6 +629,11 @@ mod imp {
         let now = Instant::now();
         let mut rebound: Option<(String, String)> = None;
         if let Ok(mut c) = core.lock() {
+            // E22（小修批第 2 项修复）：注册前离线判定必须在 upsert 之前
+            // 捕获——upsert 的 MergedVirtual 分支会把条目状态直接迁到
+            // Online，事后再读在册状态恒为在线、wake_recovery_via_reenum
+            // 恒 0（v0.3.23 真机反证：两次 no-device 恢复均漏计）。
+            let pre_reg_offline = c.pre_registration_offline(&dev);
             match c.upsert_device(dev) {
                 UpsertOutcome::Rebound { old_id, new_id } => {
                     bootlog::note(&format!(
@@ -665,10 +670,9 @@ mod imp {
                 .any(|e| e.device.id == id && e.device.state == DeviceState::Sleeping);
             // E22：注册前处于休眠/断开态 = 本次扫槽把设备捞回在线，
             // 供调用方在唤醒信号窗口内补记 wake_recovery_via_reenum。
-            edge.recovered_via_scan = was_sleeping
-                || c.entries()
-                    .iter()
-                    .any(|e| e.device.id == id && e.device.state == DeviceState::Disconnected);
+            // 小修批第 2 项：改用 upsert 前捕获的 pre_reg_offline（理由
+            // 见上）。
+            edge.recovered_via_scan = pre_reg_offline;
             let (pct, chg) = (reading.percent, reading.charging);
             c.record_success(&id, reading, now);
             let pk = c
@@ -895,6 +899,24 @@ mod imp {
                 }
             }
         }
+
+        /// 会话收尾冲出 pending 压制计数（小修批第 3 项，口径对齐）：
+        /// 压制数平时随下个窗口首条汇报，进程退出时尾部最后一个窗口的
+        /// 压制数再无机会落盘——diag 计数器（per-run 全量）与日志行
+        /// 因此永不可对平。Shutdown 路径调用本方法把尾部冲出，使
+        /// 对账公式成立：计数器值 = 可见 miss 行数 + Σ suppressed
+        /// 汇报（含本尾部行）。注意本采样器跨 4 个 miss 子类合并计数，
+        /// 子类级精确对账以 diag 计数器为准、日志为佐证。
+        fn flush_tail(&mut self) -> Option<String> {
+            if self.suppressed == 0 {
+                return None;
+            }
+            let n = self.suppressed;
+            self.suppressed = 0;
+            Some(format!(
+                "wake attribution miss sampler tail: suppressed {n} similar flushed at session end"
+            ))
+        }
     }
 
     /// IO 线程：枚举 → 握手 → 周期轮询。真机行为未验证（见 docs/decisions.md）。
@@ -1037,6 +1059,16 @@ mod imp {
             // 丢弃、「立即刷新」失效，现显式匹配转发（见下）。
             match cmd.try_recv() {
                 Ok(IoCmd::Shutdown) => {
+                    // 小修批第 3 项：会话收尾冲出两个唤醒日志采样器的
+                    // pending 压制计数——不冲出则 diag 计数器（per-run
+                    // 全量）与采样日志行永不可对平（E10 修复前后计数
+                    // 对账前置，口径见 diag_export 字段注释）。
+                    if let Some(line) = wake_miss_sampler.flush_tail() {
+                        bootlog::note(&line);
+                    }
+                    if let Some(line) = wake_steady_sampler.leave_steady() {
+                        bootlog::note(&line);
+                    }
                     // WP-B：run_stop 生命周期事件 + 强制落盘（每次运行 2 行之一）。
                     stats_store.note_run_stop(wall_secs() as i64, Instant::now());
                     if let Err(e) = stats_store.shutdown_flush(Instant::now(), wall_secs() as i64) {
@@ -2322,6 +2354,14 @@ mod imp {
                         gui.send(GuiMsg::StatsExportDone(msg));
                     }
                     Ok(IoCmd::Shutdown) => {
+                        // 小修批第 3 项：会话收尾冲出两个唤醒日志采样器的
+                        // pending 压制计数（同上，循环顶 Shutdown 同口径）。
+                        if let Some(line) = wake_miss_sampler.flush_tail() {
+                            bootlog::note(&line);
+                        }
+                        if let Some(line) = wake_steady_sampler.leave_steady() {
+                            bootlog::note(&line);
+                        }
                         // WP-B：run_stop 生命周期事件 + 强制落盘。
                         stats_store.note_run_stop(wall_secs() as i64, Instant::now());
                         if let Err(e) =
@@ -3565,6 +3605,33 @@ mod imp {
                 Some("m (suppressed 2 similar in last 60s)")
             );
             assert_eq!(s.note_miss("m", t0 + Duration::from_secs(62)), None);
+        }
+
+        /// 小修批第 3 项：会话收尾冲出尾部 pending 压制计数，使 diag
+        /// 计数器与日志可对平（计数器值 = 可见 miss 行 + Σ suppressed）。
+        #[test]
+        fn miss_log_sampler_flush_tail_drains_pending_suppressed() {
+            let mut s = MissLogSampler::new();
+            let t0 = Instant::now();
+            // 无压制时尾部为空。
+            assert_eq!(s.flush_tail(), None);
+            // 窗口内压制 2 条后，尾部冲出并清零。
+            assert_eq!(s.note_miss("m", t0).as_deref(), Some("m"));
+            assert_eq!(s.note_miss("m", t0 + Duration::from_secs(10)), None);
+            assert_eq!(s.note_miss("m", t0 + Duration::from_secs(20)), None);
+            assert_eq!(
+                s.flush_tail().as_deref(),
+                Some(
+                    "wake attribution miss sampler tail: suppressed 2 similar flushed at session end"
+                )
+            );
+            // 冲出后计数已清零，重复调用不再产出。
+            assert_eq!(s.flush_tail(), None);
+            // 尾部冲出后新窗口首条不再叠加旧压制数。
+            assert_eq!(
+                s.note_miss("m", t0 + Duration::from_secs(61)).as_deref(),
+                Some("m")
+            );
         }
 
         /// R-11：帧遥测计数 / feature_index 分类 / 平均写间隔。E8：原全局
