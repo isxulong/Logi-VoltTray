@@ -53,7 +53,7 @@ The features below have their core logic locked by unit tests and their Windows-
 2. Double-click to run — a battery icon appears in the tray; the number is the current battery of the default device.
 3. **Right-click menu**:
    - Device section at top: one row per recognized device (with battery / charging / sleeping / offline status); click to pin it as the tray display;
-   - "Refresh now (current interval N s)": runs one battery query round immediately;
+   - "Refresh now (current interval N min / N h)": runs one battery query round immediately;
    - "Low-battery blinking alert", "Notification mute (audio only)", "Start with Windows": three instant toggles;
    - "Settings…", "Export diagnostics…", "Export battery stats…", "Exit".
 4. **Settings window** (changes apply instantly, no OK / Cancel buttons):

@@ -49,10 +49,10 @@ use volttray_app::autostart;
 //（跨平台可测）；本文件只保留 Win32 侧的控件装配与调用。
 use volttray_app::config::{
     colorref_to_rgb, font_tier_for_percent, normalize_font_tiers, rgb_to_colorref, Config,
-    IconBackground, IconFontColor, IconShape, RgbColor, DEFAULT_LOW_THRESHOLD, DEFAULT_POLL_SECS,
-    FONT_TIER_MAX_TIERS, FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN,
-    ICON_BG_SCALE_MAX, ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_DEFAULT, ICON_TEXT_SCALE_MAX,
-    ICON_TEXT_SCALE_MIN, LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
+    IconBackground, IconFontColor, IconShape, RgbColor, DEFAULT_LOW_THRESHOLD, FONT_TIER_MAX_TIERS,
+    FONT_TIER_MIN_TIERS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, ICON_BG_SCALE_MAX,
+    ICON_BG_SCALE_MIN, ICON_TEXT_SCALE_DEFAULT, ICON_TEXT_SCALE_MAX, ICON_TEXT_SCALE_MIN,
+    LOW_THRESHOLD_MAX, LOW_THRESHOLD_MIN, POLL_TIERS_SECS,
 };
 // E23（报告口径 A-R4② 第 2 步）：阈值校验 / 档位映射 / applied 日志行
 // 拼写同样抽离到 app crate（跨平台受测）；本文件只剩 Win32 控件装配。
@@ -61,7 +61,8 @@ use volttray_app::settings_logic::{
     TIER_THRESHOLD_ERR_NOT_INCREASING,
 };
 use volttray_app::settings_text::{
-    fine_tune_gate_text, lab_hint_text, settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
+    fine_tune_gate_text, lab_hint_text, poll_tier_label, settings_applied_note, tier_hint_dynamic,
+    LAB_HINT_TEXT,
 };
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -1769,13 +1770,10 @@ unsafe fn build_controls(hwnd: HWND, ctx: &mut Ctx) {
         add_string(fam, &name);
     }
     let iv = GetDlgItem(Some(hwnd), IDC_INTERVAL).unwrap_or_default();
+    // 2026-10-25 用户反馈：秒不易读——下拉文案改人性化单位（分钟/小时），
+    // 显示层专用；选中档仍以秒经 POLL_TIERS_SECS 索引回写配置（见下 CBN_SELCHANGE）。
     for secs in POLL_TIERS_SECS {
-        let label = if secs == DEFAULT_POLL_SECS {
-            format!("{secs} 秒（默认）")
-        } else {
-            format!("{secs} 秒")
-        };
-        add_string(iv, &label);
+        add_string(iv, &poll_tier_label(secs));
     }
 
     // —— 滑块范围（常量统一来自 config；D-57）——

@@ -5,7 +5,30 @@
 //! （tier_hint_dynamic / fine_tune_gate_text / lab_hint_text 及其
 //! 常量），阈值校验等其余纯逻辑留待后续窗口逐步抽离。
 
-use crate::config::{Config, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN};
+use crate::config::{Config, DEFAULT_POLL_SECS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN};
+
+/// 轮询间隔人性化显示（2026-10-25 用户反馈：秒不易读）。换算规则：
+/// 能整除 3600 →「N 小时」，否则能整除 60 →「N 分钟」，否则保留「N 秒」。
+/// 仅用于用户可见显示层——内部数值与持久化存储一律保持秒不变。
+pub fn humanize_interval_secs(secs: u64) -> String {
+    if secs.is_multiple_of(3600) {
+        format!("{} 小时", secs / 3600)
+    } else if secs.is_multiple_of(60) {
+        format!("{} 分钟", secs / 60)
+    } else {
+        format!("{secs} 秒")
+    }
+}
+
+/// 设置窗口轮询档位下拉项文案：人性化单位，默认档（D-66：1800s）追加「（默认）」。
+/// 显示层专用；档位数值仍以秒经 `POLL_TIERS_SECS` 索引回写配置。
+pub fn poll_tier_label(secs: u64) -> String {
+    if secs == DEFAULT_POLL_SECS {
+        format!("{}（默认）", humanize_interval_secs(secs))
+    } else {
+        humanize_interval_secs(secs)
+    }
+}
 
 /// v0.3.22（D-87/D-88）：实验室 hint 终版文案——如实说明可逐项关闭、
 /// 尚未完成全量真机验证、反馈渠道与生效方式（不承诺「零事故」）。
@@ -92,9 +115,53 @@ pub fn settings_applied_note(prev: &Config, next: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        fine_tune_gate_text, lab_hint_text, settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
+        fine_tune_gate_text, humanize_interval_secs, lab_hint_text, poll_tier_label,
+        settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
     };
-    use crate::config::Config;
+    use crate::config::{Config, DEFAULT_POLL_SECS, POLL_TIERS_SECS};
+
+    /// 轮询间隔人性化换算（2026-10-25 用户反馈：秒不易读）——五档
+    /// （D-66：300/600/1800/3600/7200）显示输出逐档断言 + 换算规则边界：
+    /// 整除 3600 → 小时、整除 60 → 分钟、其余保留秒。
+    #[test]
+    fn humanize_interval_secs_spells_five_tiers() {
+        assert_eq!(humanize_interval_secs(300), "5 分钟");
+        assert_eq!(humanize_interval_secs(600), "10 分钟");
+        assert_eq!(humanize_interval_secs(1800), "30 分钟");
+        assert_eq!(humanize_interval_secs(3600), "1 小时");
+        assert_eq!(humanize_interval_secs(7200), "2 小时");
+    }
+
+    /// 换算规则边界：整除 3600 优先于整除 60；非整除保留秒。
+    #[test]
+    fn humanize_interval_secs_unit_rule_edges() {
+        assert_eq!(humanize_interval_secs(60), "1 分钟");
+        assert_eq!(humanize_interval_secs(3660), "61 分钟");
+        assert_eq!(humanize_interval_secs(15), "15 秒");
+        assert_eq!(humanize_interval_secs(90), "90 秒");
+        assert_eq!(humanize_interval_secs(1), "1 秒");
+    }
+
+    /// 设置窗口下拉项文案：五档逐档断言，默认档（1800s）追加「（默认）」。
+    #[test]
+    fn poll_tier_label_spells_five_tiers_with_default_mark() {
+        assert_eq!(poll_tier_label(300), "5 分钟");
+        assert_eq!(poll_tier_label(600), "10 分钟");
+        assert_eq!(poll_tier_label(1800), "30 分钟（默认）");
+        assert_eq!(poll_tier_label(3600), "1 小时");
+        assert_eq!(poll_tier_label(7200), "2 小时");
+        // 与档位表逐一对应：POLL_TIERS_SECS 顺序即下拉顺序。
+        let labels: Vec<String> = POLL_TIERS_SECS
+            .iter()
+            .map(|&s| poll_tier_label(s))
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["5 分钟", "10 分钟", "30 分钟（默认）", "1 小时", "2 小时"]
+        );
+        // 「（默认）」标注锚定 DEFAULT_POLL_SECS，不硬编码档位位置。
+        assert!(poll_tier_label(DEFAULT_POLL_SECS).ends_with("（默认）"));
+    }
 
     #[test]
     fn tier_hint_dynamic_spells_ranges() {

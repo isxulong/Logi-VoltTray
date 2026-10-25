@@ -3,11 +3,12 @@
 //! 设备区行不计入额度）。
 //!
 //! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
-//! ── / 立即刷新（当前间隔 {n} 秒）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
+//! ── / 立即刷新（当前间隔 {人性化单位，如 30 分钟}）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
 //! ── / 设置… / 导出诊断信息… / 导出耗电统计… / 检查更新（当前 v{X}）/
 //! ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use volttray_app::settings_text::humanize_interval_secs;
 use volttray_app::DeviceSnapshot;
 
 /// 菜单项 ID 集合（构建时从 muda 取回，事件匹配用）。
@@ -121,7 +122,8 @@ pub fn append_direct_enum_failure_hint(
 
 /// 构建菜单。
 ///
-/// - `poll_secs`：当前轮询间隔，用于「立即刷新（当前间隔 {n} 秒）」文案（M10 可见可调）；
+/// - `poll_secs`：当前轮询间隔（秒），用于「立即刷新（当前间隔 …）」文案
+///   （M10 可见可调；显示层经 humanize_interval_secs 换算为分钟/小时）；
 /// - `blink`：低电闪烁提醒开关（M11，菜单可直接关）；
 /// - `autostart` / `silent`：沿用 v0.2.0 开关。
 pub fn build_menu(
@@ -153,7 +155,14 @@ pub fn build_menu(
         let _ = menu.append(&PredefinedMenuItem::separator());
     }
 
-    let refresh = MenuItem::new(format!("立即刷新（当前间隔 {poll_secs} 秒）"), true, None);
+    // 2026-10-25 用户反馈：秒不易读——间隔显示改人性化单位（分钟/小时，
+    // 换算规则见 settings_text::humanize_interval_secs）；显示层专用，
+    // poll_secs 数值与配置存储保持秒不变。
+    let refresh = MenuItem::new(
+        format!("立即刷新（当前间隔 {}）", humanize_interval_secs(poll_secs)),
+        true,
+        None,
+    );
     let blink_item = CheckMenuItem::new("低电闪烁提醒", true, blink, None);
     // v0.3.14：改名澄清语义——该开关实际只控制 toast 提示音
     // （toast.rs 的 <audio silent="true"/>），既不抑制弹通知本身，
