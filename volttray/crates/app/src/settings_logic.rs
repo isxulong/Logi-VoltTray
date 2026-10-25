@@ -43,12 +43,13 @@ pub fn thresholds_strictly_increasing(ths: &[u8]) -> bool {
 /// `normalize_font_tiers` 兜底，与原分支一致）。无严格递增空间时
 /// 提前停止（break 语义保留），余下交给 normalize 修复。
 ///
-/// ⚠ 潜在缺陷逐字保留（行为零变化契约，不顺带修复）：末档阈值已为
-/// MAX(99) 时继续增档，`next.clamp(lo + 1, MAX)` 因 min(100) > max(99)
-/// 直接 panic（原分支同此——clamp 先于 break 触发，break 实为不可达
-/// 安全阀）。已登记为缺陷候选，修复留给后续批次。`slots == 0` 的
-/// else 分支在原代码中即不可达（while 条件保证 slots ≥ 1），同样
-/// 逐字保留。
+/// 修复（小修批第 1 项，2026-10-25 批次）：旧实现末档阈值已为 MAX(99)
+/// 时继续增档，`next.clamp(lo + 1, MAX)` 因 min(100) > max(99) 直接
+/// panic（clamp 先于 break 触发，break 实为不可达安全阀；v0.3.23 曾以
+/// `#[should_panic]` 钉板该缺陷）。现在进入 clamp 前先判「无严格递增
+/// 空间」（lo >= MAX）直接 break——panic 路径消除，余下仍交 normalize
+/// 兜底，钉板测试改为断言「不 panic + 原样返回」。`slots == 0` 的
+/// else 分支在原代码中即不可达（while 条件保证 slots ≥ 1），逐字保留。
 pub fn retier_thresholds(ths: &[u8], n: usize) -> Vec<u8> {
     let max = FONT_TIER_THRESHOLD_MAX as i32;
     let mut ths = ths.to_vec();
@@ -58,6 +59,11 @@ pub fn retier_thresholds(ths: &[u8], n: usize) -> Vec<u8> {
     while ths.len() + 1 < n {
         let lo = ths.last().map(|t| *t as i32).unwrap_or(0);
         let slots = n - ths.len() - 1;
+        // 小修批第 1 项：末档已达 MAX 时无严格递增空间，直接停止——
+        // 否则下方 clamp(lo + 1, MAX) 因 min > max panic。
+        if lo >= max {
+            break;
+        }
         let next = if slots > 0 {
             (max - lo) / (slots as i32 + 1) + lo
         } else {
@@ -142,13 +148,15 @@ mod tests {
         assert_eq!(retier_thresholds(&[20, 97], 4), vec![20, 97, 98]);
     }
 
-    /// 潜在缺陷钉板（钉住、不修复）：末档阈值已为 99 时增档，原分支
-    /// `next.clamp(lo + 1, 99)` 因 min(100) > max(99) panic——抽离保持
-    /// 逐字语义（行为零变化契约），故本测试钉住 panic 本身。修复候选
-    /// 已记录于函数文档注释，留待后续批次单独立项。
+    /// 修复钉板（小修批第 1 项）：末档阈值已为 99 时继续增档不再
+    /// panic——无严格递增空间提前 break、原样返回，余下交 normalize
+    /// 兜底（v0.3.23 曾以 #[should_panic] 钉住旧缺陷，本批修复后改
+    /// 为正向断言）。
     #[test]
-    #[should_panic]
-    fn retier_thresholds_pins_preexisting_clamp_panic_at_trailing_99() {
-        let _ = retier_thresholds(&[98, 99], 4);
+    fn retier_thresholds_trailing_99_stops_without_panic() {
+        assert_eq!(retier_thresholds(&[98, 99], 4), vec![98, 99]);
+        assert_eq!(retier_thresholds(&[99], 3), vec![99]);
+        // 全 99 多档目标同样不再 panic。
+        assert_eq!(retier_thresholds(&[99], 5), vec![99]);
     }
 }

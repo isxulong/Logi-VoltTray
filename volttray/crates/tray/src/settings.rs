@@ -2803,7 +2803,8 @@ fn on_command(hwnd: HWND, ctx: &Ctx, id: i32, code: u32) {
             }
             let n = FONT_TIER_MIN_TIERS + idx as usize;
             // E23 第 2 步：均分/弹尾逻辑逐字抽离到 app::settings_logic
-            // （含末档 99 时 clamp panic 的既有缺陷语义，见该函数注释）。
+            // （末档 99 时的 clamp panic 潜伏缺陷已于小修批第 1 项修复，
+            // 见该函数注释）。
             let ths = retier_thresholds(&cfg.icon_font_tier_thresholds, n);
             let (t2, c2, _) = normalize_font_tiers(ths, cfg.icon_font_tier_colors.clone());
             cfg.icon_font_tier_thresholds = t2;
