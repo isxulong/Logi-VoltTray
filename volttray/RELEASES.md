@@ -98,10 +98,14 @@ v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24
   - ⑤ stats 段类型 `active` 口径定为「app 运行中且未判充电/休眠」，**不改名**（CSV/JSON schema 已对外稳定、recheck.py 质检与 E10 对账按现列名取值；改名属 HTML 报告重构范围，由报告层映射展示文案）——口径单一来源：`attribution.rs` `SegmentType::Active` 注释与本条。
 
 - **统计 HTML 重构批观察项（P2 ×4，登记于 2026-10-25）**：
-  - ① `pre_registration_offline` 判定用 `.any()` OR 语义，未复刻 upsert 各分支的优先级——存在与主路径判序不一致的残余风险，后续版本复核是否需按分支优先级复刻。
+  - ① 多条目身份菱形失效模式：同一物理设备存在多条目身份时，`pre_registration_offline` 的 `.any()` OR 判定（未复刻 upsert 各分支的优先级）理论上可致计数多计 +1。缓解评估：实际被 `seed_virtual` 同键拒种基本封死（同一物理键不允许播种第二个虚拟条目，多条目菱形在册面上难以成形）——**已基本封死，登记留痕备查，不作为开放的残余风险**。（复核批 F4：恢复任务原文完整表述，修正此前登记缩水。）
   - ② `RecvTimeoutError::Disconnected` 退出路径不冲出采样器尾部——E10 对账公式（计数器值 = 可见 miss 行数 + Σ suppressed 汇报）仅对正常 Shutdown 收尾的会话成立，异常断开会话需另行对账口径。
   - ③ `pre_registration_offline` proven-match（Rebound 对应）条件缺专属单测——现有测试未直接锁定该条件分支，后续补测。
   - ④ `RecentRate` 汇总速率仅有 `hours > 0` 守卫、无最短总时长护栏——**注：统计 HTML 重构批（本次提交）已将「近7天活跃耗速率」摘要卡整体移除**，本观察项随移除自然消解，登记留痕备查。
+- **统计 HTML 重构批 P2 修复批观察项（仅登记不修复，登记于 2026-10-25）**：
+  - ① `device_queries` 哨兵恒真断言机制偏弱（真实保障 = `mark()` 纯内存无 I/O 签名），留作回归绊网，择期强化。
+  - ② 窗口 >90 天周聚合时 24h 时间轴整体不渲染（融合稿 §8 表述为「抽稀」），择期。
+  - ③ WakeSignal 2s 合并窗在分钟边界理论极小低估，备查。
 
 ## v0.3.22
 
