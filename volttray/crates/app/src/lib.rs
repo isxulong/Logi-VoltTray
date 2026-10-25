@@ -25,7 +25,7 @@ pub mod wakechannel;
 pub use attribution::{
     anonymize_map, build_report_data, build_segments, event_keys, fmt_local_date, fmt_rfc3339,
     fnv1a64_hex, render_csv, render_html, render_json_events, stats_export_filename_local,
-    Chart1Series, DayDrain, RecentRate, Segment, SegmentType, TypeDurations, CHART1_BUCKET_SECS,
+    Chart1Series, Segment, SegmentType, TypeDurations, CHART1_BUCKET_SECS,
     CHART1_DEFAULT_WINDOW_DAYS, CSV_HEADER, GAP_OVER_LIMIT_SECS, MERGE_WINDOW_SECS,
     NOTE_BELOW_WINDOW, NOTE_BOUNDARY, NOTE_CLOCK_ANOMALY, NOTE_EVIDENCE_MISSING, NOTE_GAP_OVER_7D,
     NOTE_RUN_GAP, RECENT_DAYS,

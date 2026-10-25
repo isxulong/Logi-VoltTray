@@ -59,8 +59,12 @@ pub const NOTE_CLOCK_ANOMALY: &str = "clock_anomaly";
 pub const NOTE_GAP_OVER_7D: &str = "gap_over_7d";
 
 /// 速率列的最小段时长（秒）：短于此的段分母过小、速率失真
-/// （小修批第 4 项，见 [`Segment::rate_pct_per_hour`]）。
-pub const MIN_RATE_DURATION_SECS: i64 = 60;
+/// （融合稿口径总表「分段明细表」行：duration<5min → None；
+/// 小修批第 4 项 60s 护栏在本批加严为 300s）。
+pub const MIN_RATE_DURATION_SECS: i64 = 300;
+/// 速率列的最小绝对 Δ%（融合稿口径总表：delta 绝对值<1% → None；
+/// 整数电量口径下即 delta==0 的段不输出速率）。
+pub const MIN_RATE_ABS_DELTA_PCT: i16 = 1;
 
 /// 段类型（CSV segment_type 列取值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -130,12 +134,16 @@ impl Segment {
 
     /// rate_pct_per_hour 列：整段 Δ%/Δt（%/h，2 位小数）；unknown 段
     /// 不可算 → None（CSV 留空、JSON null）。零时长段不产生速率。
-    /// 小修批第 4 项（2026-10-25 批次）：时长 <
-    /// [`MIN_RATE_DURATION_SECS`] 的段分母过小，速率失真无意义
-    /// （v0.3.23 真机末行 9s 段算出 -400%/h），统一返回 None——
-    /// CSV / JSON / HTML 同走本函数，护栏单点生效。
+    /// 小修批第 4 项（2026-10-25 批次）：时长过短的段分母过小，
+    /// 速率失真无意义（v0.3.23 真机末行 9s 段算出 -400%/h），统一
+    /// 返回 None——CSV / JSON / HTML 同走本函数，护栏单点生效。
+    /// 融合稿口径总表加严：duration<5min 或 delta 绝对值<1% → None
+    /// （零变化段无速率意义，同时消灭小分母伪值）。
     pub fn rate_pct_per_hour(&self) -> Option<f64> {
-        if self.seg_type == SegmentType::Unknown || self.duration_secs() < MIN_RATE_DURATION_SECS {
+        if self.seg_type == SegmentType::Unknown
+            || self.duration_secs() < MIN_RATE_DURATION_SECS
+            || self.delta_pct().abs() < MIN_RATE_ABS_DELTA_PCT
+        {
             return None;
         }
         let hours = self.duration_secs() as f64 / 3600.0;
@@ -150,10 +158,6 @@ impl Segment {
 
 pub(crate) fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
-}
-
-pub(crate) fn round4(x: f64) -> f64 {
-    (x * 10_000.0).round() / 10_000.0
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +473,9 @@ pub fn build_segments(events: &[StatsEvent]) -> Vec<Segment> {
             }
             StatsEvent::RunStart { ts } => run_marks.push((*ts, AnchorKind::RunStart)),
             StatsEvent::RunStop { ts } => run_marks.push((*ts, AnchorKind::RunStop)),
+            // 活动桶摘要不参与分段锚定（分钟位图是独立口径，
+            // 分段引擎只消费 read/run/boundary/sleep 四类）。
+            StatsEvent::ActivityBuckets { .. } => {}
         }
     }
     // run 标记按 ts 稳定归并进各设备锚点流（同 ts 排在设备事件之后——
@@ -544,7 +551,8 @@ pub fn event_keys(events: &[StatsEvent]) -> BTreeSet<String> {
             StatsEvent::Read(e) => {
                 keys.insert(e.physical_key.clone());
             }
-            StatsEvent::SleepEnter { physical_key, .. } => {
+            StatsEvent::SleepEnter { physical_key, .. }
+            | StatsEvent::ActivityBuckets { physical_key, .. } => {
                 keys.insert(physical_key.clone());
             }
             StatsEvent::Boundary { devices, .. } => {
@@ -622,65 +630,6 @@ fn build_chart1(segments: &[Segment], devices: &[(String, String)]) -> Vec<Chart
     out
 }
 
-/// 图表②单日单设备 drain 值（活跃/休眠/未知三层，%/日，4 位小数）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct DayDrain {
-    pub active: f64,
-    pub sleep: f64,
-    pub unknown: f64,
-}
-
-/// 图表②：每日耗电对比。日界 = 本地 00:00（按事件 ts 本地时区）；
-/// 跨日段 Δ% 按线性摊入并标近似（approx=true）；未知段独立灰色层，
-/// 不并入活跃/休眠；充电段不计耗电（增益，不入本图）。drain =
-/// max(0, start−end)（电量回升不产生负耗电）。
-fn build_chart2(
-    segments: &[Segment],
-    offset_minutes: i32,
-) -> (BTreeMap<String, BTreeMap<String, DayDrain>>, bool) {
-    let mut days: BTreeMap<String, BTreeMap<String, DayDrain>> = BTreeMap::new();
-    let mut approx = false;
-    for seg in segments {
-        let dur = seg.duration_secs();
-        if dur <= 0 {
-            continue;
-        }
-        let drain = (seg.start_pct as f64 - seg.end_pct as f64).max(0.0);
-        let mut t = seg.start_ts;
-        while t < seg.end_ts {
-            let next_boundary = local_day_start(t, offset_minutes) + 86_400;
-            let piece_end = next_boundary.min(seg.end_ts);
-            if piece_end < seg.end_ts {
-                approx = true; // 跨日段线性摊入，标近似
-            }
-            let frac = (piece_end - t) as f64 / dur as f64;
-            let day = fmt_local_date(t, offset_minutes);
-            let cell = days
-                .entry(day)
-                .or_default()
-                .entry(seg.device_key.clone())
-                .or_default();
-            let v = drain * frac;
-            match seg.seg_type {
-                SegmentType::Active => cell.active += v,
-                SegmentType::Sleep => cell.sleep += v,
-                SegmentType::Unknown => cell.unknown += v,
-                SegmentType::Charging => {} // 增益不入耗电对比
-            }
-            t = piece_end;
-        }
-    }
-    // 统一 round4（复算脚本逐值一致的 rounding 口径）。
-    for per_dev in days.values_mut() {
-        for cell in per_dev.values_mut() {
-            cell.active = round4(cell.active);
-            cell.sleep = round4(cell.sleep);
-            cell.unknown = round4(cell.unknown);
-        }
-    }
-    (days, approx)
-}
-
 /// 图表③：时长占比（秒）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TypeDurations {
@@ -708,29 +657,29 @@ fn build_chart3(segments: &[Segment]) -> (BTreeMap<String, TypeDurations>, TypeD
     (per_dev, total)
 }
 
-/// US-B4 近期耗速率：近 7 天活跃段耗速率（时间加权 = 窗口内活跃段
-/// drain 总和 / 活跃小时总和；段归属按 start_ts 在窗口内计）。不足 7
-/// 天按实际天数并在 meta 标注。
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RecentRate {
-    /// %/h（2 位小数；窗口内无活跃段为 None）。
-    pub rate_pct_per_hour: Option<f64>,
-    /// 数据实际覆盖天数（不足 7 天标注用）。
-    pub days_covered: i64,
-}
+/// 粘滞段时长下限（秒）：斜率 0 且超过此时长的放电段判「设备上报
+/// 粘滞」（E21 定论：86% 恒读 110.7h 平台期为设备侧上报粘滞）。
+pub const STICKY_MIN_DURATION_SECS: i64 = 86_400;
+/// 日卡「样本不足」护栏：当日 read 点数下限（口径总表：read<3 → 灰态）。
+pub const SPARSE_MIN_READS: usize = 3;
+/// 日卡「样本不足」护栏：当日覆盖时长下限（口径总表：覆盖<2h → 灰态）。
+pub const SPARSE_MIN_COVERAGE_SECS: i64 = 7200;
+/// 分日视图降级阈值：窗口超过 90 天时日卡降级为周聚合、时间轴抽稀
+/// （融合稿 §8；写死进代码常量，经 meta.daily_view_day_limit 透出）。
+pub const DAILY_VIEW_DAY_LIMIT: i64 = 90;
+/// 双口径对账冲突阈值：上界（中位数×24h）与下界（总账）差异 >2 倍
+/// 时挂「口径冲突」提示（融合稿冲突清单 1；区间形态不变）。
+pub const AVG_CONFLICT_RATIO: f64 = 2.0;
+/// 样本质量徽标阈值：有效日 <7 天挂「样本不足」（融合稿 §3③）。
+pub const AVG_MIN_VALID_DAYS: usize = 7;
 
-fn build_recent_rates(
-    segments: &[Segment],
-    now_ref: i64,
-    offset_minutes: i32,
-) -> BTreeMap<String, RecentRate> {
-    let window_start = now_ref - RECENT_DAYS * 86_400;
-    // 数据覆盖天数 = 段覆盖的去重本地日数（与图表②同口径）。
-    let mut all_days: BTreeSet<String> = BTreeSet::new();
+/// 数据覆盖的本地日集合（段覆盖去重日；日界 = 本地 00:00）。
+fn covered_days(segments: &[Segment], offset_minutes: i32) -> BTreeSet<String> {
+    let mut days = BTreeSet::new();
     for s in segments {
         let mut t = s.start_ts;
         while t < s.end_ts.max(s.start_ts + 1) && t <= s.end_ts {
-            all_days.insert(fmt_local_date(t, offset_minutes));
+            days.insert(fmt_local_date(t, offset_minutes));
             let next = local_day_start(t, offset_minutes) + 86_400;
             if next <= t {
                 break;
@@ -738,41 +687,394 @@ fn build_recent_rates(
             t = next;
         }
     }
-    let days_covered = (all_days.len() as i64)
-        .min(RECENT_DAYS)
-        .max(if all_days.is_empty() { 0 } else { 1 });
-    // 显式累计（Σdrain, Σhours）后一次求商（时间加权均值）。
-    let mut acc: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    days
+}
+
+/// 粘滞段清单（per device）：Active/Sleep 放电段、Δ%=0、时长 >24h。
+fn sticky_spans(segments: &[Segment]) -> BTreeMap<String, Vec<(i64, i64)>> {
+    let mut out: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
     for s in segments {
-        if s.seg_type != SegmentType::Active || s.start_ts < window_start {
-            continue;
+        if matches!(s.seg_type, SegmentType::Active | SegmentType::Sleep)
+            && s.start_pct == s.end_pct
+            && s.duration_secs() > STICKY_MIN_DURATION_SECS
+        {
+            out.entry(s.device_key.clone())
+                .or_default()
+                .push((s.start_ts, s.end_ts));
         }
-        let e = acc.entry(s.device_key.clone()).or_default();
-        e.0 += (s.start_pct as f64 - s.end_pct as f64).max(0.0);
-        e.1 += s.duration_secs() as f64 / 3600.0;
-    }
-    let mut out: BTreeMap<String, RecentRate> = BTreeMap::new();
-    let mut devices: BTreeSet<String> = segments.iter().map(|s| s.device_key.clone()).collect();
-    for k in acc.keys() {
-        devices.insert(k.clone());
-    }
-    for k in devices {
-        let rate = acc.get(&k).and_then(|(drain, hours)| {
-            if *hours > 0.0 {
-                Some(round2(drain / hours))
-            } else {
-                None
-            }
-        });
-        out.insert(
-            k,
-            RecentRate {
-                rate_pct_per_hour: rate,
-                days_covered,
-            },
-        );
     }
     out
+}
+
+/// 粘滞段覆盖的本地日集合（per device；与「中位数样本剔除」同源）。
+fn sticky_day_set(
+    spans: &BTreeMap<String, Vec<(i64, i64)>>,
+    offset_minutes: i32,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (dev, list) in spans {
+        for (a, b) in list {
+            let mut t = *a;
+            loop {
+                out.entry(dev.clone())
+                    .or_default()
+                    .insert(fmt_local_date(t, offset_minutes));
+                if t >= *b {
+                    break;
+                }
+                let next = local_day_start(t, offset_minutes) + 86_400;
+                if next <= t {
+                    break;
+                }
+                t = next.min(*b);
+            }
+        }
+    }
+    out
+}
+
+/// 分日视图日卡（融合稿指标①②：日耗电 = 当日放电快照首末差，
+/// 跨日段在日界处切分、不摊入，charging-fast 剔除；两级质量标签
+/// 「设备上报粘滞 / 样本不足」）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DailyCard {
+    pub date: String,
+    pub first_ts: i64,
+    pub first_pct: u8,
+    pub last_ts: i64,
+    pub last_pct: u8,
+    /// 日耗电 = max(0, first−last)（电量回升不产生负耗电）。
+    pub drain_pct: i16,
+    /// 当日充电回补（%）：充电段增益按段中点归属日累加，跨日段不摊。
+    pub charge_recovery_pct: i16,
+    pub reads: usize,
+    pub coverage_secs: i64,
+    /// 当日放电实测斜率（%/h）；样本不足时 None（只给首末差）。
+    pub slope_pct_per_hour: Option<f64>,
+    /// 设备上报粘滞标签（当日落在 >24h 零斜率放电段内）。
+    pub sticky: bool,
+    /// 样本不足标签（read<3 或覆盖<2h）。
+    pub sparse: bool,
+    /// 当日充电段（日界裁剪后）。
+    pub charging_spans: Vec<(i64, i64)>,
+    /// 当日未知段（日界裁剪后，灰罩）。
+    pub unknown_spans: Vec<(i64, i64)>,
+}
+
+fn build_daily_cards(
+    events: &[StatsEvent],
+    segments: &[Segment],
+    sticky_days: &BTreeMap<String, BTreeSet<String>>,
+    offset_minutes: i32,
+) -> BTreeMap<String, Vec<DailyCard>> {
+    // 当日放电快照（剔除充电态与 charging-fast 事件还原段）。
+    let mut reads: BTreeMap<(String, String), Vec<(i64, u8)>> = BTreeMap::new();
+    for ev in events {
+        if let StatsEvent::Read(e) = ev {
+            if e.charging || e.source == crate::stats::SOURCE_CHARGING_FAST {
+                continue;
+            }
+            reads
+                .entry((e.physical_key.clone(), fmt_local_date(e.ts, offset_minutes)))
+                .or_default()
+                .push((e.ts, e.percent));
+        }
+    }
+    // 日界裁剪的充电/未知段。
+    type DaySpans = (Vec<(i64, i64)>, Vec<(i64, i64)>);
+    let mut spans: BTreeMap<(String, String), DaySpans> = BTreeMap::new();
+    for seg in segments {
+        if !matches!(seg.seg_type, SegmentType::Charging | SegmentType::Unknown) {
+            continue;
+        }
+        let mut t = seg.start_ts;
+        while t < seg.end_ts.max(seg.start_ts + 1) && t <= seg.end_ts {
+            let d0 = local_day_start(t, offset_minutes);
+            let clip = (seg.start_ts.max(d0), seg.end_ts.min(d0 + 86_400));
+            if clip.1 > clip.0 {
+                let cell = spans
+                    .entry((seg.device_key.clone(), fmt_local_date(t, offset_minutes)))
+                    .or_default();
+                match seg.seg_type {
+                    SegmentType::Charging => cell.0.push(clip),
+                    _ => cell.1.push(clip),
+                }
+            }
+            let next = d0 + 86_400;
+            if next <= t {
+                break;
+            }
+            t = next;
+        }
+    }
+    // 当日充电回补（按充电段中点归属日；段增益 max(0, end−start)）。
+    let mut recovery: BTreeMap<(String, String), i16> = BTreeMap::new();
+    for seg in segments {
+        if seg.seg_type != SegmentType::Charging {
+            continue;
+        }
+        let gain = (seg.end_pct as i16 - seg.start_pct as i16).max(0);
+        if gain == 0 {
+            continue;
+        }
+        let mid = seg.start_ts + seg.duration_secs() / 2;
+        *recovery
+            .entry((seg.device_key.clone(), fmt_local_date(mid, offset_minutes)))
+            .or_insert(0) += gain;
+    }
+    let mut out: BTreeMap<String, Vec<DailyCard>> = BTreeMap::new();
+    for ((dev, date), mut list) in reads {
+        list.sort_by_key(|(ts, _)| *ts);
+        let (first_ts, first_pct) = list[0];
+        let (last_ts, last_pct) = list[list.len() - 1];
+        let coverage = last_ts - first_ts;
+        let sparse = list.len() < SPARSE_MIN_READS || coverage < SPARSE_MIN_COVERAGE_SECS;
+        let slope = if !sparse && coverage > 0 {
+            Some(round2(
+                (first_pct as f64 - last_pct as f64) / (coverage as f64 / 3600.0),
+            ))
+        } else {
+            None
+        };
+        let sticky = sticky_days.get(&dev).is_some_and(|ds| ds.contains(&date));
+        let (charging_spans, unknown_spans) = spans
+            .get(&(dev.clone(), date.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let charge_recovery_pct = recovery
+            .get(&(dev.clone(), date.clone()))
+            .copied()
+            .unwrap_or(0);
+        out.entry(dev).or_default().push(DailyCard {
+            date,
+            first_ts,
+            first_pct,
+            last_ts,
+            last_pct,
+            drain_pct: (first_pct as i16 - last_pct as i16).max(0),
+            charge_recovery_pct,
+            reads: list.len(),
+            coverage_secs: coverage,
+            slope_pct_per_hour: slope,
+            sticky,
+            sparse,
+            charging_spans,
+            unknown_spans,
+        });
+    }
+    for cards in out.values_mut() {
+        cards.sort_by(|a, b| a.date.cmp(&b.date));
+    }
+    out
+}
+
+/// 每日 app 运行时段（run_start/run_stop 配对，日界裁剪；全局口径
+/// ——app 进程级事件，各设备分日时间轴共用）。末尾未闭合 run 以
+/// 窗口最后事件 ts 闭合。
+fn build_run_spans_by_day(
+    events: &[StatsEvent],
+    offset_minutes: i32,
+) -> BTreeMap<String, Vec<(i64, i64)>> {
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    let mut open: Option<i64> = None;
+    let last_ts = events.iter().map(|e| e.ts()).max();
+    for ev in events {
+        match ev {
+            StatsEvent::RunStart { ts } => open = Some(*ts),
+            StatsEvent::RunStop { ts } => {
+                if let Some(a) = open.take() {
+                    if *ts > a {
+                        spans.push((a, *ts));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let (Some(a), Some(b)) = (open, last_ts) {
+        if b > a {
+            spans.push((a, b));
+        }
+    }
+    let mut out: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
+    for (a, b) in spans {
+        let mut t = a;
+        while t < b {
+            let d0 = local_day_start(t, offset_minutes);
+            let clip = (a.max(d0), b.min(d0 + 86_400));
+            if clip.1 > clip.0 {
+                out.entry(fmt_local_date(t, offset_minutes))
+                    .or_default()
+                    .push(clip);
+            }
+            let next = d0 + 86_400;
+            if next <= t {
+                break;
+            }
+            t = next;
+        }
+    }
+    out
+}
+
+/// 中位数（偶数样本取中两值平均）。
+fn median(mut xs: Vec<f64>) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = xs.len();
+    if n % 2 == 1 {
+        Some(xs[n / 2])
+    } else {
+        Some((xs[n / 2 - 1] + xs[n / 2]) / 2.0)
+    }
+}
+
+/// 日均耗电双口径对账（融合稿冲突清单 1 落地）。
+///
+/// 上界 = 剔除粘滞标记日的每日放电实测斜率中位数 ×24h；下界 =
+/// 窗口首尾总账（净降 + 充电回补）÷ 天数。两口径差异 >2 倍 →
+/// conflict。呈现无条件区间化（lower/upper 成对给出，永不输出
+/// 单值）；样本护栏降级为质量徽标（badges：样本不足/含粘滞）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AvgEstimate {
+    /// 区间下界（总账口径 %/天）。
+    pub lower_pct_per_day: Option<f64>,
+    /// 区间上界（中位数×24h 口径 %/天）。
+    pub upper_pct_per_day: Option<f64>,
+    /// 对账明细：剔除粘滞日后的斜率中位数（%/h）。
+    pub median_slope_pct_per_hour: Option<f64>,
+    /// 对账明细：总账值（%/天）。
+    pub ledger_pct_per_day: Option<f64>,
+    pub valid_days: usize,
+    pub window_days: f64,
+    pub sticky_days: usize,
+    pub conflict: bool,
+    pub badges: Vec<String>,
+}
+
+fn build_avg_estimate(
+    events: &[StatsEvent],
+    segments: &[Segment],
+    device_key: &str,
+    cards: &[DailyCard],
+    sticky_days: &BTreeSet<String>,
+) -> AvgEstimate {
+    // 上界样本：非粘滞、非稀疏日的实测斜率。
+    let slopes: Vec<f64> = cards
+        .iter()
+        .filter(|c| !c.sticky && !c.sparse)
+        .filter_map(|c| c.slope_pct_per_hour)
+        .filter(|v| *v > 0.0)
+        .collect();
+    let valid_days = slopes.len();
+    let median_slope = median(slopes);
+    let upper = median_slope.map(|m| round2(m * 24.0));
+    // 下界：窗口首尾总账（净降 + 充电回补）÷ 天数。
+    let mut dev_reads: Vec<(i64, u8)> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            StatsEvent::Read(e)
+                if e.physical_key == device_key
+                    && !e.charging
+                    && e.source != crate::stats::SOURCE_CHARGING_FAST =>
+            {
+                Some((e.ts, e.percent))
+            }
+            _ => None,
+        })
+        .collect();
+    dev_reads.sort_by_key(|(ts, _)| *ts);
+    let recovery: i16 = segments
+        .iter()
+        .filter(|s| s.device_key == device_key && s.seg_type == SegmentType::Charging)
+        .map(|s| (s.end_pct as i16 - s.start_pct as i16).max(0))
+        .sum();
+    let (ledger, window_days) = match (dev_reads.first(), dev_reads.last()) {
+        (Some((t0, p0)), Some((t1, p1))) if t1 > t0 => {
+            let wd = (*t1 - *t0) as f64 / 86_400.0;
+            let net = *p0 as i16 - *p1 as i16;
+            (Some(round2((net + recovery) as f64 / wd)), round2(wd))
+        }
+        _ => (None, 0.0),
+    };
+    let conflict = match (ledger, upper) {
+        (Some(l), Some(u)) => {
+            if l <= 0.0 {
+                u > 0.0
+            } else {
+                u > AVG_CONFLICT_RATIO * l
+            }
+        }
+        _ => false,
+    };
+    let mut badges: Vec<String> = Vec::new();
+    if valid_days < AVG_MIN_VALID_DAYS {
+        badges.push("样本不足".to_string());
+    }
+    if !sticky_days.is_empty() {
+        badges.push("含粘滞".to_string());
+    }
+    if conflict {
+        badges.push("口径冲突".to_string());
+    }
+    AvgEstimate {
+        lower_pct_per_day: ledger,
+        upper_pct_per_day: upper,
+        median_slope_pct_per_hour: median_slope,
+        ledger_pct_per_day: ledger,
+        valid_days,
+        window_days,
+        sticky_days: sticky_days
+            .iter()
+            .filter(|d| cards.iter().any(|c| &c.date == *d))
+            .count(),
+        conflict,
+        badges,
+    }
+}
+
+/// 周环比（融合稿 §3③/C-21：两个对比窗口均无粘滞标记且无口径冲突
+/// 时才给箭头，否则「不可比」）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct WeekOverWeek {
+    pub suppressed: bool,
+    pub reason: Option<String>,
+    /// 近 7 天日均耗电 − 前 7 天日均耗电（%/天；suppressed 时 None）。
+    pub delta_pct_per_day: Option<f64>,
+}
+
+fn build_week_over_week(cards: &[DailyCard], conflict: bool) -> WeekOverWeek {
+    let recent: Vec<&DailyCard> = cards.iter().rev().take(RECENT_DAYS as usize).collect();
+    let prev: Vec<&DailyCard> = cards
+        .iter()
+        .rev()
+        .skip(RECENT_DAYS as usize)
+        .take(RECENT_DAYS as usize)
+        .collect();
+    let sticky_hit = recent.iter().any(|c| c.sticky) || prev.iter().any(|c| c.sticky);
+    if sticky_hit || conflict {
+        return WeekOverWeek {
+            suppressed: true,
+            reason: Some("不可比".to_string()),
+            delta_pct_per_day: None,
+        };
+    }
+    if prev.is_empty() || recent.is_empty() {
+        return WeekOverWeek {
+            suppressed: true,
+            reason: Some("样本不足".to_string()),
+            delta_pct_per_day: None,
+        };
+    }
+    let r: f64 = recent.iter().map(|c| c.drain_pct as f64).sum::<f64>() / recent.len() as f64;
+    let p: f64 = prev.iter().map(|c| c.drain_pct as f64).sum::<f64>() / prev.len() as f64;
+    WeekOverWeek {
+        suppressed: false,
+        reason: None,
+        delta_pct_per_day: Some(round2(r - p)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +1211,16 @@ pub fn render_json_events(
                 "physical_key": display_key(physical_key, anon),
                 "event": "sleep_enter",
             }),
+            StatsEvent::ActivityBuckets {
+                ts,
+                physical_key,
+                days,
+            } => serde_json::json!({
+                "ts": ts,
+                "event": "activity_buckets",
+                "physical_key": display_key(physical_key, anon),
+                "days": days,
+            }),
         };
         arr.push(v);
     }
@@ -925,8 +1237,9 @@ pub fn render_json_events(
 // ---------------------------------------------------------------------------
 
 /// volttray-data 机器可读数据块（AC-B8 复算对账唯一取数源）：分段明细
-/// （与 CSV 同数据同列）+ 图表①②③底层数据 + US-B4 近 7 天耗速率。
-/// 匿名化开启时仅含匿名化后键，不含 physical_key 明文（R5-I-04 并入）。
+///（与 CSV 同数据同列）+ 图表①③底层数据 + 分日视图日卡 + 首屏 KPI +
+/// 日均耗电双口径对账 + 周环比 + 灰态缺口卡。匿名化开启时仅含匿名化
+/// 后键，不含 physical_key 明文（R5-I-04 并入）。
 pub fn build_report_data(
     events: &[StatsEvent],
     segments: &[Segment],
@@ -935,11 +1248,15 @@ pub fn build_report_data(
     generated_ts: i64,
 ) -> serde_json::Value {
     let anonymized = anon.is_some();
-    // 设备清单（展示键 + 显示名；序 = 展示键字典序）。
+    // 设备清单（展示键 + 显示名；序 = 展示键字典序）；raw_of 为展示键
+    // 到原始键的反映射——内部聚合（日卡 / 对账 / 粘滞）在原始键上做，
+    // 透出前统一换展示键。
     let mut name_of: BTreeMap<String, String> = BTreeMap::new();
+    let mut raw_of: HashMap<String, String> = HashMap::new();
     for ev in events {
         if let StatsEvent::Read(e) = ev {
             name_of.insert(display_key(&e.physical_key, anon), e.display_name.clone());
+            raw_of.insert(display_key(&e.physical_key, anon), e.physical_key.clone());
         }
     }
     let devices: Vec<(String, String)> = name_of.into_iter().collect();
@@ -976,11 +1293,23 @@ pub fn build_report_data(
         })
         .collect();
     let chart1 = build_chart1(&segs, &devices);
-    let (chart2_days, chart2_approx) = build_chart2(&segs, offset_minutes);
     let (chart3_per_dev, chart3_total) = build_chart3(&segs);
+    // 粘滞段 / 粘滞日（原始键口径，与 read 事件同键）。
+    let sticky = sticky_spans(segments);
+    let sticky_days = sticky_day_set(&sticky, offset_minutes);
+    // 分日视图日卡（原始键）与 app 运行时段（全局口径，日界裁剪）。
+    let daily_raw = build_daily_cards(events, segments, &sticky_days, offset_minutes);
+    let run_spans_by_day = build_run_spans_by_day(events, offset_minutes);
     let now_ref = events.iter().map(|e| e.ts()).max().unwrap_or(generated_ts);
-    let recent = build_recent_rates(&segs, now_ref, offset_minutes);
-    let days_covered = recent.values().map(|r| r.days_covered).max().unwrap_or(0);
+    let today = fmt_local_date(now_ref, offset_minutes);
+    // 活动位图积累天数（取各设备事件最大值；缺口卡判定）。
+    let mut activity_days = 0usize;
+    for ev in events {
+        if let StatsEvent::ActivityBuckets { days, .. } = ev {
+            activity_days = activity_days.max(days.len());
+        }
+    }
+    let days_covered = covered_days(segments, offset_minutes).len() as i64;
     let sparse_note = if segments.is_empty() {
         None
     } else if days_covered < RECENT_DAYS {
@@ -995,26 +1324,115 @@ pub fn build_report_data(
         let o = offset_minutes.abs();
         format!("{sign}{:02}:{:02}", o / 60, o % 60)
     };
+    // 逐设备透出：分日日卡 / 首屏 KPI / 双口径对账 / 周环比（键 = 展示键）。
+    let mut daily_cards = serde_json::Map::new();
+    let mut kpis = serde_json::Map::new();
+    let mut avg_map = serde_json::Map::new();
+    let mut wow_map = serde_json::Map::new();
+    for (dkey, _name) in &devices {
+        let raw_key = raw_of.get(dkey).cloned().unwrap_or_else(|| dkey.clone());
+        let cards = daily_raw.get(&raw_key).cloned().unwrap_or_default();
+        let dev_sticky_days = sticky_days.get(&raw_key).cloned().unwrap_or_default();
+        let avg = build_avg_estimate(events, segments, &raw_key, &cards, &dev_sticky_days);
+        let wow = build_week_over_week(&cards, avg.conflict);
+        let latest = events.iter().rev().find_map(|ev| match ev {
+            StatsEvent::Read(e) if e.physical_key == raw_key => Some((e.ts, e.percent, e.charging)),
+            _ => None,
+        });
+        let today_card = cards.iter().find(|c| c.date == today);
+        let today_run_secs: i64 = run_spans_by_day
+            .get(&today)
+            .map(|v| v.iter().map(|(a, b)| b - a).sum())
+            .unwrap_or(0);
+        // 「今日已耗」与日卡同一护栏：样本不足时降级灰态、只给首末差
+        // （drain 置 None，由展示层走 emptyMark 灰态语言）。
+        let (today_drain, today_sparse, today_sticky) = match today_card {
+            Some(c) => (
+                if c.sparse { None } else { Some(c.drain_pct) },
+                c.sparse,
+                c.sticky,
+            ),
+            None => (None, true, false),
+        };
+        daily_cards.insert(
+            dkey.clone(),
+            serde_json::to_value(&cards).unwrap_or_default(),
+        );
+        avg_map.insert(dkey.clone(), serde_json::to_value(&avg).unwrap_or_default());
+        wow_map.insert(dkey.clone(), serde_json::to_value(&wow).unwrap_or_default());
+        kpis.insert(
+            dkey.clone(),
+            serde_json::json!({
+                "current_pct": latest.map(|(_, p, _)| p),
+                "current_ts": latest.map(|(t, _, _)| t),
+                "current_charging": latest.map(|(_, _, c)| c).unwrap_or(false),
+                "today_date": today,
+                "today_drain_pct": today_drain,
+                "today_sparse": today_sparse,
+                "today_sticky": today_sticky,
+                "today_run_secs": today_run_secs,
+                // 推断项无条件区间化：只有 lower/upper 成对字段，不存在
+                // 任何单值字段（首屏准入按护栏完备性，非按实测/推断切）。
+                "avg": {
+                    "lower_pct_per_day": avg.lower_pct_per_day,
+                    "upper_pct_per_day": avg.upper_pct_per_day,
+                    "conflict": avg.conflict,
+                    "badges": avg.badges,
+                },
+            }),
+        );
+    }
+    // 图表①序列补粘滞段标注源（透出键 = 展示键）。
+    let mut chart1_json = serde_json::to_value(&chart1).unwrap_or_default();
+    if let Some(arr) = chart1_json.as_array_mut() {
+        for s in arr.iter_mut() {
+            let dk = s["device_key"].as_str().unwrap_or("").to_string();
+            let raw_key = raw_of.get(&dk).cloned().unwrap_or_else(|| dk.clone());
+            let spans = sticky.get(&raw_key).cloned().unwrap_or_default();
+            s["sticky_spans"] = serde_json::json!(spans);
+        }
+    }
+    // 灰态缺口卡（指标④：无字段不伪造；位图积累 ≥7 天后 Phase 2 升级
+    // 分日热力带，当前版本一律按缺口口径展示）。
+    let gap_present = activity_days < AVG_MIN_VALID_DAYS;
+    let gap_text = if activity_days == 0 {
+        "尚无静止/活动字段，不用 app 协议流量伪造。补齐计划：activity_buckets 分钟位图随系统事件流积累（零设备查询、事件驱动），积累 ≥7 天后升级为分日热力带。"
+            .to_string()
+    } else if gap_present {
+        format!(
+            "静止/活动分钟位图已积累 {activity_days} 天（≥7 天升级分日热力带）；当前版本仍按缺口口径展示，不用 app 协议流量伪造。"
+        )
+    } else {
+        format!(
+            "静止/活动分钟位图已积累 {activity_days} 天，满足升级条件；分日热力带将在后续版本上线，当前仍按缺口口径展示，不用 app 协议流量伪造。"
+        )
+    };
     serde_json::json!({
         "meta": {
-            "version": 1,
+            "version": 2,
             "generated_at": generated_ts,
             "generated_at_local": fmt_rfc3339(generated_ts, offset_minutes),
             "tz_offset": tz,
             "anonymized": anonymized,
             "days_covered": days_covered,
             "sparse_note": sparse_note,
-            "chart2_approx": chart2_approx,
             "chart1_bucket_secs": CHART1_BUCKET_SECS,
             "chart1_default_window_days": CHART1_DEFAULT_WINDOW_DAYS,
-            "recent_days": RECENT_DAYS,
+            "daily_view_day_limit": DAILY_VIEW_DAY_LIMIT,
+            "activity_days": activity_days,
+            "device_count": devices.len(),
+            "segment_count": segs.len(),
         },
         "devices": devices,
         "segments": seg_rows,
-        "chart1": chart1,
-        "chart2": chart2_days,
+        "chart1": chart1_json,
         "chart3": { "per_device": chart3_per_dev, "total": chart3_total },
-        "recent7d_active_rate": recent,
+        "daily_cards": daily_cards,
+        "run_spans_by_day": run_spans_by_day,
+        "first_screen_kpis": kpis,
+        "avg_estimate": avg_map,
+        "week_over_week": wow_map,
+        "activity_gap_note": { "present": gap_present, "text": gap_text },
     })
 }
 
@@ -1063,11 +1481,19 @@ const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
 <style>
 :root{color-scheme:light dark}
 body{font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;margin:0;padding:24px;max-width:1080px;margin:0 auto;line-height:1.5}
-h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}h3{font-size:14px;margin:16px 0 6px}
 .meta{color:#666;font-size:13px}.sparse{color:#b26a00;font-size:13px}
 .cards{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}
-.card{border:1px solid #ccc5;border-radius:8px;padding:10px 14px;min-width:150px}
+.card{border:1px solid #ccc5;border-radius:8px;padding:10px 14px;min-width:170px}
 .card .k{font-size:12px;color:#777}.card .v{font-size:18px;font-weight:600}
+.card .s{font-size:12px;color:#777;margin-top:2px}
+.card.dim{opacity:.65;border-style:dashed}
+.badge{display:inline-block;font-size:11px;border-radius:4px;padding:0 6px;margin:4px 4px 0 0;border:1px solid #9995}
+.b-measure{color:#2f855a;border-color:#2f855a55}
+.b-infer{color:#b7791f;border-color:#b7791f55}
+.b-gap{color:#888;border-color:#8888}
+.b-warn{color:#b26a00;border-color:#b26a0055}
+.b-conflict{color:#c53030;border-color:#c5303055}
 .controls button{margin-right:8px;padding:4px 12px;border:1px solid #9995;border-radius:6px;background:transparent;color:inherit;cursor:pointer}
 .controls button.on{border-color:#2b6cb0;color:#2b6cb0;font-weight:600}
 .scroll{overflow-x:auto;border:1px solid #ccc5;border-radius:8px;padding:8px}
@@ -1080,6 +1506,11 @@ th{position:sticky;top:0;background:Canvas}
 .tblwrap{max-height:480px;overflow:auto;border-radius:8px}
 .legend span{display:inline-block;margin-right:14px;font-size:12px}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.dayrow{display:flex;align-items:center;gap:8px;margin:2px 0;font-size:12px;flex-wrap:wrap}
+.dayrow .dl{width:64px;color:#777;flex:none}
+.dayrow .dd{color:#777;min-width:230px}
+footer{margin-top:28px;border-top:1px solid #ccc5;padding-top:10px;font-size:12.5px;color:#777}
+footer table{font-size:12px}
 </style>
 </head>
 <body>
@@ -1088,60 +1519,210 @@ th{position:sticky;top:0;background:Canvas}
 <p class="meta">__TITLE_BITS__</p>
 <p class="sparse">__SPARSE_NOTE__</p>
 </header>
-<section class="cards" id="summary"></section>
-<h2>① 电量曲线（按小时聚合取末值）</h2>
+
+<h2>首屏答案区</h2>
+<section class="cards" id="kpis"></section>
+
+<h2>分日视图（日界对齐：日耗电柱 + 24h 时间轴）</h2>
+<p class="hint">日耗电 = 当日放电快照首末差（跨日段在日界处切分、不摊入；charging-fast 事件还原段剔除）。时间轴实色段为 app 运行时段（监控覆盖，app 进程口径），绿色为充电段，灰罩为未知段。质量标签：设备上报粘滞（当日斜率可能低估）/ 样本不足（read&lt;3 或覆盖&lt;2h，只给首末差）。</p>
+<div id="daily"></div>
+
+<h2>静止 vs 活动</h2>
+<div id="gap"></div>
+
+<h2>趋势佐证区</h2>
+<h3>电量曲线（按小时聚合取末值）</h3>
 <div class="controls" id="c1ctl">
 <button data-win="90" class="on">近 90 天</button><button data-win="30">近 30 天</button><button data-win="0">全部历史</button>
 </div>
 <div class="scroll"><svg id="c1" width="960" height="280" role="img" aria-label="电量曲线"></svg></div>
-<p class="hint">跨未知段断线并以灰罩标示（不直线相连）；充电段以底色标记；窗口可切换，默认近 90 天。</p>
-<h2>② 每日耗电对比（活跃 / 休眠 / 未知）</h2>
-<div class="scroll"><svg id="c2" width="960" height="260" role="img" aria-label="每日耗电对比"></svg></div>
-<p class="hint">日界按本地 00:00 切段，跨日段 Δ% 按线性摊入（近似）；未知段为灰色层，不并入活跃/休眠；不足 7 天按实际天数。</p>
-<h2>③ 时长占比</h2>
+<p class="hint">跨未知段断线并以灰罩标示（不直线相连）；充电段以底色标记；粘滞段以黄褐色罩层与虚线标注（悬停看说明）；窗口可切换，默认近 90 天。</p>
+<h3>日均耗电双口径对账明细</h3>
+<div class="cards" id="recon"></div>
+<p class="hint">上界 = 剔除粘滞标记日的每日放电实测斜率中位数 ×24h（系统性偏高：非运行时段按运行斜率外推）；下界 = 窗口首尾总账（净降 + 充电回补）÷ 天数（按全天摊薄，可能偏低）。差异 &gt;2 倍挂「口径冲突」。物理量（mAh/mWh）无电池容量字段，不给。</p>
+
+<h2>证据与口径区</h2>
+<h3>app 运行时长占比</h3>
 <div class="scroll"><svg id="c3" width="960" height="180" role="img" aria-label="时长占比"></svg></div>
 <div class="legend" id="c3legend"></div>
-<h2>④ 分段明细（与 CSV 同数据同列）</h2>
+<h3>分段明细（与 CSV 同数据同列）</h3>
 <div class="tblwrap"><table id="seg"><thead><tr>
 <th>device_key</th><th>display_name</th><th>segment_type</th><th>start_ts</th><th>end_ts</th><th>duration_min</th><th>start_pct</th><th>end_pct</th><th>delta_pct</th><th>rate_pct_per_hour</th><th>note</th>
 </tr></thead><tbody></tbody></table></div>
+
+<footer>
+<h3>口径与边界说明</h3>
+<table id="glossary"><thead><tr><th>展示项</th><th>形态</th><th>数据来源字段</th><th>口径</th><th>护栏</th></tr></thead><tbody>
+<tr><td>当前电量</td><td>首屏 KPI 卡</td><td>percent/ts 最新快照</td><td>实测</td><td>—</td></tr>
+<tr><td>今日已耗</td><td>首屏 KPI 卡</td><td>当日 discharging 首末差</td><td>实测</td><td>read&lt;3 或覆盖&lt;2h → 灰态「数据不足」</td></tr>
+<tr><td>今日 app 运行时长</td><td>首屏 KPI 卡</td><td>run_start/stop 当日段</td><td>实测（app 进程口径）</td><td>文案守卫</td></tr>
+<tr><td>日均耗电区间</td><td>首屏 KPI 区间卡</td><td>剔除粘滞日中位数 × 总账对账</td><td>推断</td><td>无条件区间化 + 差异&gt;2 倍冲突提示 + 样本质量徽标</td></tr>
+<tr><td>每日耗电量</td><td>分日柱 + 明细</td><td>percent/charging/ts</td><td>实测</td><td>粘滞 / 样本不足两级标签</td></tr>
+<tr><td>app 运行时段</td><td>24h 分日时间轴</td><td>run_start/run_stop</td><td>实测（改名防误导）</td><td>口径守卫测试</td></tr>
+<tr><td>充电时段</td><td>时间轴绿色段</td><td>charging-fast 事件</td><td>实测</td><td>—</td></tr>
+<tr><td>静止 vs 活动</td><td>灰态卡→热力带</td><td>activity_buckets（新增）</td><td>缺口→实测</td><td>禁用流量代理</td></tr>
+<tr><td>电量曲线</td><td>折线 + 平台期标注</td><td>percent/ts 全量快照</td><td>实测</td><td>粘滞段标注 + tooltip</td></tr>
+<tr><td>日均耗电对账明细</td><td>P1 明细卡</td><td>双口径全量字段</td><td>推断</td><td>冲突状态明示</td></tr>
+<tr><td>app 运行时长占比</td><td>堆叠横条</td><td>分段时长合计</td><td>实测</td><td>改名</td></tr>
+<tr><td>分段明细表</td><td>表格（证据层）</td><td>与 CSV 同数据同列</td><td>实测</td><td>rate 护栏（duration&lt;5min 或 delta 绝对值&lt;1% → None）</td></tr>
+</tbody></table>
+<p>工程口径：设备数 <b id="mdev">—</b>、聚合段数 <b id="mseg">—</b>、覆盖天数 <b id="mday">—</b>（不占首屏）。日界 = 本地 00:00（时区见页首）。</p>
+<p>已移除：跨日段线性摊入柱图（日耗电口径已统一为当日首末差，避免同页双口径）；近 7 天耗速率摘要卡（分母语义错误：app 运行段由 run_start/run_stop 事件锚定）。</p>
+<p>单文件离线报告：零外部依赖，断网可开。</p>
+</footer>
+
 <script id="volttray-data" type="application/json">__VOLTTRAY_DATA__</script>
 <script>
 "use strict";
 var D=JSON.parse(document.getElementById("volttray-data").textContent);
 var PALETTE=["#2b6cb0","#c53030","#2f855a","#b7791f","#6b46c1","#c05621","#2c7a7b","#97266d"];
 var TYPE_COLOR={"active":"#2b6cb0","sleep":"#6b46c1","charging":"#2f855a","unknown":"#a0aec0"};
+var TYPE_LABEL={"active":"app 运行","sleep":"休眠","charging":"充电","unknown":"未知"};
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 function el(tag,attrs,parent){var e=document.createElementNS("http://www.w3.org/2000/svg",tag);for(var k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e;}
-function fmtTs(ts){var m=D.meta.tz_offset;var sign=m[0]==="-"?-1:1;var p=m.slice(1).split(":");var off=(+p[0]*60+(+p[1]))*sign*60;var d=new Date((ts+off)*1000);function z(n){return (n<10?"0":"")+n;}return d.getUTCFullYear()+"-"+z(d.getUTCMonth()+1)+"-"+z(d.getUTCDate())+" "+z(d.getUTCHours())+":"+z(d.getUTCMinutes());}
+function offSecs(){var m=D.meta.tz_offset;var sign=m[0]==="-"?-1:1;var p=m.slice(1).split(":");return ((+p[0])*60+(+p[1]))*sign*60;}
+function fmtTs(ts){var d=new Date((ts+offSecs())*1000);function z(n){return (n<10?"0":"")+n;}return d.getUTCFullYear()+"-"+z(d.getUTCMonth()+1)+"-"+z(d.getUTCDate())+" "+z(d.getUTCHours())+":"+z(d.getUTCMinutes());}
+function fmtDur(sec){sec=Math.max(0,Math.round(sec));var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return h>0?h+" 小时 "+m+" 分":m+" 分";}
 function emptyMark(id){var n=document.getElementById(id);if(n)n.outerHTML='<div class="empty">暂无数据</div>';}
+function badge(t,cls){return '<span class="badge '+cls+'">'+esc(t)+'</span>';}
 var segs=D.segments||[];
-// 摘要卡
+var devs=D.devices||[];
+function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[i][1];return k;}
+
+// 首屏答案区：KPI 卡带四卡（当前电量 / 今日已耗 / 今日 app 运行时长 / 日均耗电区间）
 (function(){
-  var s=document.getElementById("summary");var html="";
-  html+='<div class="card"><div class="k">设备数</div><div class="v">'+(D.devices||[]).length+"</div></div>";
-  html+='<div class="card"><div class="k">聚合段数</div><div class="v">'+segs.length+"</div></div>";
-  html+='<div class="card"><div class="k">数据覆盖</div><div class="v">'+D.meta.days_covered+" 天</div></div>";
-  var rr=D.recent7d_active_rate||{};var keys=Object.keys(rr);
-  for(var i=0;i<keys.length;i++){var r=rr[keys[i]];var v=r.rate_pct_per_hour==null?"—":r.rate_pct_per_hour+" %/h";
-    html+='<div class="card"><div class="k">近7天活跃耗速率 · '+esc(keys[i])+'</div><div class="v">'+v+"</div></div>";}
-  s.innerHTML=html;
+  var host=document.getElementById("kpis");
+  if(!devs.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
+  var html="";
+  devs.forEach(function(dv){
+    var k=dv[0],name=dv[1];var kpi=(D.first_screen_kpis||{})[k]||{};
+    html+='<div class="card"><div class="k">当前电量 · '+esc(name)+'</div><div class="v">'
+      +(kpi.current_pct==null?"—":kpi.current_pct+"%")+'</div><div class="s">'
+      +(kpi.current_ts?fmtTs(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")+'</div>'
+      +badge("实测","b-measure")+'</div>';
+    if(kpi.today_sparse||kpi.today_drain_pct==null){
+      html+='<div class="card dim"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">数据不足</div>'
+        +'<div class="s">read&lt;3 或覆盖&lt;2h 时不给斜率、只给首末差</div>'
+        +badge("实测","b-measure")+badge("样本不足","b-warn")+'</div>';
+    }else{
+      html+='<div class="card"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">'+kpi.today_drain_pct+'%</div>'
+        +'<div class="s">'+(kpi.today_date||"")+' 首末差</div>'
+        +badge("实测","b-measure")+(kpi.today_sticky?badge("设备上报粘滞","b-warn"):"")+'</div>';
+    }
+    html+='<div class="card"><div class="k">今日 app 运行时长 · '+esc(name)+'</div><div class="v">'
+      +fmtDur(kpi.today_run_secs||0)+'</div><div class="s">app 进程口径（监控覆盖）</div>'
+      +badge("实测","b-measure")+'</div>';
+    var avg=kpi.avg||{};
+    if(avg.lower_pct_per_day==null&&avg.upper_pct_per_day==null){
+      html+='<div class="card dim"><div class="k">日均耗电区间 · '+esc(name)+'</div><div class="v">数据不足</div>'
+        +'<div class="s">无有效放电样本</div>'+badge("推断","b-infer")+'</div>';
+    }else{
+      var L=avg.lower_pct_per_day==null?"—":avg.lower_pct_per_day;
+      var U=avg.upper_pct_per_day==null?"—":avg.upper_pct_per_day;
+      var bds=badge("推断","b-infer");
+      (avg.badges||[]).forEach(function(b){bds+=badge(b,b==="口径冲突"?"b-conflict":"b-warn");});
+      html+='<div class="card"><div class="k">日均耗电区间 · '+esc(name)+'</div><div class="v">'
+        +L+" ~ "+U+' %/天</div><div class="s">剔除粘滞日中位数 × 总账对账</div>'+bds+'</div>';
+    }
+  });
+  host.innerHTML=html;
 })();
-if(!segs.length){emptyMark("c1");emptyMark("c2");emptyMark("c3");document.getElementById("c3legend").innerHTML="";
-  document.querySelector("#seg tbody").innerHTML='<tr><td colspan="11" style="text-align:center;color:#888">暂无数据</td></tr>';
-}else{
-// ④ 分段明细表
+
+// 分日视图：日耗电柱 + 24h 时间轴（同一日界）；窗口 >daily_view_day_limit 天降级周聚合
 (function(){
-  var rows="";
-  for(var i=0;i<segs.length;i++){var s=segs[i];
-    rows+="<tr><td>"+esc(s.device_key)+"</td><td>"+esc(s.display_name)+"</td><td>"+s.segment_type+"</td><td>"+fmtTs(s.start_ts)+"</td><td>"+fmtTs(s.end_ts)+"</td><td>"+s.duration_min+"</td><td>"+s.start_pct+"</td><td>"+s.end_pct+"</td><td>"+s.delta_pct+"</td><td>"+(s.rate_pct_per_hour==null?"":s.rate_pct_per_hour.toFixed(2))+"</td><td>"+esc(s.note)+"</td></tr>";}
-  document.querySelector("#seg tbody").innerHTML=rows;
+  var host=document.getElementById("daily");
+  var cardsMap=D.daily_cards||{};var runByDay=D.run_spans_by_day||{};
+  var limit=D.meta.daily_view_day_limit||90;var any=false;var html="";var jobs=[];
+  devs.forEach(function(dv,di){
+    var k=dv[0],name=dv[1];var cards=(cardsMap[k]||[]);if(!cards.length)return;any=true;
+    var weekly=cards.length>limit;
+    html+='<h3>'+esc(name)+'（'+esc(k)+'）</h3>';
+    if(weekly)html+='<p class="hint">窗口超过 '+limit+' 天：日卡降级为周聚合，时间轴抽稀（阈值写死于代码常量）。</p>';
+    var bars=[];
+    if(weekly){
+      var wk={},order=[];
+      cards.forEach(function(c){
+        var d=Date.parse(c.date+"T00:00:00Z")/86400000;var w=Math.floor((d+3)/7);
+        if(!wk[w]){wk[w]={drain:0,label:c.date.slice(5)+" 起周",sticky:false};order.push(w);}
+        wk[w].drain+=c.drain_pct;wk[w].sticky=wk[w].sticky||c.sticky;
+      });
+      order.sort(function(a,b){return a-b;});
+      bars=order.map(function(w){return wk[w];});
+    }else{
+      bars=cards.map(function(c){return {drain:c.drain_pct,label:c.date.slice(5),sticky:c.sticky,sparse:c.sparse};});
+    }
+    var sid="db"+di;
+    html+='<div class="scroll"><svg id="'+sid+'" width="960" height="150" role="img" aria-label="每日耗电柱"></svg></div>';
+    jobs.push({type:"bars",id:sid,bars:bars});
+    if(!weekly){
+      cards.forEach(function(c,ci){
+        var runs=runByDay[c.date]||[];var rsec=0;
+        runs.forEach(function(r){rsec+=Math.max(0,r[1]-r[0]);});
+        var tags="";
+        if(c.sticky)tags+=badge("设备上报粘滞","b-warn");
+        if(c.sparse)tags+=badge("样本不足","b-warn");
+        var det="耗电 "+c.drain_pct+"%（"+c.first_pct+"→"+c.last_pct+"） · app 运行 "+fmtDur(rsec)
+          +" · 充电回补 +"+c.charge_recovery_pct+"%";
+        if(c.slope_pct_per_hour!=null)det+=" · 斜率 "+c.slope_pct_per_hour+"%/h";
+        var tid="tl"+di+"_"+ci;
+        html+='<div class="dayrow"><span class="dl">'+c.date.slice(5)+'</span>'
+          +'<svg id="'+tid+'" width="480" height="14" role="img" aria-label="当日时间轴"></svg>'
+          +'<span class="dd">'+esc(det)+'</span><span>'+tags+'</span></div>';
+        jobs.push({type:"tl",id:tid,card:c,runs:runs});
+      });
+    }
+  });
+  if(!any){host.innerHTML='<div class="empty">暂无数据</div>';return;}
+  host.innerHTML=html;
+  jobs.forEach(function(j){
+    var svg=document.getElementById(j.id);if(!svg)return;
+    if(j.type==="bars"){
+      var W=960,H=150,PL=30,PB=22,PT=8;var maxV=0.5;
+      j.bars.forEach(function(b){if(b.drain>maxV)maxV=b.drain;});
+      var n=j.bars.length;var bw=Math.max(6,Math.min(40,(W-PL-10)/n-4));
+      j.bars.forEach(function(b,i){
+        var x=PL+((W-PL-10)/n)*i+2;var h=b.drain/maxV*(H-PT-PB);
+        var r=el("rect",{x:x,y:H-PB-h,width:bw,height:Math.max(0,h),fill:"#2b6cb0",
+          "fill-opacity":b.sparse?0.35:(b.sticky?0.55:0.9)},svg);
+        var t=el("title",{},r);
+        t.textContent=b.sticky?"设备上报粘滞：当日斜率可能低估":(b.sparse?"样本不足：只给首末差":b.label+" 耗电 "+b.drain+"%");
+        if(n<=62||i%Math.ceil(n/62)===0){
+          var tx=el("text",{x:x+bw/2-12,y:H-PB+12,"font-size":9,fill:"#888"},svg);tx.textContent=b.label;
+        }
+      });
+      el("line",{x1:PL,y1:H-PB,x2:W-8,y2:H-PB,stroke:"#888","stroke-width":0.5},svg);
+    }else{
+      var c=j.card;var d0=Date.parse(c.date+"T00:00:00Z")/1000-offSecs();
+      function X(t){return (t-d0)/86400*480;}
+      function spans(list,color,op){
+        (list||[]).forEach(function(s){
+          var x0=Math.max(0,X(s[0])),x1=Math.min(480,X(s[1]));
+          if(x1>x0)el("rect",{x:x0,y:0,width:x1-x0,height:14,fill:color,"fill-opacity":op},svg);
+        });
+      }
+      spans(c.unknown_spans,"#a0aec0",0.5);
+      spans(c.charging_spans,"#2f855a",0.85);
+      spans(j.runs,"#2b6cb0",0.85);
+    }
+  });
 })();
-// ① 电量曲线：未知段断线 + 灰罩；单 polyline，禁逐点元素
+
+// 静止 vs 活动：灰态缺口卡（无字段不伪造；位图积累 ≥7 天后升级分日热力带）
 (function(){
+  var host=document.getElementById("gap");
+  var g=D.activity_gap_note||{present:true,text:""};
+  host.innerHTML='<div class="card dim" style="max-width:720px"><div class="k">静止 vs 活动</div>'
+    +'<div class="v" style="font-size:14px;font-weight:400">'+esc(g.text||"")+'</div>'
+    +badge(g.present?"缺口":"待升级","b-gap")+'</div>';
+})();
+
+// 电量曲线：未知段断线 + 灰罩；充电底色；粘滞段黄褐罩层 + tooltip；单 polyline，禁逐点元素
+(function(){
+  if(!D.chart1||!D.chart1.length){emptyMark("c1");return;}
   var svg=document.getElementById("c1");var W=960,H=280,PL=36,PR=8,PT=10,PB=26;
   var maxTs=0,minTs=Infinity,i,j;
   for(i=0;i<segs.length;i++){if(segs[i].end_ts>maxTs)maxTs=segs[i].end_ts;if(segs[i].start_ts<minTs)minTs=segs[i].start_ts;}
+  if(!isFinite(minTs)){emptyMark("c1");return;}
   function draw(winDays){
     while(svg.firstChild)svg.removeChild(svg.firstChild);
     var lo=winDays>0?Math.max(minTs,maxTs-winDays*86400):minTs,hi=maxTs;
@@ -1151,25 +1732,26 @@ if(!segs.length){emptyMark("c1");emptyMark("c2");emptyMark("c3");document.getEle
     svg.setAttribute("width",w);svg.setAttribute("height",H);
     function X(t){return PL+(t-lo)/(hi-lo)*(w-PL-PR);}
     function Y(p){return PT+(100-p)/100*(H-PT-PB);}
-    // 背景区间：未知灰罩、充电底色
     for(i=0;i<D.chart1.length;i++){var sr=D.chart1[i];
       for(j=0;j<sr.unknown_spans.length;j++){var u=sr.unknown_spans[j];if(u[1]<lo||u[0]>hi)continue;
         el("rect",{x:X(Math.max(u[0],lo)),y:PT,width:Math.max(1,X(Math.min(u[1],hi))-X(Math.max(u[0],lo))),height:H-PT-PB,fill:"#a0aec0","fill-opacity":0.18},svg);}
       for(j=0;j<sr.charging_spans.length;j++){var c=sr.charging_spans[j];if(c[1]<lo||c[0]>hi)continue;
-        el("rect",{x:X(Math.max(c[0],lo)),y:PT,width:Math.max(1,X(Math.min(c[1],hi))-X(Math.max(c[0],lo))),height:H-PT-PB,fill:"#2f855a","fill-opacity":0.10},svg);}}
-    // 轴线与刻度（限量文本元素）
+        el("rect",{x:X(Math.max(c[0],lo)),y:PT,width:Math.max(1,X(Math.min(c[1],hi))-X(Math.max(c[0],lo))),height:H-PT-PB,fill:"#2f855a","fill-opacity":0.10},svg);}
+      for(j=0;j<(sr.sticky_spans||[]).length;j++){var st=sr.sticky_spans[j];if(st[1]<lo||st[0]>hi)continue;
+        var rx=X(Math.max(st[0],lo)),rw=Math.max(1,X(Math.min(st[1],hi))-rx);
+        var rc=el("rect",{x:rx,y:PT,width:rw,height:H-PT-PB,fill:"#b7791f","fill-opacity":0.10},svg);
+        var tt=el("title",{},rc);tt.textContent="设备上报粘滞段：读数长期不变，斜率可能低估";
+        el("line",{x1:rx,y1:PT+2,x2:rx+rw,y2:PT+2,stroke:"#b7791f","stroke-width":1.5,"stroke-dasharray":"4 3"},svg);}}
     el("line",{x1:PL,y1:Y(0),x2:w-PR,y2:Y(0),stroke:"#888","stroke-width":0.5},svg);
     el("line",{x1:PL,y1:PT,x2:PL,y2:H-PB,stroke:"#888","stroke-width":0.5},svg);
     [0,25,50,75,100].forEach(function(p){var t=el("text",{x:4,y:Y(p)+4,"font-size":10,fill:"#888"},svg);t.textContent=p;});
     var tickN=Math.min(12,Math.max(2,Math.floor(hours/24)+1));
-    for(i=0;i<tickN;i++){var tt=lo+(hi-lo)*i/(tickN-1);var tx=el("text",{x:X(tt)-26,y:H-8,"font-size":10,fill:"#888"},svg);tx.textContent=fmtTs(tt).slice(0,10);}
-    // 每设备折线：null 断点拆 run，每个 run 一条 polyline
+    for(i=0;i<tickN;i++){var tt2=lo+(hi-lo)*i/(tickN-1);var tx=el("text",{x:X(tt2)-26,y:H-8,"font-size":10,fill:"#888"},svg);tx.textContent=fmtTs(tt2).slice(0,10);}
     for(i=0;i<D.chart1.length;i++){var sr2=D.chart1[i];var col=PALETTE[i%PALETTE.length];var run=[];
       var flush=function(){if(run.length>1){el("polyline",{points:run.join(" "),fill:"none",stroke:col,"stroke-width":1.4},svg);}run=[];};
       for(j=0;j<sr2.points.length;j++){var pt=sr2.points[j];if(pt[0]<lo-3599||pt[0]>hi)continue;
         if(pt[1]==null){flush();}else{run.push(X(pt[0]+1800).toFixed(1)+","+Y(pt[1]).toFixed(1));}}
       flush();}
-    // 图例
     for(i=0;i<D.chart1.length;i++){var lx=el("text",{x:PL+8+i*150,y:PT+12,"font-size":11,fill:PALETTE[i%PALETTE.length]},svg);lx.textContent=D.chart1[i].device_key+" "+D.chart1[i].display_name;}
   }
   draw(90);
@@ -1177,32 +1759,39 @@ if(!segs.length){emptyMark("c1");emptyMark("c2");emptyMark("c3");document.getEle
   btns.forEach(function(b){b.addEventListener("click",function(){
     btns.forEach(function(x){x.className="";});b.className="on";draw(+b.getAttribute("data-win"));});});
 })();
-// ② 每日耗电对比（堆叠柱：活跃/休眠/未知）
+
+// 日均耗电双口径对账明细卡（无条件区间化 + 冲突状态明示 + 周环比抑制）
 (function(){
-  var svg=document.getElementById("c2");var W=960,H=260,PL=36,PT=10,PB=40;
-  var days=Object.keys(D.chart2||{});if(!days.length){emptyMark("c2");return;}
-  var devKeys=(D.devices||[]).map(function(d){return d[0];});
-  var maxV=0.0001;var sums={};
-  days.forEach(function(d){var per=D.chart2[d];var a=0,s=0,u=0;
-    devKeys.forEach(function(k){var c=per[k]||{};a+=c.active||0;s+=c.sleep||0;u+=c.unknown||0;});
-    sums[d]={active:a,sleep:s,unknown:u};var t=a+s+u;if(t>maxV)maxV=t;});
-  var bw=Math.max(8,Math.min(48,(W-PL-20)/days.length-6));
-  days.forEach(function(d,i){
-    var x=PL+((W-PL-20)/days.length)*i+3;var y=H-PB;var v=sums[d];
-    ["active","sleep","unknown"].forEach(function(tp){
-      var h=(v[tp]/maxV)*(H-PT-PB);if(h>0){el("rect",{x:x,y:y-h,width:bw,height:h,fill:TYPE_COLOR[tp],"fill-opacity":tp==="unknown"?0.55:0.85},svg);y-=h;}});
-    if(days.length<=62||i%Math.ceil(days.length/62)===0){var t=el("text",{x:x+bw/2-14,y:H-PB+14,"font-size":9,fill:"#888"},svg);t.textContent=d.slice(5);}
+  var host=document.getElementById("recon");var m=D.avg_estimate||{};var w=D.week_over_week||{};
+  var keys=Object.keys(m);if(!keys.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
+  var html="";
+  keys.forEach(function(k){
+    var a=m[k];var name=devName(k);
+    function f(v,unit){return v==null?"—":v+unit;}
+    var bds="";
+    (a.badges||[]).forEach(function(b){bds+=badge(b,b==="口径冲突"?"b-conflict":"b-warn");});
+    var wow=w[k]||{suppressed:true};
+    var wtxt=wow.suppressed?badge(wow.reason||"不可比","b-warn")
+      :("周环比 "+(wow.delta_pct_per_day>0?"↑ +":"↓ ")+wow.delta_pct_per_day+" %/天");
+    html+='<div class="card"><div class="k">日均耗电对账 · '+esc(name)+'</div>'
+      +'<div class="v">'+f(a.lower_pct_per_day,"")+' ~ '+f(a.upper_pct_per_day,"")+' %/天</div>'
+      +'<div class="s">总账（下界）'+f(a.ledger_pct_per_day," %/天")
+      +' · 中位斜率 '+f(a.median_slope_pct_per_hour," %/h")+'（×24h = 上界）<br>'
+      +'有效样本 '+a.valid_days+' 天 · 窗口 '+a.window_days+' 天 · 粘滞 '+a.sticky_days+' 天'
+      +' · 口径冲突：'+(a.conflict?"是":"否")+'<br>'+wtxt+'</div>'
+      +badge("推断","b-infer")+bds+'</div>';
   });
-  el("line",{x1:PL,y1:H-PB,x2:W-8,y2:H-PB,stroke:"#888","stroke-width":0.5},svg);
-  var lg=document.getElementById("c3legend");
-  lg.innerHTML='<span><i style="background:#2b6cb0"></i>活跃</span><span><i style="background:#6b46c1"></i>休眠</span><span><i style="background:#2f855a"></i>充电</span><span><i style="background:#a0aec0"></i>未知</span>'
-    +(D.meta.chart2_approx?' <span style="color:#b26a00">含跨日段线性摊入（近似）</span>':"");
+  host.innerHTML=html;
 })();
-// ③ 时长占比（每设备一条堆叠横条 + 合计）
+
+// app 运行时长占比（每设备一条堆叠横条 + 合计）
 (function(){
+  if(!D.chart3||!D.chart3.total){emptyMark("c3");return;}
   var svg=document.getElementById("c3");var W=960,PL=110,PT=14,RH=22,GAP=8;
-  var rows=[];var pd=D.chart3.per_device||{};Object.keys(pd).forEach(function(k){rows.push([k,pd[k]]);});
+  var rows=[];var pd=D.chart3.per_device||{};
+  Object.keys(pd).forEach(function(k){rows.push([k,pd[k]]);});
   rows.push(["合计",D.chart3.total]);
+  if(rows.length<=1&&D.chart3.total.active+D.chart3.total.sleep+D.chart3.total.charging+D.chart3.total.unknown<=0){emptyMark("c3");document.getElementById("c3legend").innerHTML="";return;}
   var H=PT+rows.length*(RH+GAP)+8;svg.setAttribute("height",H);
   rows.forEach(function(r,i){
     var k=r[0],v=r[1];var tot=(v.active||0)+(v.sleep||0)+(v.charging||0)+(v.unknown||0);
@@ -1210,12 +1799,33 @@ if(!segs.length){emptyMark("c1");emptyMark("c2");emptyMark("c3");document.getEle
     if(tot<=0){var e=el("text",{x:PL,y:y+RH-7,"font-size":11,fill:"#aaa"},svg);e.textContent="暂无数据";return;}
     var x=PL;
     ["active","sleep","charging","unknown"].forEach(function(tp){
-      var w=(v[tp]||0)/tot*(W-PL-90);if(w>0){el("rect",{x:x,y:y,width:w,height:RH,fill:TYPE_COLOR[tp],"fill-opacity":tp==="unknown"?0.55:0.85},svg);x+=w;}});
+      var w=(v[tp]||0)/tot*(W-PL-90);
+      if(w>0){el("rect",{x:x,y:y,width:w,height:RH,fill:TYPE_COLOR[tp],"fill-opacity":tp==="unknown"?0.55:0.85},svg);x+=w;}});
     var pct=el("text",{x:x+6,y:y+RH-7,"font-size":10,fill:"#888"},svg);
     pct.textContent=Math.round((v.active||0)/tot*100)+"/"+Math.round((v.sleep||0)/tot*100)+"/"+Math.round((v.charging||0)/tot*100)+"/"+Math.round((v.unknown||0)/tot*100)+"%";
   });
+  document.getElementById("c3legend").innerHTML='<span><i style="background:#2b6cb0"></i>app 运行</span>'
+    +'<span><i style="background:#6b46c1"></i>休眠</span><span><i style="background:#2f855a"></i>充电</span>'
+    +'<span><i style="background:#a0aec0"></i>未知</span>';
 })();
-}
+
+// 分段明细表（与 CSV 同数据同列；segment_type 保留原始枚举值）
+(function(){
+  var tb=document.querySelector("#seg tbody");
+  if(!segs.length){tb.innerHTML='<tr><td colspan="11" style="text-align:center;color:#888">暂无数据</td></tr>';return;}
+  var rows="";
+  for(var i=0;i<segs.length;i++){var s=segs[i];
+    rows+="<tr><td>"+esc(s.device_key)+"</td><td>"+esc(s.display_name)+"</td><td>"+s.segment_type+"</td><td>"
+      +fmtTs(s.start_ts)+"</td><td>"+fmtTs(s.end_ts)+"</td><td>"+s.duration_min+"</td><td>"+s.start_pct+"</td><td>"
+      +s.end_pct+"</td><td>"+s.delta_pct+"</td><td>"+(s.rate_pct_per_hour==null?"":s.rate_pct_per_hour.toFixed(2))
+      +"</td><td>"+esc(s.note)+"</td></tr>";}
+  tb.innerHTML=rows;
+})();
+
+// 页尾工程口径（不占首屏）
+document.getElementById("mdev").textContent=D.meta.device_count;
+document.getElementById("mseg").textContent=D.meta.segment_count;
+document.getElementById("mday").textContent=D.meta.days_covered;
 </script>
 </body>
 </html>
@@ -1230,9 +1840,9 @@ mod tests {
     use super::*;
     use crate::stats::{BoundaryDevice, ReadEvent, SOURCE_POLL, SOURCE_WAKE_FIRST_READ};
 
-    const CST: i32 = 480; // +08:00
+    pub(super) const CST: i32 = 480; // +08:00
 
-    fn ev_read(ts: i64, key: &str, pct: u8, charging: bool, source: &str) -> StatsEvent {
+    pub(super) fn ev_read(ts: i64, key: &str, pct: u8, charging: bool, source: &str) -> StatsEvent {
         StatsEvent::Read(ReadEvent {
             ts,
             physical_key: key.to_string(),
@@ -1243,11 +1853,11 @@ mod tests {
         })
     }
 
-    fn ev_poll(ts: i64, key: &str, pct: u8) -> StatsEvent {
+    pub(super) fn ev_poll(ts: i64, key: &str, pct: u8) -> StatsEvent {
         ev_read(ts, key, pct, false, SOURCE_POLL)
     }
 
-    fn seg(
+    pub(super) fn seg(
         key: &str,
         t: SegmentType,
         start: i64,
@@ -1278,11 +1888,15 @@ mod tests {
         // 真机复现形：71→70、9s 段。
         let s9 = seg("d1", SegmentType::Active, 1000, 1009, 71, 70, &[]);
         assert_eq!(s9.rate_pct_per_hour(), None);
-        // 边界：59s 拦、60s 放（-1%/60s = -60%/h）。
-        let s59 = seg("d1", SegmentType::Active, 1000, 1059, 71, 70, &[]);
-        assert_eq!(s59.rate_pct_per_hour(), None);
-        let s60 = seg("d1", SegmentType::Active, 1000, 1060, 71, 70, &[]);
-        assert_eq!(s60.rate_pct_per_hour(), Some(-60.0));
+        // 边界：299s 拦、300s 放（-1%/300s = -12%/h；融合稿 rate 护栏：
+        // duration<5min 或 |Δ%|<1 → None）。
+        let s299 = seg("d1", SegmentType::Active, 1000, 1299, 71, 70, &[]);
+        assert_eq!(s299.rate_pct_per_hour(), None);
+        let s300 = seg("d1", SegmentType::Active, 1000, 1300, 71, 70, &[]);
+        assert_eq!(s300.rate_pct_per_hour(), Some(-12.0));
+        // Δ%=0 的段不论时长都不出速率（钉 86% 平台期 0%/h 伪值）。
+        let s0d = seg("d1", SegmentType::Active, 1000, 4600, 70, 70, &[]);
+        assert_eq!(s0d.rate_pct_per_hour(), None);
         // 护栏同样覆盖 charging 段；unknown 段仍恒 None。
         let c30 = seg("d1", SegmentType::Charging, 1000, 1030, 70, 72, &[]);
         assert_eq!(c30.rate_pct_per_hour(), None);
@@ -1769,15 +2383,18 @@ mod tests {
         assert_eq!(total["sleep"].as_i64().unwrap(), exp.sleep);
         assert_eq!(total["charging"].as_i64().unwrap(), exp.charging);
         assert_eq!(total["unknown"].as_i64().unwrap(), exp.unknown);
-        // chart2：跨日段线性摊入标记 + 数值（offset=+08:00，日界 ts=57600/144000）。
-        assert!(report["meta"]["chart2_approx"].as_bool().unwrap());
-        let day0 = &report["chart2"]["1970-01-01"][k];
-        assert_eq!(day0["active"].as_f64().unwrap(), 2.0);
-        assert_eq!(day0["sleep"].as_f64().unwrap(), 3.0);
-        // US-B4：近 7 天活跃耗速率 = Σdrain/Σhours = 2 / (8000/3600 + 1) ≈ 0.62。
-        let rr = &report["recent7d_active_rate"][k];
-        assert_eq!(rr["rate_pct_per_hour"].as_f64().unwrap(), 0.62);
-        assert_eq!(rr["days_covered"].as_i64().unwrap(), 2);
+        // 融合稿结构：chart2 / recent7d_active_rate / chart2_approx 已移除；
+        // 分日视图、首屏 KPI、双口径对账与缺口卡取而代之。
+        assert!(report.get("chart2").is_none());
+        assert!(report.get("recent7d_active_rate").is_none());
+        assert!(report["meta"].get("chart2_approx").is_none());
+        assert!(report["meta"].get("recent_days").is_none());
+        assert_eq!(report["meta"]["version"].as_i64().unwrap(), 2);
+        assert!(report["daily_cards"][k].is_array());
+        assert!(report["first_screen_kpis"][k].is_object());
+        assert!(report["avg_estimate"][k].is_object());
+        assert!(report["week_over_week"][k].is_object());
+        assert!(report["activity_gap_note"]["present"].as_bool().unwrap());
         assert_eq!(
             report["meta"]["sparse_note"].as_str().unwrap(),
             "数据不足 7 天，按实际 2 天统计"
@@ -1799,6 +2416,7 @@ mod tests {
         let spans = c1["unknown_spans"].as_array().unwrap();
         assert_eq!(spans.len(), 2); // evidence_missing 段 + run_gap 段
         assert_eq!(c1["charging_spans"].as_array().unwrap().len(), 2);
+        assert!(c1["sticky_spans"].is_array());
     }
 
     #[test]
@@ -2003,8 +2621,360 @@ mod tests {
 
 #[cfg(test)]
 mod filename_tests {
+    use super::tests::{ev_poll, ev_read, seg, CST};
     use super::*;
     use crate::diag_export::LocalTimeParts;
+    use crate::stats::{ActivityDay, SOURCE_POLL};
+
+    // -------------------------------------------------------------------
+    // 融合稿 Phase 0 测试网（13 项，钉死新口径与删除守卫）
+    // -------------------------------------------------------------------
+
+    /// 测试锚定日界：取固定锚点的本地日界，day 偏移以天计。
+    fn day_base() -> i64 {
+        local_day_start(1_760_000_000, CST)
+    }
+
+    fn card(date: &str, drain: i16, slope: Option<f64>, sticky: bool, sparse: bool) -> DailyCard {
+        DailyCard {
+            date: date.to_string(),
+            first_ts: 0,
+            first_pct: 90,
+            last_ts: 0,
+            last_pct: (90 - drain).max(0) as u8,
+            drain_pct: drain,
+            charge_recovery_pct: 0,
+            reads: 3,
+            coverage_secs: 7200,
+            slope_pct_per_hour: slope,
+            sticky,
+            sparse,
+            charging_spans: Vec::new(),
+            unknown_spans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn daily_card_first_last_delta() {
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 8 * 3600, "d1", 90),
+            ev_poll(d0 + 12 * 3600, "d1", 88),
+            // 充电态快照不入放电首末差。
+            ev_read(d0 + 14 * 3600, "d1", 91, true, SOURCE_POLL),
+            ev_poll(d0 + 20 * 3600, "d1", 85),
+            ev_poll(d0 + 86400 + 9 * 3600, "d1", 84),
+            ev_poll(d0 + 86400 + 18 * 3600, "d1", 82),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let v = &cards["d1"];
+        assert_eq!(v.len(), 2);
+        let d0s = fmt_local_date(d0 + 8 * 3600, CST);
+        let d1s = fmt_local_date(d0 + 86400 + 9 * 3600, CST);
+        assert_eq!(v[0].date, d0s);
+        assert_eq!(v[0].first_pct, 90);
+        assert_eq!(v[0].last_pct, 85);
+        assert_eq!(v[0].drain_pct, 5);
+        assert_eq!(v[0].reads, 3);
+        assert_eq!(v[0].coverage_secs, 12 * 3600);
+        assert_eq!(v[0].slope_pct_per_hour, Some(round2(5.0 / 12.0)));
+        assert!(!v[0].sparse);
+        assert!(!v[0].sticky);
+        assert_eq!(v[1].date, d1s);
+        assert_eq!(v[1].drain_pct, 2);
+    }
+
+    #[test]
+    fn daily_card_sticky_flag() {
+        let d0 = day_base();
+        // >24h 零斜率放电段 → 覆盖日均打「设备上报粘滞」。
+        let segs = vec![seg(
+            "d1",
+            SegmentType::Active,
+            d0 + 3600,
+            d0 + 3600 + 90_000,
+            86,
+            86,
+            &[],
+        )];
+        let spans = sticky_spans(&segs);
+        assert_eq!(spans["d1"].len(), 1);
+        let sd = sticky_day_set(&spans, CST);
+        let days = &sd["d1"];
+        assert!(days.contains(&fmt_local_date(d0 + 7200, CST)));
+        assert!(days.contains(&fmt_local_date(d0 + 86400 + 3600, CST)));
+        // 不足 24h 的零斜率段不算粘滞。
+        let short = vec![seg("d1", SegmentType::Active, d0, d0 + 3600, 86, 86, &[])];
+        assert!(sticky_spans(&short).is_empty());
+        // 日卡透传粘滞标签。
+        let events = vec![
+            ev_poll(d0 + 7200, "d1", 86),
+            ev_poll(d0 + 8 * 3600, "d1", 86),
+            ev_poll(d0 + 16 * 3600, "d1", 85),
+        ];
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        assert!(cards["d1"][0].sticky);
+    }
+
+    #[test]
+    fn daily_card_sparse_no_rate() {
+        let d0 = day_base();
+        // read<3 → 样本不足，不出斜率。
+        let e2 = vec![
+            ev_poll(d0 + 3600, "d1", 90),
+            ev_poll(d0 + 8 * 3600, "d1", 85),
+        ];
+        let segs2 = build_segments(&e2);
+        let sd2 = sticky_day_set(&sticky_spans(&segs2), CST);
+        let c2 = build_daily_cards(&e2, &segs2, &sd2, CST);
+        assert!(c2["d1"][0].sparse);
+        assert_eq!(c2["d1"][0].slope_pct_per_hour, None);
+        assert_eq!(c2["d1"][0].drain_pct, 5); // 首末差照常给
+                                              // read≥3 但覆盖<2h → 同样样本不足。
+        let e3 = vec![
+            ev_poll(d0 + 3600, "d1", 90),
+            ev_poll(d0 + 4200, "d1", 89),
+            ev_poll(d0 + 4800, "d1", 88),
+        ];
+        let segs3 = build_segments(&e3);
+        let sd3 = sticky_day_set(&sticky_spans(&segs3), CST);
+        let c3 = build_daily_cards(&e3, &segs3, &sd3, CST);
+        assert!(c3["d1"][0].sparse);
+        assert_eq!(c3["d1"][0].slope_pct_per_hour, None);
+    }
+
+    #[test]
+    fn avg_estimate_median_robust() {
+        // 斜率样本 [2.0, 0.5]（粘滞日 0.0 已被剔除）→ 中位 1.25 → 上界 30.0。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 3 * 86400, "d1", 80)];
+        let cards = vec![
+            card(&fmt_local_date(d0, CST), 5, Some(2.0), false, false),
+            card(&fmt_local_date(d0 + 86400, CST), 0, Some(0.0), true, false),
+            card(
+                &fmt_local_date(d0 + 2 * 86400, CST),
+                2,
+                Some(0.5),
+                false,
+                false,
+            ),
+        ];
+        let mut sticky = BTreeSet::new();
+        sticky.insert(fmt_local_date(d0 + 86400, CST));
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &sticky);
+        assert_eq!(est.median_slope_pct_per_hour, Some(1.25));
+        assert_eq!(est.upper_pct_per_day, Some(30.0));
+        assert_eq!(est.valid_days, 2);
+        // 下界 = 总账 (90-80)/3 天 ≈ 3.33；30/3.33 > 2 → 口径冲突。
+        assert!(est.conflict);
+        assert!(est.badges.contains(&"样本不足".to_string()));
+        assert!(est.badges.contains(&"含粘滞".to_string()));
+        assert!(est.badges.contains(&"口径冲突".to_string()));
+    }
+
+    #[test]
+    fn rate_guard_short_segment() {
+        // 钉 -400.00 伪值回归：9s 段 71→70（原口径 -400%/h）→ None。
+        let s9 = seg("d1", SegmentType::Active, 1000, 1009, 71, 70, &[]);
+        assert_eq!(s9.rate_pct_per_hour(), None);
+        // 5min 边界：299s 拦、300s 放。
+        let s299 = seg("d1", SegmentType::Sleep, 1000, 1299, 71, 70, &[]);
+        assert_eq!(s299.rate_pct_per_hour(), None);
+        let s300 = seg("d1", SegmentType::Sleep, 1000, 1300, 71, 70, &[]);
+        assert_eq!(s300.rate_pct_per_hour(), Some(-12.0));
+        // |Δ%|<1（零 delta）不论时长 → None。
+        let z = seg("d1", SegmentType::Active, 1000, 100000, 86, 86, &[]);
+        assert_eq!(z.rate_pct_per_hour(), None);
+    }
+
+    #[test]
+    fn activity_gap_note_present() {
+        // 无 activity_buckets 事件 → 缺口卡必然出现。
+        let events = vec![ev_poll(1000, "d1", 90), ev_poll(8200, "d1", 88)];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 9000);
+        let gap = &report["activity_gap_note"];
+        assert!(gap["present"].as_bool().unwrap());
+        assert!(gap["text"].as_str().unwrap().contains("尚无静止/活动字段"));
+        assert_eq!(report["meta"]["activity_days"].as_i64().unwrap(), 0);
+        // 位图积累 ≥7 天 → 缺口闭合标记翻转。
+        let day = ActivityDay {
+            date: "2026-10-24".to_string(),
+            bitmap_hex: "0".repeat(crate::stats::ACTIVITY_BITMAP_HEX_LEN),
+        };
+        let ev2 = vec![
+            ev_poll(1000, "d1", 90),
+            ev_poll(8200, "d1", 88),
+            StatsEvent::ActivityBuckets {
+                ts: 8300,
+                physical_key: "d1".into(),
+                days: vec![day; 7],
+            },
+        ];
+        let report2 = build_report_data(&ev2, &segs, None, CST, 9000);
+        assert!(!report2["activity_gap_note"]["present"].as_bool().unwrap());
+        assert_eq!(report2["meta"]["activity_days"].as_i64().unwrap(), 7);
+    }
+
+    #[test]
+    fn app_run_timeline_not_mouse_activity() {
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "d1", 90),
+            ev_poll(9200, "d1", 88),
+            StatsEvent::RunStop { ts: 10000 },
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let html = render_html(&report);
+        assert!(
+            html.contains("app 运行时段"),
+            "时间轴标题/脚注须含 app 运行时段"
+        );
+        assert!(!html.contains("鼠标使用时间"), "禁用误导性表述");
+    }
+
+    #[test]
+    fn avg_estimate_dual_ledger_conflict() {
+        // 上界 24.0（中位 1.0×24）vs 下界 0.5（5%/10 天）→ 倍差 48 > 2 → 冲突，
+        // 且区间形态不变（lower/upper 照常成对给出）。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 10 * 86400, "d1", 85)];
+        let cards = vec![
+            card(&fmt_local_date(d0, CST), 3, Some(1.0), false, false),
+            card(&fmt_local_date(d0 + 86400, CST), 2, Some(1.0), false, false),
+        ];
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert!(est.conflict);
+        assert!(est.badges.contains(&"口径冲突".to_string()));
+        assert_eq!(est.upper_pct_per_day, Some(24.0));
+        assert!(est.lower_pct_per_day.is_some());
+    }
+
+    #[test]
+    fn avg_estimate_sticky_days_excluded() {
+        // 粘滞日的极端斜率不进中位数样本：剔除后中位 1.0 → 上界 24.0；
+        // 若未剔除，[1.0, 50.0] 中位将是 25.5。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 2 * 86400, "d1", 80)];
+        let cards = vec![
+            card(&fmt_local_date(d0, CST), 3, Some(1.0), false, false),
+            card(
+                &fmt_local_date(d0 + 86400, CST),
+                10,
+                Some(50.0),
+                true,
+                false,
+            ),
+        ];
+        let mut sticky = BTreeSet::new();
+        sticky.insert(fmt_local_date(d0 + 86400, CST));
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &sticky);
+        assert_eq!(est.median_slope_pct_per_hour, Some(1.0));
+        assert_eq!(est.upper_pct_per_day, Some(24.0));
+        assert_eq!(est.valid_days, 1);
+        assert_eq!(est.sticky_days, 1);
+    }
+
+    #[test]
+    fn first_screen_no_inferred_single_value() {
+        // 首屏推断项断言为区间形态：avg 只有 lower/upper 成对字段 +
+        // conflict/badges，不存在任何单值字段。
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "d1", 90),
+            ev_poll(9200, "d1", 88),
+            StatsEvent::RunStop { ts: 10000 },
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let avg = report["first_screen_kpis"]["d1"]["avg"]
+            .as_object()
+            .unwrap();
+        let keys: Vec<&str> = avg.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "badges",
+                "conflict",
+                "lower_pct_per_day",
+                "upper_pct_per_day"
+            ]
+        );
+        for banned in ["value", "estimate", "rate", "pct_per_day", "point"] {
+            assert!(!avg.contains_key(banned), "首屏推断项禁单值字段: {banned}");
+        }
+    }
+
+    #[test]
+    fn next_charge_estimate_absent() {
+        // 删除守卫：该概念不以任何形式出现在报告任何位置。
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "d1", 90),
+            ev_poll(9200, "d1", 88),
+            StatsEvent::RunStop { ts: 10000 },
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let html = render_html(&report);
+        assert!(!html.contains("距下次充电"));
+        assert!(!report.to_string().contains("距下次充电"));
+    }
+
+    #[test]
+    fn chart2_approx_removed() {
+        // 跨日摊入口径图不存在：数据块与渲染产物均无 chart2 残留。
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "d1", 90),
+            ev_poll(9200, "d1", 88),
+            StatsEvent::RunStop { ts: 10000 },
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 20000);
+        assert!(report.get("chart2").is_none());
+        assert!(report["meta"].get("chart2_approx").is_none());
+        let html = render_html(&report);
+        assert!(!html.contains("chart2_approx"));
+        assert!(!html.contains("跨日段线性摊入（近似）"));
+    }
+
+    #[test]
+    fn week_over_week_suppressed_on_sticky() {
+        let d0 = day_base();
+        let mk = |i: i64, sticky: bool| {
+            card(
+                &fmt_local_date(d0 + i * 86400, CST),
+                2,
+                Some(0.5),
+                sticky,
+                false,
+            )
+        };
+        // 近 7 天含粘滞 → 周环比抑制、显示「不可比」。
+        let mut cards: Vec<DailyCard> = (0..14).map(|i| mk(i, false)).collect();
+        cards[10].sticky = true;
+        let wow = build_week_over_week(&cards, false);
+        assert!(wow.suppressed);
+        assert_eq!(wow.reason.as_deref(), Some("不可比"));
+        assert_eq!(wow.delta_pct_per_day, None);
+        // 口径冲突同样抑制。
+        let clean: Vec<DailyCard> = (0..14).map(|i| mk(i, false)).collect();
+        let wow2 = build_week_over_week(&clean, true);
+        assert!(wow2.suppressed);
+        // 无粘滞无冲突 → 正常给箭头值（等值日耗电 → delta 0）。
+        let wow3 = build_week_over_week(&clean, false);
+        assert!(!wow3.suppressed);
+        assert_eq!(wow3.delta_pct_per_day, Some(0.0));
+        // 前 7 天缺失 → 样本不足。
+        let few: Vec<DailyCard> = (0..5).map(|i| mk(i, false)).collect();
+        let wow4 = build_week_over_week(&few, false);
+        assert!(wow4.suppressed);
+        assert_eq!(wow4.reason.as_deref(), Some("样本不足"));
+    }
 
     #[test]
     fn stats_export_filename_second_precision() {
