@@ -6,7 +6,8 @@
 口径（AC-B2/B8 的验收基准）：
   jsonl（skip-bad-lines）→ 锚点流（run 标记归并、同 ts 排在设备事件后）
   → 元素段（判定表）→ coalesce → ≥1h 单轮不级联合并 → 排序
-  → CSV 行 / volttray-data（chart1/2/3、recent7d）/ JSON 事件序列。
+  → CSV 行 / volttray-data（chart1/3、分日日卡等融合稿 Phase 0 结构）
+  / JSON 事件序列（含 activity_buckets 分钟位图摘要）。
 
 用法：
   python3 tools/recheck.py --stats stats.jsonl [--archive stats.archive.jsonl] \
@@ -33,7 +34,6 @@ import sys
 MERGE_WINDOW = 3600
 GAP_OVER_7D = 7 * 86400
 BUCKET = 3600
-RECENT_DAYS = 7
 
 NOTE_RUN_GAP = "run_gap_unattributed"
 NOTE_EVIDENCE_MISSING = "evidence_missing"
@@ -152,6 +152,17 @@ def parse_line(line):
         if not isinstance(pk, str):
             return None
         return ("sleep_enter", ts, pk)
+    if ev == "activity_buckets":
+        pk = o.get("physical_key")
+        days = o.get("days")
+        if not isinstance(pk, str) or not isinstance(days, list):
+            return None
+        for d in days:
+            if not (isinstance(d, dict)
+                    and isinstance(d.get("date"), str)
+                    and isinstance(d.get("bitmap_hex"), str)):
+                return None
+        return ("activity_buckets", ts, pk, days)
     return None
 
 
@@ -345,8 +356,16 @@ def delta_pct(s):
     return s["end_pct"] - s["start_pct"]
 
 
+MIN_RATE_DURATION_SECS = 300
+MIN_RATE_ABS_DELTA_PCT = 1
+
+
 def rate(s):
-    if s["seg_type"] == "unknown" or dur(s) <= 0:
+    # 速率护栏（attribution.rs rate_pct_per_hour 镜像）：unknown / 非正
+    # 时长 / <5 分钟短段 / |Δ%|<1 一律 None（CSV 留空 / JSON null）。
+    if (s["seg_type"] == "unknown" or dur(s) <= 0
+            or dur(s) < MIN_RATE_DURATION_SECS
+            or abs(delta_pct(s)) < MIN_RATE_ABS_DELTA_PCT):
         return None
     return round2(delta_pct(s) / (dur(s) / 3600.0))
 
@@ -360,7 +379,7 @@ def event_keys(events):
     for ev in events:
         if ev[0] == "read":
             keys.add(ev[2])
-        elif ev[0] == "sleep_enter":
+        elif ev[0] in ("sleep_enter", "activity_buckets"):
             keys.add(ev[2])
         elif ev[0] == "boundary":
             for pk, _, _ in ev[2]:
@@ -407,7 +426,20 @@ def render_csv(segments, anon, off):
 
 # ---------------------------------------------------------------- 图表数据
 
-def build_chart1(segs, devices):
+def build_sticky_spans(segments):
+    """粘滞段清单（attribution.rs sticky_spans 镜像，原始键口径）：
+    Active/Sleep 放电段、Δ%=0、时长 >24h。"""
+    out = {}
+    for s in segments:
+        if (s["seg_type"] in ("active", "sleep")
+                and s["start_pct"] == s["end_pct"]
+                and dur(s) > 86400):
+            out.setdefault(s["device_key"], []).append(
+                [s["start_ts"], s["end_ts"]])
+    return out
+
+
+def build_chart1(segs, devices, sticky):
     if not segs:
         return []
     min_ts = min(s["start_ts"] for s in segs)
@@ -425,36 +457,10 @@ def build_chart1(segs, devices):
             points.append([b0, v])
         spans = lambda t: [[s["start_ts"], s["end_ts"]] for s in ds if s["seg_type"] == t]
         out.append({"device_key": key, "display_name": name, "points": points,
-                    "unknown_spans": spans("unknown"), "charging_spans": spans("charging")})
+                    "unknown_spans": spans("unknown"), "charging_spans": spans("charging"),
+                    "sticky_spans": sticky.get(key, [])})
     return out
 
-
-def build_chart2(segs, off):
-    days = {}
-    approx = False
-    for s in segs:
-        d = dur(s)
-        if d <= 0:
-            continue
-        drain = max(0.0, s["start_pct"] - s["end_pct"])
-        t = s["start_ts"]
-        while t < s["end_ts"]:
-            nxt = min(local_day_start(t, off) + 86400, s["end_ts"])
-            if nxt < s["end_ts"]:
-                approx = True
-            frac = (nxt - t) / d
-            day = fmt_local_date(t, off)
-            cell = days.setdefault(day, {}).setdefault(
-                s["device_key"], {"active": 0.0, "sleep": 0.0, "unknown": 0.0})
-            v = drain * frac
-            if s["seg_type"] in ("active", "sleep", "unknown"):
-                cell[s["seg_type"]] += v
-            t = nxt
-    days = {day: {k: {"active": round4(c["active"]), "sleep": round4(c["sleep"]),
-                      "unknown": round4(c["unknown"])}
-                  for k, c in sorted(per.items())}
-            for day, per in sorted(days.items())}
-    return days, approx
 
 
 def build_chart3(segs):
@@ -467,36 +473,6 @@ def build_chart3(segs):
         total[s["seg_type"]] += d
     return dict(sorted(per_dev.items())), total
 
-
-def build_recent(segs, now_ref, off):
-    window_start = now_ref - RECENT_DAYS * 86400
-    all_days = set()
-    for s in segs:
-        t = s["start_ts"]
-        while t < max(s["end_ts"], s["start_ts"] + 1) and t <= s["end_ts"]:
-            all_days.add(fmt_local_date(t, off))
-            nxt = local_day_start(t, off) + 86400
-            if nxt <= t:
-                break
-            t = nxt
-    days_covered = min(len(all_days), RECENT_DAYS)
-    if all_days:
-        days_covered = max(days_covered, 1)
-    acc = {}
-    for s in segs:
-        if s["seg_type"] != "active" or s["start_ts"] < window_start:
-            continue
-        e = acc.setdefault(s["device_key"], [0.0, 0.0])
-        e[0] += max(0.0, s["start_pct"] - s["end_pct"])
-        e[1] += dur(s) / 3600.0
-    devices = sorted(set([s["device_key"] for s in segs]) | set(acc))
-    out = {}
-    for k in devices:
-        r = None
-        if k in acc and acc[k][1] > 0.0:
-            r = round2(acc[k][0] / acc[k][1])
-        out[k] = {"rate_pct_per_hour": r, "days_covered": days_covered}
-    return out
 
 
 # ---------------------------------------------------------------- 对账
@@ -572,6 +548,10 @@ def check_json(ck, path, events, keys):
         elif ev[0] == "sleep_enter":
             want_events.append({"ts": ev[1], "physical_key": display_key(ev[2], anon),
                                 "event": "sleep_enter"})
+        elif ev[0] == "activity_buckets":
+            want_events.append({"ts": ev[1], "event": "activity_buckets",
+                                "physical_key": display_key(ev[2], anon),
+                                "days": ev[3]})
     ge = got.get("events", [])
     if ge != want_events:
         ck.eq("json.events 条数", len(ge), len(want_events))
@@ -602,7 +582,7 @@ def check_html(ck, path, events, segments, keys, off):
             hits = [h for h in re.findall(r'https?://[^"\'<>\s)]+', body)
                     if h != "http://www.w3.org/2000/svg"]
         ck.eq("html 零外链 %s" % pat, len(hits), 0)
-    gk = set(got.get("recent7d_active_rate", {}).keys())
+    gk = set(k for k, _ in got.get("devices", []))
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
     # 设备清单
     name_of = {}
@@ -626,27 +606,41 @@ def check_html(ck, path, events, segments, keys, off):
         "rate_pct_per_hour": rate(s), "note": note_text(s),
     } for s in segs]
     ck.eq("html.segments", got.get("segments"), want_rows)
-    # 图表
-    ck.eq("html.chart1", got.get("chart1"), build_chart1(segs, [(k, n) for k, n in devices]))
-    c2, approx = build_chart2(segs, off)
-    ck.eq("html.chart2", got.get("chart2"), c2)
+    # 图表（chart1 粘滞段 = 原始键检出 → 展示键透出，attribution.rs 镜像）
+    sticky_raw = build_sticky_spans(segments)
+    sticky = {}
+    for raw_k, spans in sticky_raw.items():
+        sticky[display_key(raw_k, anon)] = spans
+    ck.eq("html.chart1", got.get("chart1"),
+          build_chart1(segs, [(k, n) for k, n in devices], sticky))
     pd, total = build_chart3(segs)
     ck.eq("html.chart3", got.get("chart3"), {"per_device": pd, "total": total})
-    now_ref = max([ev[1] for ev in events], default=0)
-    ck.eq("html.recent7d_active_rate", got.get("recent7d_active_rate"),
-          build_recent(segs, now_ref, off))
+    # 融合稿 Phase 0 新结构存在性核验（逐值复算以 chart1/3、segments、CSV 为界）
+    for key in ("daily_cards", "run_spans_by_day", "first_screen_kpis",
+                "avg_estimate", "week_over_week", "activity_gap_note"):
+        if key not in got:
+            ck.eq("html.%s 存在" % key, "缺失", "存在")
+    ck.eq("html.chart2 已移除", "chart2" in got, False)
+    ck.eq("html.recent7d_active_rate 已移除",
+          "recent7d_active_rate" in got, False)
     # meta（generated_at/_local 为生成时刻值，只对结构与口径字段）
     gm = got.get("meta", {})
-    ck.eq("html.meta.version", gm.get("version"), 1)
+    ck.eq("html.meta.version", gm.get("version"), 2)
     ck.eq("html.meta.anonymized", gm.get("anonymized"), anon is not None)
     ck.eq("html.meta.tz_offset", gm.get("tz_offset"),
           "%s%02d:%02d" % ("-" if off < 0 else "+", abs(off) // 60, abs(off) % 60))
-    ck.eq("html.meta.chart2_approx", gm.get("chart2_approx"), approx)
-    days_covered = 0
-    rr = build_recent(segs, now_ref, off)
-    if rr:
-        days_covered = max(r["days_covered"] for r in rr.values())
-    ck.eq("html.meta.days_covered", gm.get("days_covered"), days_covered)
+    ck.eq("html.meta.chart2_approx 已移除", "chart2_approx" in gm, False)
+    # days_covered = 全量覆盖日计数（covered_days 镜像，不再封顶 7 天）
+    all_days = set()
+    for sgm in segs:
+        t = sgm["start_ts"]
+        while t < max(sgm["end_ts"], sgm["start_ts"] + 1) and t <= sgm["end_ts"]:
+            all_days.add(fmt_local_date(t, off))
+            nxt = local_day_start(t, off) + 86400
+            if nxt <= t:
+                break
+            t = nxt
+    ck.eq("html.meta.days_covered", gm.get("days_covered"), len(all_days))
     if ck.failures == 0:
         print("PASS html：volttray-data 逐值一致 + 断网零外链（匿名化=%s）" %
               ("开" if anon else "关"))
