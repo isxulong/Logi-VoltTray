@@ -58,9 +58,20 @@ pub const NOTE_BELOW_WINDOW: &str = "below_window";
 pub const NOTE_CLOCK_ANOMALY: &str = "clock_anomaly";
 pub const NOTE_GAP_OVER_7D: &str = "gap_over_7d";
 
+/// 速率列的最小段时长（秒）：短于此的段分母过小、速率失真
+/// （小修批第 4 项，见 [`Segment::rate_pct_per_hour`]）。
+pub const MIN_RATE_DURATION_SECS: i64 = 60;
+
 /// 段类型（CSV segment_type 列取值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SegmentType {
+    /// 口径（小修批第 5 项文档化，2026-10-25 批次）：`active` 指
+    /// 「app 运行中且未判充电/休眠」的段，**不是**「鼠标/用户活动
+    /// 中」——真机 v0.3.23 分析已勘误，活动强弱的正确口径是 Raw
+    /// Input 事件桶而非本枚举。命名保留 `active` 不改：CSV/JSON
+    /// schema 已对外稳定（recheck.py 质检、E10 对账均按此列名取值），
+    /// 改名会破坏既有对账；若未来 HTML 报告重构需要用户向措辞，
+    /// 由报告层映射展示文案、不动本枚举与序列化值。
     #[serde(rename = "active")]
     Active,
     #[serde(rename = "sleep")]
@@ -119,8 +130,12 @@ impl Segment {
 
     /// rate_pct_per_hour 列：整段 Δ%/Δt（%/h，2 位小数）；unknown 段
     /// 不可算 → None（CSV 留空、JSON null）。零时长段不产生速率。
+    /// 小修批第 4 项（2026-10-25 批次）：时长 <
+    /// [`MIN_RATE_DURATION_SECS`] 的段分母过小，速率失真无意义
+    /// （v0.3.23 真机末行 9s 段算出 -400%/h），统一返回 None——
+    /// CSV / JSON / HTML 同走本函数，护栏单点生效。
     pub fn rate_pct_per_hour(&self) -> Option<f64> {
-        if self.seg_type == SegmentType::Unknown || self.duration_secs() <= 0 {
+        if self.seg_type == SegmentType::Unknown || self.duration_secs() < MIN_RATE_DURATION_SECS {
             return None;
         }
         let hours = self.duration_secs() as f64 / 3600.0;
@@ -1255,6 +1270,28 @@ mod tests {
     }
 
     // -- 时间工具 ----------------------------------------------------------
+
+    /// 小修批第 4 项：时长 < 60s 的短段速率失真（v0.3.23 真机末行
+    /// 9s 段算出 -400%/h），护栏统一返回 None；≥60s 不受影响。
+    #[test]
+    fn rate_pct_per_hour_guard_below_min_duration() {
+        // 真机复现形：71→70、9s 段。
+        let s9 = seg("d1", SegmentType::Active, 1000, 1009, 71, 70, &[]);
+        assert_eq!(s9.rate_pct_per_hour(), None);
+        // 边界：59s 拦、60s 放（-1%/60s = -60%/h）。
+        let s59 = seg("d1", SegmentType::Active, 1000, 1059, 71, 70, &[]);
+        assert_eq!(s59.rate_pct_per_hour(), None);
+        let s60 = seg("d1", SegmentType::Active, 1000, 1060, 71, 70, &[]);
+        assert_eq!(s60.rate_pct_per_hour(), Some(-60.0));
+        // 护栏同样覆盖 charging 段；unknown 段仍恒 None。
+        let c30 = seg("d1", SegmentType::Charging, 1000, 1030, 70, 72, &[]);
+        assert_eq!(c30.rate_pct_per_hour(), None);
+        let u1h = seg("d1", SegmentType::Unknown, 1000, 4600, 70, 69, &[]);
+        assert_eq!(u1h.rate_pct_per_hour(), None);
+        // 零/负时长（时钟回拨）仍不产生速率。
+        let s0 = seg("d1", SegmentType::Active, 1000, 1000, 71, 70, &[]);
+        assert_eq!(s0.rate_pct_per_hour(), None);
+    }
 
     #[test]
     fn fmt_rfc3339_golden_values() {

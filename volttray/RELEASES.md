@@ -88,9 +88,14 @@ v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24
 - ① roundtrip 派生字段覆盖（质检 P2：往返测试对派生字段断言不足）。
 - ② Win32 侧覆盖（质检 P2：single/bootlog 等 Windows 专属模块测试覆盖待补）。
 - ③ README 热重载口径（质检 P2：README 对「保存后重启生效」的热重载表述口径待校正）。
-- **retier 尾阈值 = 99 潜伏 panic 修复**（v0.3.23 已知项，已由 `#[should_panic]` 测试锚定，见 v0.3.23 节）。
+- **retier 尾阈值 = 99 潜伏 panic 修复**（v0.3.23 已知项）：已在 main 修复（小修批第 1 项，2026-10-25；守卫「末档已达上限即停止」消除 clamp min>max panic 路径，原 `#[should_panic]` 锚定测试改为正常行为断言），随下一版本发布，本条销项。
 - **微基准阈值门禁**（v0.3.23 已知项，待基线积累后评审，见 v0.3.23 节）。
 - （E10 行为层修复三项已于 v0.3.23 落地，见 v0.3.23 节第 2 条，本条销项。）
+- **v0.3.23 真机分析 P2 批（小修批第 2~5 项，已在 main 修复、未发版）**：
+  - ② `wake_recovery_via_reenum` 计数已接线（upsert 前捕获 pre-registration 离线态；此前 upsert 后设备已 Online，事后检查恒 0）。
+  - ③ `wake_miss_zero_match` 计数口径已文档化（`diag_export.rs` 字段注释：per-run 累计、粒度=每唤醒信号归因事件 +1、日志双采样器限速），并让两个采样器在 Shutdown 时冲出尾部压制数，对账公式：计数器值 = 可见 miss 行数 + Σ suppressed 汇报（含尾部行）——E10「修复前后计数对账」按此口径复核。
+  - ④ CSV `rate_pct_per_hour` 加 60s 最小段时长护栏（`MIN_RATE_DURATION_SECS`），短段速率返回 None（CSV 留空 / JSON null）。
+  - ⑤ stats 段类型 `active` 口径定为「app 运行中且未判充电/休眠」，**不改名**（CSV/JSON schema 已对外稳定、recheck.py 质检与 E10 对账按现列名取值；改名属 HTML 报告重构范围，由报告层映射展示文案）——口径单一来源：`attribution.rs` `SegmentType::Active` 注释与本条。
 
 ## v0.3.22
 
