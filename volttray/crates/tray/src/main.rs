@@ -1027,9 +1027,14 @@ mod imp {
         stats_store.note_run_start(wall_secs() as i64, Instant::now());
         // 融合稿 Phase 1：静止/活动分钟位图桶（RawInput 系统事件驱动，
         // 纯内存计数、零新增设备查询——D-33 红线；不落盘高频事件，
-        // run_stop 时并入桶摘要进 stats 事件流）。
+        // 仅 boundary（本地日界轮转点）/run_stop 两处并入桶摘要进
+        // stats 事件流——融合稿 §5 包数账原文口径（复核批 F3：补齐
+        // boundary 冲刷，崩溃损失窗口由「自 run_start 以来」收窄到
+        // 「自上一日界以来」）。
         let mut activity_buckets =
             volttray_app::stats::MinuteBuckets::new(crate::export::local_offset_minutes() as i64);
+        // F3：上次 mark 所在本地日——跨日时触发 boundary 冲刷。
+        let mut last_bucket_date: Option<String> = None;
         // v0.3.10（P3-日志）：上次落日志时的枚举候选集合签名——正常态 30s
         // 一次的例行枚举在集合未变时不重复全量落盘（单会话日志体积上限）。
         let mut last_enum_sig: Option<String> = None;
@@ -1075,7 +1080,8 @@ mod imp {
                         bootlog::note(&line);
                     }
                     // 融合稿 Phase 1：run_stop 并入活动桶摘要（不落盘高频
-                    // 事件，仅收尾把分钟位图并入事件流；同值快照去重）。
+                    // 事件，仅 boundary/run_stop 把分钟位图并入事件流——
+                    // boundary 冲刷见 WakeSignal 处理器；同值快照去重）。
                     let bucket_ts = wall_secs() as i64;
                     for (dev, days) in activity_buckets.take_snapshot() {
                         stats_store.note_activity_buckets(&dev, days, bucket_ts, Instant::now());
@@ -2158,7 +2164,26 @@ mod imp {
                         // 融合稿 Phase 1：RawInput 已观测到罗技鼠标活动 →
                         // 对应本地分钟桶置位（系统事件推送消费，零设备 I/O）。
                         if let Some(path) = &raw_path {
-                            activity_buckets.mark(path, wall_secs() as i64);
+                            let mark_ts = wall_secs() as i64;
+                            activity_buckets.mark(path, mark_ts);
+                            // 复核批 F3（融合稿 §5）：boundary 冲刷——本地
+                            // 日界轮转后，把早于当日的已完成日位图并入 stats
+                            // 事件流（当日未完成桶留内存待 run_stop）。首次
+                            // mark 同样过一遍：本 run 从昨天跑到今天时，
+                            // 昨天的桶在此冲出；无更早日期时取空、不产生
+                            // 空摘要事件（note_activity_buckets 拒空）。
+                            let today = activity_buckets.local_date(mark_ts);
+                            if last_bucket_date.as_deref() != Some(today.as_str()) {
+                                for (dev, days) in activity_buckets.take_completed_before(&today) {
+                                    stats_store.note_activity_buckets(
+                                        &dev,
+                                        days,
+                                        mark_ts,
+                                        Instant::now(),
+                                    );
+                                }
+                                last_bucket_date = Some(today);
+                            }
                         }
                         // v0.3.11（F5）：0 注册槽位时（重启后鼠标休眠、槽位
                         // 空，未注册设备收不到唤醒探测资格）——唤醒信号 =

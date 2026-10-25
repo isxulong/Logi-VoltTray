@@ -378,6 +378,50 @@ impl MinuteBuckets {
     pub fn device_queries(&self) -> usize {
         self.device_queries
     }
+
+    /// ts 对应的本地日（YYYY-MM-DD），供调用方做日界（boundary）
+    /// 判定；与 mark 内部切日同一口径。
+    pub fn local_date(&self, ts: i64) -> String {
+        let local = ts + self.tz_offset_minutes * 60;
+        let day_idx = local.div_euclid(86_400);
+        crate::attribution::fmt_local_date(day_idx * 86_400, 0)
+    }
+
+    /// 日界（boundary）冲刷：取走所有早于 current_date 的已完成日
+    /// 位图（drain），当日未完成的桶保留在内存、待 run_stop 收尾。
+    /// 融合稿 §5 包数账：不落盘高频事件，仅 boundary/run_stop 并入
+    /// 桶摘要——缺了 boundary 这半，崩溃会丢失自 run_start 以来的
+    /// 全部桶数据（复核批 F3）。
+    pub fn take_completed_before(&mut self, current_date: &str) -> Vec<(String, Vec<ActivityDay>)> {
+        let mut out = Vec::new();
+        let mut emptied = Vec::new();
+        for (device, days) in self.days.iter_mut() {
+            let done_keys: Vec<String> = days
+                .range(..current_date.to_string())
+                .map(|(k, _)| k.clone())
+                .collect();
+            if done_keys.is_empty() {
+                continue;
+            }
+            let mut list = Vec::with_capacity(done_keys.len());
+            for k in done_keys {
+                if let Some(bitmap) = days.remove(&k) {
+                    list.push(ActivityDay {
+                        date: k,
+                        bitmap_hex: bitmap.iter().map(|b| format!("{b:02x}")).collect(),
+                    });
+                }
+            }
+            out.push((device.clone(), list));
+            if days.is_empty() {
+                emptied.push(device.clone());
+            }
+        }
+        for d in emptied {
+            self.days.remove(&d);
+        }
+        out
+    }
 }
 
 /// 启动加载结果。
@@ -1355,6 +1399,35 @@ mod tests {
         assert_eq!(bits.iter().filter(|b| **b).count(), 1, "仅一个分钟桶置位");
         // drain 后内部清空
         assert!(buckets.take_snapshot().is_empty());
+    }
+
+    /// 复核批 F3：boundary 冲刷——日界轮转后，早于当日的已完成日
+    /// 被取走并入事件流，当日未完成桶保留在内存待 run_stop；
+    /// 无更早日期时不产出（避免空摘要事件）。
+    #[test]
+    fn activity_bucket_boundary_flush_completed_days() {
+        let mut buckets = MinuteBuckets::new(480);
+        // 2026-10-24 23:59 本地（UTC+8）→ epoch 15:59 UTC
+        let d1 = 1_792_800_000i64; // 任意参考点，按 local_date 校准
+        let date1 = buckets.local_date(d1);
+        let d2 = d1 + 2 * 86_400;
+        let date2 = buckets.local_date(d2);
+        buckets.mark("mouse-1", d1);
+        buckets.mark("mouse-1", d2);
+        // 日界未越过 d2：以 d2 当日为界，只取走 d1。
+        let flushed = buckets.take_completed_before(&date2);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].0, "mouse-1");
+        assert_eq!(flushed[0].1.len(), 1);
+        assert_eq!(flushed[0].1[0].date, date1);
+        // 当日桶保留：run_stop 快照仍含 date2。
+        let rest = buckets.take_snapshot();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].1.len(), 1);
+        assert_eq!(rest[0].1[0].date, date2);
+        // 无更早日期 → 空（调用方不会产出空摘要事件）。
+        assert!(buckets.take_completed_before(&date2).is_empty());
+        assert_eq!(buckets.device_queries(), 0);
     }
 
     /// activity_bucket_zero_when_silent——无事件分钟桶为 0（静止语义）。
