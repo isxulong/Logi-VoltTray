@@ -19,7 +19,7 @@ Logi-VoltTray/
 │                             # nightly.yml（fuzz 烟测 + 失败自动开单 N-2）
 │                             # bootstrap-lock.yml / audit.yml（cargo audit 周检）
 │                             # release.yml（发布产物构建）
-│                             # traffic-snapshot.yml（访问数据周快照：T-07 门槛
+│                             # traffic-snapshot.yml（访问数据快照（每日）：T-07 门槛
 │                             # 与 T-14/T-09 时钟提醒的数据源）
 ├── docs/
 │   └── experience/           # 本知识库（仓库根级 docs/experience/）
@@ -28,7 +28,7 @@ Logi-VoltTray/
     ├── .cargo/config.toml    # MSVC 静态链接 CRT（crt-static），消除 VCRUNTIME140.dll 运行时依赖
     ├── RELEASES.md           # 各版本发布说明（v0.3.6 起；最新版本可能滞后，见 §10）
     ├── docs/
-    │   └── decisions.md      # 实现决策记录 D-01 ~ D-84（最重要的单一文档）
+    │   └── decisions.md      # 实现决策记录 D-01 起至实尾（以 decisions.md 实载为准；最重要的单一文档）
     ├── fixtures/             # 协议黄金样例与测试数据（golden/、battery_map_cases.json、
     │                         # features.json、voltage_curves.json 及生成脚本 gen_golden.py）
     ├── fuzz/                 # cargo-fuzz 模糊测试入口（fuzz_targets/frame_fuzz.rs，打协议帧解析）
@@ -145,24 +145,29 @@ cargo build --release --locked -p volttray-tray
 | 文档 | 读它解决什么 |
 | --- | --- |
 | 根 `README.md` | 产品功能、配置键、用户视角行为 |
-| `volttray/docs/decisions.md`（D-01 ~ D-84） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
+| [`docs/HANDOVER.md`](../HANDOVER.md) | 交接状态口径：当前状态快照、待办全景、红线在册项（首次接手的冷启动入口） |
+| [`docs/ai-orchestration.md`](../ai-orchestration.md) | 多智能体编排规则：派单规程、巡检清单、双独立复核条款 |
+| `volttray/docs/decisions.md`（D-01 起至实尾，以 decisions.md 实载为准） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | [本知识库 01](01-engineering-lessons.md) | 事故教训三段式 |
-| [本知识库 02](02-collaboration-playbook.md) | 证据优于自述、红蓝对抗、收口纪律等协作方法论（E7–E14、E21–E26、E34） |
+| [本知识库 02](02-collaboration-playbook.md) | 证据优于自述、红蓝对抗、收口纪律等协作方法论（条目范围以 [README 索引](README.md#e-编号总索引) 为准） |
 | [本知识库 03](03-release-quality-gate.md) | 发布前逐条核验 |
 | [本知识库 05](05-diag-export-field-audit.md) | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
 | [本知识库 06](06-release-reconciliation.md) | 发布对账机制与本期对账表（内部维护区，外部读者可忽略） |
+| [本知识库 07](07-unsafe-ledger.md) | unsafe 代码台账（红蓝对抗改进项 E9），改动 unsafe 代码前后同步核对 |
 | [`docs/naming-risk-assessment.md`](../naming-risk-assessment.md) | 商标与命名 go/no-go 评估载体（T-14，结论待维护者裁决） |
 | [`CONTRIBUTING.md`](../../CONTRIBUTING.md) | 贡献指南：提交规范、PR 自检清单与行为红线 |
 | [`SECURITY.md`](../../SECURITY.md) | 安全策略：报告渠道、范围声明与供应链 |
 | [`verify.sh`](../../verify.sh) | 本地推送前一键三件套自检（fmt / clippy / test + 交叉 check） |
 
+**分工与动线**：AGENTS.md＝工作方式约定，HANDOVER＝状态口径，两者互补不重叠；「首次接手」走 [HANDOVER 冷启动阅读顺序](../HANDOVER.md)，「日常上手」走 AGENTS §1 启动序列，两条动线各自唯一权威。
+
 **关于 PRD 与蓝图**：`decisions.md`、`Cargo.toml` 注释中引用的「PRD」「蓝图」是早期产品文档，**未入库**（全仓检索无对应文件）；决策的权威落点是 `decisions.md` 本身，这些引用视为历史出处标注，找不到原文不影响使用本知识库。
 
 ## 10. 已知文档滞后点（以代码为准）
 
-- 根 README 下载区滞后核销机制：找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`；每次发布对账时按此复核并登记核销项（最新核销：2026-10-23 核指向 v0.3.21——该版 2026-10-23 发布，[06](06-release-reconciliation.md) 对账表已含 v0.3.21 行；上一次 2026-10-22 核指向 v0.3.20）。
-- 决策范围上界表述曾滞后：D-84（版本窗口计划）2026-10-23 登记进 `decisions.md` 后，本文件与 AGENTS.md 中的决策记录范围上界（原止于 D-83）未同步回写——2026-10-23 已全仓更新为含 D-84，本条滞后即日消除，不再列为在途项。
+- 根 README 下载区滞后核销机制：找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`；每次发布对账时按此复核并登记核销项（最新核销：2026-10-24 核指向 v0.3.23；上一次 2026-10-23 核指向 v0.3.21）。对账断档如实登记：v0.3.22 / v0.3.23 的逐项对账当批未补齐，欠账与原因见 [06](06-release-reconciliation.md) 头部与 [HANDOVER](../HANDOVER.md) §3 待办，不留白。
+- 决策范围上界表述曾滞后：D-84（版本窗口计划）2026-10-23 登记进 `decisions.md` 后，本文件与 AGENTS.md 中的决策记录范围上界（原止于 D-83）未同步回写——2026-10-23 已全仓更新为含 D-84。该类滞后 2026-10-24 随 D-85~D-90 追加当日复发一次（当日再次回写）；教训：上界一律以 `decisions.md` 实尾为准，不写死裸数。本条登记为「机制声明与机制实效脱节」元教训的实例——声明「即日消除」并不能阻止同类滞后复发，自限语比一次性修复更可靠。
 - 轮询档位曾长期存在文档旧口径（60/300/600/900/1800 秒），现已统一为 `crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
 - 「30 秒槽位扫描」旧文档表述为「每 30 秒例行枚举」，实际是嵌在枚举循环内、外层每次迭代才查门限：空闲时一个轮询周期至多扫一次（v0.3.15 起文档口径已修正，定性见 [01 E18](01-engineering-lessons.md#e18-托盘应用性能审查先定性每个周期唤醒几次查几次画几次再谈优化)）。
 
@@ -190,6 +195,6 @@ cargo build --release --locked -p volttray-tray
 ## 12. 上手第一周建议路径
 
 1. 读本文件 + 根 README，装环境跑通构建与全量测试；
-2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复）、D-72 ~ D-84（v0.3.16–v0.3.19 设计包落地与发布修复主线，含 D-84 版本窗口计划），理解主战场；
-3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部 18 条（E1–E6、E16–E20、E27–E33），把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
+2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复）、D-72 起至实尾（v0.3.16–v0.3.19 设计包落地与发布修复主线；上界以 decisions.md 实载为准），理解主战场；
+3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部条目（以 [README 索引](README.md#e-编号总索引) 为准，2026-10-25 实测 01 含 24 条），其中高优先级标注条目（当前为 01 头部点名的三大事故 E1 / E2 / E3；逐条优先级标注由维护者定标后补齐）优先吸收，把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
 4. 接到用户报障时先走 §7 排查入口；领任务前读 [02 协作方法论](02-collaboration-playbook.md)，交付前照 [03 门禁清单](03-release-quality-gate.md) 自查。

@@ -50,14 +50,21 @@
 | 文档（仓库根相对路径） | 读它解决什么 |
 | --- | --- |
 | `README.md` | 产品功能、配置键、下载与构建、用户视角行为 |
+| `docs/HANDOVER.md` | 交接状态口径：当前状态快照、待办全景、红线在册项（**状态口径的唯一权威**；分工：AGENTS＝工作方式，HANDOVER＝状态口径） |
+| `docs/ai-orchestration.md` | 多智能体编排规则：派单规程、巡检清单、双独立复核条款 |
 | `docs/experience/04-onboarding.md` | 新加入者全貌：结构、构建、测试分层、发布流程、红线、报障排查入口、术语表 |
-| `docs/experience/01-engineering-lessons.md` | 事故教训三段式（E1–E6、E16–E20、E27–E33），改代码前吸收 |
-| `docs/experience/02-collaboration-playbook.md` | 协作方法论（E7–E14、E21–E26、E34）：红蓝对抗、收口纪律、回写机制 |
+| `docs/experience/01-engineering-lessons.md` | 事故教训三段式（条目范围以该库 README 索引为准），改代码前吸收 |
+| `docs/experience/02-collaboration-playbook.md` | 协作方法论（条目范围以该库 README 索引为准）：红蓝对抗、收口纪律、回写机制 |
 | `docs/experience/03-release-quality-gate.md` | 发布质量门禁清单，发布前逐条核验 |
 | `docs/experience/05-diag-export-field-audit.md` | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
 | `docs/experience/06-release-reconciliation.md` | 发布对账机制与本期对账表（内部维护区） |
-| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 ~ D-84 决策记录，改代码前必读相关条目 |
+| `docs/experience/07-unsafe-ledger.md` | unsafe 代码台账（红蓝对抗改进项 E9），改动 unsafe 代码前后同步核对 |
+| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 起、上界以 decisions.md 实尾为准（2026-10-25 实测 D-90）的决策记录，改代码前必读相关条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | `CONTRIBUTING.md` | 提交规范、PR 自检清单与行为红线 |
 | `SECURITY.md` | 安全问题报告渠道、范围声明与供应链 |
 | `verify.sh` | 本地推送前一键三件套自检（fmt / clippy / test + 交叉 check），用法见 `docs/experience/04-onboarding.md` §3 工具导读 |
+
+**分工声明**：本文件（AGENTS.md）＝工作方式约定（怎么干活、红线与授权边界）；`docs/HANDOVER.md`＝状态口径（当前进展、在册红线项、欠账与待办）。两者互补不重叠，冲突时工作状态以 HANDOVER 为准、工作方式以本文件为准。
+
+**动线约定**：「首次接手」以 `docs/HANDOVER.md` 冷启动阅读顺序为唯一权威；「日常上手」以本文件 §1 启动序列为唯一权威——两条动线各司其职，不存在第三套顺序。
