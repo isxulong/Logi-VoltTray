@@ -1,6 +1,6 @@
 # 会话交接（HANDOVER）
 
-> 面向下一个接手的 AI 或人。**本文件自足：接手必需的信息全部写在本仓库内；文中出现的飞书云文档链接与 aily 任务编号仅是同平台/同租户下的补充线索，不在该平台时直接忽略，不影响接手。**
+> 面向下一个接手的 AI 或人。**本文件自足：接手必需的信息全部写在本仓库内，不依赖任何平台专属线索，跨平台可直接接手。**
 > 更新纪律：每次会话收尾必须更新本文件；状态类字段以本文件为最新口径，历史细节查 RELEASES.md 与 docs/experience/ 各条目。
 
 ## 冷启动阅读顺序
@@ -22,7 +22,7 @@
 - 最新已发布版本：v0.3.23（2026-10-24）
 - main HEAD：95caba1b（以 git 实际为准）
 - 已合入 main、未发版的内容：
-  1. 统计 HTML 报告重构（b9cdb71..e922169，4 提交）：分日耗电视图（当日首末差 + 两级数据质量标签）、RawInput 分钟位图活动口径、双口径区间化推断（剔除粘滞日中位数×24h 上界 × 窗口总账下界，差异 >2 倍挂口径冲突提示）、删除「距下次充电估算」并加删除守卫测试、16 项测试网。规格要点已固化在代码与测试网中；完整融合稿（rev.12）在飞书云文档（同租户补充线索，见 §6）。
+  1. 统计 HTML 报告重构（b9cdb71..e922169，4 提交）：分日耗电视图（当日首末差 + 两级数据质量标签）、RawInput 分钟位图活动口径、双口径区间化推断（剔除粘滞日中位数×24h 上界 × 窗口总账下界，差异 >2 倍挂口径冲突提示）、删除「距下次充电估算」并加删除守卫测试、16 项测试网。规格要点已固化在代码与测试网中。
   2. P2 修复批（已收口：5c58b41f..95caba1b，4 提交；双独立复核双席放行、主 AD 裁决通过并追认 F3 在 stats.rs 的两个纯内存方法扩展）：F1 删除未授权正斜率过滤、F2 activity_days 改跨事件日期并集、F3 桶摘要补 boundary 冲刷、F4 RELEASES ①登记恢复完整表述；含顺手项（chart3 图例逐字）与三条观察登记。
   3. 轮询间隔人性化显示（8ed645a7，纯显示层，内部秒值不变）
   4. 小修批五项缺陷修复（fd73176d）
@@ -49,7 +49,7 @@
 ### 3.3 常态运行
 
 - nightly 每天约 16:35（北京时间）自动跑；评审步监控治理时钟 T-05（30 晚评审：起算 2026-10-20，due 2026-11-19；时钟单源＝docs/experience/reconciliation-clocks.yaml，解析失败必须响警报，见 E19/E39）。
-- 此前由 aily 平台的连续巡检任务看护（同平台补充线索，跨平台忽略）：任务 7699889603959852334。
+- 此前由同平台（aily）的连续巡检任务看护（同平台线索，跨平台忽略）。
 
 ### 3.4 知识库欠账
 
@@ -72,10 +72,3 @@
 3. 核实 main HEAD 与最近一次 nightly 运行状态（API 查 actions/runs）。
 4. 与用户确认是否启动 E10 独占窗口。
 5. 本文件状态字段随每次会话收尾更新。
-
-## 6. 同平台补充线索（飞书云文档，跨平台可忽略）
-
-- HTML 重构签发融合稿 rev.12：https://xulongnow.feishu.cn/docx/U9EmdkBTsoHtY5xzKrqckimYnsh
-- 真机数据分析报告：https://xulongnow.feishu.cn/docx/JeQqdkwp4o1CMxxq2kacwQ6Qn8e
-- 可视化页：https://xulongnow.feishu.cn/docx/H8DDmqI9BdBaGXalzvscBvwdnNc
-- 对抗局 A/B 方案：https://xulongnow.feishu.cn/docx/YKNcdDKOAoFapoxBogCcr3Znnvg 与 https://xulongnow.feishu.cn/docx/JNGndOpQJoLsg3xivrvcqKz6nnh
