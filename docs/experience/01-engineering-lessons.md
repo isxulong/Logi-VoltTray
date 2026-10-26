@@ -467,3 +467,14 @@
 3. 验收侧：凡中途更新过描述的批次，验收时先核对产物依据的是哪一版规格。
 
 **溯源**：2026-10-25 收尾落库批推送旧稿验收退回事件（同平台任务线索，跨平台忽略）。
+
+
+---
+
+## E43. continuous 任务标 done 后重开不重锚调度，须手动 `--next` 重锚（2026-10-26）
+
+- **现象**：kind=continuous 的巡检任务被标 done 后调度停摆，nextRunAtMs 冻结；任务因评论重开后 nextRunAtMs 仍停留在过去时刻，此后仅有评论触发的 Run、无一轮按节奏调度的 Run，周期巡检静默失效——「周期执行概况」显示的下次执行时间为过去时间是唯一可见信号。
+- **处置**：`aily-cli task update <task-id> --next 15m` 重锚，并回读确认下次执行时间已为未来时刻（`--next` 只锚下一次、不改 interval）。
+- **同类**：`aily-cli auto` 自动化（interval / cron）被 disabled 后同样静默失效；接管既有自动化或做过 enable/disable 后须用 `aily-cli auto list` 确认 status。
+- **判据**：接管 continuous 任务的第一个 Run、每日首次巡检，先看下次执行时间是否为未来时刻；过去时间＝已失效，立即重锚。
+- **溯源**：2026-10-26 本队 aily 平台连续巡检任务实测（标 done → nextRunAtMs 冻结；评论重开 → 未重锚；18 分钟无调度 Run；`--next 15m` 重锚后恢复）。
