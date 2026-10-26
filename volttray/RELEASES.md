@@ -41,6 +41,58 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.24
+
+RB2 修复批（FR-1~13）＋统计 HTML 报告重构批＋P2 修复批＋轮询间隔人性化显示＋小修批五项缺陷修复，叠加经验库红蓝对抗修订批与协作规则文档批（docs-only，不产生运行时行为变化）。本版无配置默认值变化、无新增迁移标记；数据文件 `last_known.json` schema v1 追加 `path_map` 字段（`#[serde(default)]`，旧文件双向兼容）。
+
+### 兼容性声明（D5：显示行为与统计口径变化面）
+
+本版有两处用户可见显示行为变化（均为修复口径问题的有意变化，配置格式与轮询节奏零变化）：
+
+- **统计 HTML 报告整版重构 + 周环比卡口径修正（FR-5）**：分日耗电视图改「当日首末差」口径并配两级数据质量标签；新增 RawInput 分钟位图活动视图；估算区间改双口径区间化（剔除粘滞日中位数 ×24h 为上界 × 窗口总账为下界，差异 >2 倍挂口径冲突提示）；「距下次充电估算」卡片移除（已加删除守卫测试防回归）。周环比卡自本版起标注实际窗口起止日、稀疏日（读数 <3 次或覆盖 <2 小时）与充电净增益日（负斜率日）剔除出均值样本、窗口缺口 >2 天挂「窗口含缺口」质量徽标并照常给出差值——**周环比与均值数值口径与旧版不完全可比：旧版把上述日一并计入样本**。日历日锚定取卡未随本批落地，属 RB2 终审两步走裁决登记的后续可选优化，非缺陷（见「验证口径」）。
+- **托盘菜单轮询间隔显示（FR-7）**：菜单按配置真值显示并以人性化单位表述（如「45 秒」「2 分钟」）；配置值不在标准档位表内时追加「（非标准档）」标注——旧版显示就近档位标准值，与设置页下拉选中项可能矛盾（如手改 config 为 900s 时旧版菜单显示「15 分钟」、下拉选中「10 分钟」）。内部轮询秒值、配置吸附与回写逻辑零变化。
+
+### 用户可见变化
+
+1. **唤醒活动桶键持久映射兜底（FR-1）**：唤醒信号的活动桶键改按「raw path → unitId」映射归属——活映射优先，miss 后以随 `last_known.json` 落盘的持久映射（`path_map` 字段）兜底，双 miss 才落原路径键并计入同类遥测。修复重启后枚举未完成窗口内收到唤醒信号时活动量统计归属丢失的问题；零设备 I/O，D-33 红线合规。
+2. **统计聚合层四项准确性修复（FR-2/3/4/8）**：① 充电净增益日（负斜率日）剔除出中位数样本——修复充电日污染致估算区间静默偏窄（零斜率日仍在样本）；② 口径冲突判定双向化（下界超上界或任一侧为负即置真，u=0 时按绝对阈值 1.0%/天）——修复倒挂区间无提示直出；③ 崩溃会话运行时段闭合到上一会话最后一个事件——修复崩溃＋重启后运行时段从分日视图消失的整天量级漏计（只增不虚计，停机时间不计入监控覆盖）；④ 报告页脚新增夏令时说明：「日界按单一 UTC 偏移计算，跨夏令时切换日前后历史日存在 ≤1h 归属偏差」。
+3. **统计 HTML 报告重构批＋P2 修复批（F1~F4）**：分日视图、分钟位图、双口径区间推断（见兼容性声明）；F1 删除未授权的正斜率过滤、F2 活动天数改跨事件日期并集、F3 桶摘要补 boundary 冲刷、F4 观察项登记恢复完整表述。
+4. **小修批五项**：① retier 尾阈值 99 潜伏 panic 修复（末档已达上限即停止增档，v0.3.23 已知项销项）；② `wake_recovery_via_reenum` 计数接线（upsert 前捕获 pre-registration 离线态，修复此前事后检查恒 0 的统计缺口）；③ `wake_miss_zero_match` 计数口径文档化＋两个日志采样器 Shutdown 时冲出尾部压制数（对账公式：计数器值 = 可见 miss 行数 + Σ suppressed 汇报，含尾部行）；④ CSV `rate_pct_per_hour` 加 300s 最小段时长护栏＋|Δ%|<1 速率返回空（CSV 留空 / JSON null；RELEASES 历史条目对应口径文案已同步更正，与代码、质检脚本三方对号）；⑤ stats 段类型 `active` 口径定为「app 运行中且未判充电/休眠」，不改名（CSV/JSON schema 对外稳定，报告层映射展示文案）。
+5. **轮询间隔人性化显示**：菜单「立即刷新」项与设置页间隔文案统一人性化单位表述，纯显示层，内部秒值不变。
+
+### 工程与质量（开发者向摘要）
+
+- **RB2 协作规则修订（FR-9~12，docs/ai-orchestration.md）**：存量批次补审折算声明、锚点行改落库定位语义、docs 豁免条款字面收窄（docs 下脚本不再借字面豁免）、双复核隔离收窄为两席互相不可见＋A 类独立会话分支＋沙箱中转退路；FR-13 材料包 diff 范围规则与文件集覆盖验收项落 03 门禁清单 I 节。
+- **经验库红蓝对抗修订批（E1–E42）**：45+1 条修订指令落地（含 03 D9 与 yaml 口径冲突修复、unsafe 台账 97→96 实测修正、索引真实化）；双独立复核条款签发版落库；nightly 评审步路径修复（步级工作目录钉回仓库根＋异常不再静默）；周期任务调度纪律与 README 索引同步。
+- **测试基线**：全 workspace 测试 420 项通过（RB2 批合入口径；linux 侧 fmt / clippy -D warnings / 全量 test / python 协议与质检全过，mingw 交叉 check 由 CI windows/ubuntu runner 覆盖）。发版证据见「验证口径」。
+
+### 已知项声明（D3 红线状态）
+
+- **E10 独占窗口未启动（在册未修复项，随下一代码窗口处理）**：① P0——wake-force 重枚举：0 注册槽位时每 5s 全量扫槽，且 force 轮清死槽冷却与 0xFF 负缓存，结构性穿透既有降频成果（D-67 违规形态的 6 倍频率），修复方向＝退避＋不穿透缓存；② P1——在线灰显装填探测绕开轮询档（5s 冷却 ≈0.2Hz，E18 同族），修复方向＝并入 per-device 节流。本版全部改动位于聚合层/显示层/文档层，零设备 I/O，D-33 逐条合规。
+- **U-1（用户决策挂起）**：双独立复核一席长期不可用时的替补规则未定，临时口径＝批次挂起＋主动推送等用户裁决；不影响本版发布内容。
+- **托盘状态滞后观感**：休眠后托盘状态滞后最长约 60 分钟——已实证鼠标休眠正常、属解释性说明（E10 窗口登记），非本版缺陷修复项。
+- **微基准阈值门禁未设**（v0.3.23 已知项顺延，待基线积累后评审）。
+
+### 验证口径与未验证项分级（D2）
+
+- **CI 实测（一级证据）**：合入内容末提交 ccbe3009 的 check-runs 经 GitHub Actions API 实测全绿；v0.3.24 版本 chore 提交后的 CI run 与 tag 触发的 release.yml run（ci-gate 复用 CI 全门禁 → verify-tag-on-main → build-release 含 release-contract 断言与 minisign 签名自验）以实际 run 结果为准，逐项留痕于 docs/experience/06 发布对账当版区。
+- **未验证（如实分级）**：发布执行环境为 Linux 沙箱、无法本地跑 Windows Rust 构建——构建、签名与发布契约证据一律取自 CI run 的 API 实测，不引用任何缓存副本；linux 侧 420 项测试通过，mingw 交叉 check 未在沙箱执行、由 CI runner 覆盖。
+- **口径选择（非缺陷）**：FR-5 日历日锚定取卡未随本批落地——RB2 终审 A S-2 两步走裁决明确将其登记为后续可选优化；周环比卡已按滚动窗口＋起止日标注如实披露窗口口径。
+
+### 升级注意事项（D4）
+
+- 本版无配置默认值变化、无新增迁移标记；`config.toml` 格式零变化，退出旧版后启动新版即可。
+- `last_known.json` 追加 `path_map` 字段：旧文件缺该字段按空映射处理（`#[serde(default)]`），降级到旧版时该字段按未知字段容忍，回退安全。
+- 统计导出 CSV/JSON 列名与 schema 不变（`active` 段类型不改名）；旧统计文件无需删除，坏行照旧跳过。
+
+### 下载与安装注意
+
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（已决策不采购代码签名证书，拦截为已接受状态）。Release 附 `volttray-tray.exe.minisig` 签名文件（自 v0.3.23 起启用），可选验签：`minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig`（公钥 `minisign.pub` 在仓库根目录）；sha256 核验照旧：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`。
+
+### English Summary
+
+v0.3.24 ships the RB2 fix batch (FR-1 through FR-13) on top of the statistics HTML report rework, the P2 fix batch, five smaller fixes, and humanized polling-interval labels. User-facing: wake-signal activity buckets now fall back to a persisted raw-path-to-unitId map in last_known.json, so wake attribution no longer silently drops in the post-restart enumeration window; statistics accuracy fixes — charging days (net-gain negative-slope days) are excluded from the median sample, the interval-conflict check is now bidirectional so inverted lower-above-upper ranges no longer render unflagged, crashed sessions close at the last event of the previous session instead of vanishing from the daily view, and the report footer notes the ≤1h day-boundary skew across DST transitions; the week-over-week card now labels its actual window start/end dates, excludes sparse days (fewer than 3 reads or under 2 hours of coverage), and badges windows containing gaps longer than 2 days; the tray menu shows the configured polling interval truthfully with humanized units and marks non-standard values. Compatibility: week-over-week and estimate figures are not directly comparable with older versions — the old code counted sparse and net-gain days in the sample; no config default changes, no migration markers, no CSV/JSON schema changes; last_known.json gains an optional path_map field, backward and downgrade compatible. Unverified, stated plainly: the release environment cannot build Windows Rust binaries locally, so build, signing, and release-contract evidence is taken from the GitHub Actions API (runs measured directly, no cached copies); calendar-week anchoring for the week-over-week card was deliberately deferred as an optional follow-up per the RB2 verdict, not a defect. Known issues disclosed: the E10 exclusive window has not started — the P0 wake-force re-enumeration (5s full-slot scans at zero registered slots, punching through dead-slot cooldown and the 0xFF negative cache) and the P1 grayed-out-online probing bypass remain in the ledger; the dual-review substitute rule (U-1) stays pending user decision. Note: the EXE is not Authenticode-signed, so Windows SmartScreen may warn on first run — choose "More info" → "Run anyway"; verify downloads with the shipped `.minisig` (public key `minisign.pub` at the repo root) or the `.sha256.txt` checksum.
+
 ## v0.3.23
 
 红蓝对抗整改落地批（改进项 E1–E24 逐批落地）＋真机休眠反馈三项修复＋Release minisign 签名启用。本版无配置默认值变化、无新增迁移标记，升级零行为突变。
@@ -82,16 +134,16 @@
 
 v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24) and enables minisign release signing. User-facing: three fixes from physical-machine sleep feedback — sleeping devices now show the last known battery grayed out with the number rendered (instead of "--"), HID++1 0x8F/0x08 replies are judged as sleep rather than generic failures, and wake attribution gains a single-candidate VID/PID fallback plus a new wake-recovery-via-reenumeration telemetry counter; receiver ghost-slot (0x01) and dead-slot (0x08) handling fixed so charge/offline false alarms no longer repeat every polling round; diagnostics export capacity raised (256→2048 events, 200→4096 log tail lines, about 2 h of coverage); config saves now preserve unknown keys; CSV export hardened (atomic writes, formula-injection guard); font names with quotes/backslashes no longer corrupt config.toml. Engineering: fuzz targets for battery/stats/config parsers with a blocking PR-level smoke job; structured redaction registry with field-level diff audit; release signing chain (fail-open when the key is absent, fail-closed self-verification when present — this is the first signed release); reconciliation clocks migrated to structured YAML; criterion micro-benchmarks in CI (no threshold gate yet, pending baseline accumulation). Known issues: a pre-existing latent panic when adding a tier while the trailing threshold is already 99 is pinned by a `#[should_panic]` test and scheduled for the next batch (unchanged legacy behavior). Note: the EXE is not Authenticode-signed, so Windows SmartScreen may warn on first run — choose "More info" → "Run anyway"; verify downloads with the shipped `.minisig` (public key `minisign.pub` at the repo root) or the `.sha256.txt` checksum.
 
-## 后续版本（已登记待办，自 v0.3.23 窗口移交）
+## 后续版本（已登记待办，自 v0.3.24 窗口移交）
 
 - **登记来源**：PR #15 质检复核 P2 三项，经评估移入后续版本（v0.3.23 窗口仅修 P0-1／P1-1 与红蓝对抗整改批，见 v0.3.22 / v0.3.23 节）。
 - ① roundtrip 派生字段覆盖（质检 P2：往返测试对派生字段断言不足）。
 - ② Win32 侧覆盖（质检 P2：single/bootlog 等 Windows 专属模块测试覆盖待补）。
 - ③ README 热重载口径（质检 P2：README 对「保存后重启生效」的热重载表述口径待校正）。
-- **retier 尾阈值 = 99 潜伏 panic 修复**（v0.3.23 已知项）：已在 main 修复（小修批第 1 项，2026-10-25；守卫「末档已达上限即停止」消除 clamp min>max panic 路径，原 `#[should_panic]` 锚定测试改为正常行为断言），随下一版本发布，本条销项。
+- **retier 尾阈值 = 99 潜伏 panic 修复**（v0.3.23 已知项）：已在 main 修复（小修批第 1 项，2026-10-25；守卫「末档已达上限即停止」消除 clamp min>max panic 路径，原 `#[should_panic]` 锚定测试改为正常行为断言），已随 v0.3.24 发布（见 v0.3.24 节），本条销项。
 - **微基准阈值门禁**（v0.3.23 已知项，待基线积累后评审，见 v0.3.23 节）。
 - （E10 行为层修复三项已于 v0.3.23 落地，见 v0.3.23 节第 2 条，本条销项。）
-- **v0.3.23 真机分析 P2 批（小修批第 2~5 项，已在 main 修复、未发版）**：
+- **v0.3.23 真机分析 P2 批（小修批第 2~5 项，已随 v0.3.24 发布，销项）**：
   - ② `wake_recovery_via_reenum` 计数已接线（upsert 前捕获 pre-registration 离线态；此前 upsert 后设备已 Online，事后检查恒 0）。
   - ③ `wake_miss_zero_match` 计数口径已文档化（`diag_export.rs` 字段注释：per-run 累计、粒度=每唤醒信号归因事件 +1、日志双采样器限速），并让两个采样器在 Shutdown 时冲出尾部压制数，对账公式：计数器值 = 可见 miss 行数 + Σ suppressed 汇报（含尾部行）——E10「修复前后计数对账」按此口径复核。
   - ④ CSV `rate_pct_per_hour`：300s 最小段时长护栏（`MIN_RATE_DURATION_SECS`）＋|Δ%|<1 速率返回 None（`MIN_RATE_ABS_DELTA_PCT`=1，批次 1 收紧）（CSV 留空 / JSON null）。
