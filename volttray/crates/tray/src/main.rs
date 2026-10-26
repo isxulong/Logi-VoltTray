@@ -101,7 +101,9 @@ mod imp {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
-    use volttray_app::wakechannel::{channel_for_raw_path_classified, ChannelMatch};
+    use volttray_app::wakechannel::{
+        activity_bucket_key, channel_for_raw_path_classified, ActivityKeySource, ChannelMatch,
+    };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -1346,6 +1348,19 @@ mod imp {
                                                     Instant::now(),
                                                 );
                                             }
+                                            // FR-1（RB2）：注册期落 raw path →
+                                            // unitId 持久映射（重启空槽位窗口
+                                            // 的唤醒桶键兜底；变更驱动、随
+                                            // 节拍落盘）。
+                                            if let Some(uid) = s.unit_id.as_deref() {
+                                                for p in
+                                                    [&state.info.short_path, &state.info.long_path]
+                                                        .into_iter()
+                                                        .flatten()
+                                                {
+                                                    store.note_path_map(&p.to_string_lossy(), uid);
+                                                }
+                                            }
                                             state.slots.push(s);
                                             if let Some((old_id, _)) = rebound {
                                                 pending_aliases.push(old_id);
@@ -1486,6 +1501,16 @@ mod imp {
                                         &s.id,
                                         Instant::now(),
                                     );
+                                    // FR-1（RB2）：同上——新通道首轮扫槽
+                                    // 注册的 raw path → unitId 映射。
+                                    if let Some(uid) = s.unit_id.as_deref() {
+                                        for p in [&info.short_path, &info.long_path]
+                                            .into_iter()
+                                            .flatten()
+                                        {
+                                            store.note_path_map(&p.to_string_lossy(), uid);
+                                        }
+                                    }
                                     slots.push(s);
                                     if let Some((old_id, _)) = rebound {
                                         pending_aliases.push(old_id);
@@ -2165,7 +2190,66 @@ mod imp {
                         // 对应本地分钟桶置位（系统事件推送消费，零设备 I/O）。
                         if let Some(path) = &raw_path {
                             let mark_ts = wall_secs() as i64;
-                            activity_buckets.mark(path, mark_ts);
+                            // FR-1（RB2）：桶键命名空间统一——mark 前先按
+                            // raw path 匹配当前通道/槽位活映射取 unitId
+                            //（与 Read 事件同一命名空间），miss 再查
+                            // last_known.json 持久映射，双 miss 才落原路径
+                            // 键；双 miss 计入 channel_map_miss 同类遥测
+                            //（计数分工见下方 mark 前的补计分支注释）。
+                            let (bucket_key, key_src) = {
+                                let candidates: Vec<(String, String)> = channels
+                                    .iter()
+                                    .flat_map(|ch| {
+                                        let key = ch.key.clone();
+                                        [&ch.info.short_path, &ch.info.long_path]
+                                            .into_iter()
+                                            .flatten()
+                                            .map(move |p| {
+                                                (key.clone(), p.to_string_lossy().into_owned())
+                                            })
+                                    })
+                                    .collect();
+                                let mut resolved = false;
+                                let mut active_unit: Option<String> = None;
+                                if let ChannelMatch::Hit(ci) =
+                                    channel_for_raw_path_classified(path, &candidates)
+                                {
+                                    let chan_key = &candidates[ci].0;
+                                    resolved = true;
+                                    // 通道恰一个去重后非空 unitId 才可归因
+                                    //（多槽别名 / 身份不明 → None，走持久
+                                    // 映射兜底）。
+                                    let mut units: HashSet<&str> = channels
+                                        .iter()
+                                        .filter(|ch| &ch.key == chan_key)
+                                        .flat_map(|ch| {
+                                            ch.slots.iter().filter_map(|s| s.unit_id.as_deref())
+                                        })
+                                        .collect();
+                                    units.retain(|u| !u.is_empty());
+                                    if units.len() == 1 {
+                                        active_unit =
+                                            units.into_iter().next().map(|u| u.to_string());
+                                    }
+                                }
+                                let persistent = store.path_map_unit_id(path);
+                                let (k, src) = activity_bucket_key(
+                                    active_unit.as_deref(),
+                                    persistent.as_deref(),
+                                    path,
+                                    resolved,
+                                );
+                                (k, src)
+                            };
+                            // 仅「归因命中通道但槽位无 unitId」由桶键侧补计
+                            //（归因 Hit 分支不计 miss，只有桶键侧看得见）；
+                            // 双 miss 场景由下方归因 miss 分支各自计数，
+                            // 此处不重复计——保持 channel_map_miss 的
+                            //「per 唤醒信号归因事件 +1」口径（diag_export ③）。
+                            if matches!(key_src, ActivityKeySource::RawPathChannelKeyUnresolved) {
+                                channel_map_miss.fetch_add(1, Ordering::Relaxed);
+                            }
+                            activity_buckets.mark(&bucket_key, mark_ts);
                             // 复核批 F3（融合稿 §5）：boundary 冲刷——本地
                             // 日界轮转后，把早于当日的已完成日位图并入 stats
                             // 事件流（当日未完成桶留内存待 run_stop）。首次

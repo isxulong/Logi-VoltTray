@@ -670,8 +670,14 @@ pub const DAILY_VIEW_DAY_LIMIT: i64 = 90;
 /// 双口径对账冲突阈值：上界（中位数×24h）与下界（总账）差异 >2 倍
 /// 时挂「口径冲突」提示（融合稿冲突清单 1；区间形态不变）。
 pub const AVG_CONFLICT_RATIO: f64 = 2.0;
+/// 双口径对账冲突绝对阈值（FR-3 u=0 退化分支）：u == 0 时比值式
+/// 判据失效，退化为总账绝对阈值（l > 1.0 %/天 才置真）。
+pub const AVG_CONFLICT_ABS_THRESHOLD_PCT: f64 = 1.0;
 /// 样本质量徽标阈值：有效日 <7 天挂「样本不足」（融合稿 §3③）。
 pub const AVG_MIN_VALID_DAYS: usize = 7;
+/// 周环比窗口日历缺口阈值：窗口内相邻两日卡日期差 >2 天时挂
+/// 「窗口含缺口」质量徽标（FR-5 / 冲突 C-4：不 suppress、照常给 delta）。
+pub const WOW_GAP_THRESHOLD_DAYS: i64 = 2;
 
 /// 数据覆盖的本地日集合（段覆盖去重日；日界 = 本地 00:00）。
 fn covered_days(segments: &[Segment], offset_minutes: i32) -> BTreeSet<String> {
@@ -870,28 +876,46 @@ fn build_daily_cards(
 
 /// 每日 app 运行时段（run_start/run_stop 配对，日界裁剪；全局口径
 /// ——app 进程级事件，各设备分日时间轴共用）。末尾未闭合 run 以
-/// 窗口最后事件 ts 闭合。
+/// 本会话最后事件 ts 闭合；RunStart 覆盖未闭合 run（崩溃+重启）时，
+/// 先以「上一会话最后一个事件 ts」闭合上一段，open 之后无任何事件
+/// 则丢弃不开段（FR-4：闭合到上一会话末尾，不虚计停机时间）。
 fn build_run_spans_by_day(
     events: &[StatsEvent],
     offset_minutes: i32,
 ) -> BTreeMap<String, Vec<(i64, i64)>> {
     let mut spans: Vec<(i64, i64)> = Vec::new();
     let mut open: Option<i64> = None;
-    let last_ts = events.iter().map(|e| e.ts()).max();
+    // open 之后最近一次事件的 ts（崩溃段闭合点取证）。
+    let mut last_event_after_open: Option<i64> = None;
     for ev in events {
         match ev {
-            StatsEvent::RunStart { ts } => open = Some(*ts),
+            StatsEvent::RunStart { ts } => {
+                // 崩溃+重启：上一会话未 RunStop 即被本 RunStart 覆盖，
+                // 先以该会话最后一个事件 ts 闭合，再开新段。
+                if let (Some(a), Some(b)) = (open, last_event_after_open) {
+                    if b > a {
+                        spans.push((a, b));
+                    }
+                }
+                open = Some(*ts);
+                last_event_after_open = None;
+            }
             StatsEvent::RunStop { ts } => {
                 if let Some(a) = open.take() {
                     if *ts > a {
                         spans.push((a, *ts));
                     }
                 }
+                last_event_after_open = None;
             }
-            _ => {}
+            _ => {
+                if open.is_some() {
+                    last_event_after_open = Some(ev.ts());
+                }
+            }
         }
     }
-    if let (Some(a), Some(b)) = (open, last_ts) {
+    if let (Some(a), Some(b)) = (open, last_event_after_open) {
         if b > a {
             spans.push((a, b));
         }
@@ -954,6 +978,26 @@ pub struct AvgEstimate {
     pub badges: Vec<String>,
 }
 
+/// 双口径对账冲突判定（FR-3）：conflict = (u > R·l) || (u > 0 且
+/// l > R·u)；u == 0 退化绝对阈值 l > 1.0 %/天；任一为负直接置真；
+/// l <= 0 且 u > 0 分支语义保持（N-4 回归锚）。
+fn avg_conflict(ledger: Option<f64>, upper: Option<f64>) -> bool {
+    match (ledger, upper) {
+        (Some(l), Some(u)) => {
+            if l < 0.0 || u < 0.0 {
+                true
+            } else if u == 0.0 {
+                l > AVG_CONFLICT_ABS_THRESHOLD_PCT
+            } else if l <= 0.0 {
+                u > 0.0
+            } else {
+                u > AVG_CONFLICT_RATIO * l || l > AVG_CONFLICT_RATIO * u
+            }
+        }
+        _ => false,
+    }
+}
+
 fn build_avg_estimate(
     events: &[StatsEvent],
     segments: &[Segment],
@@ -964,11 +1008,14 @@ fn build_avg_estimate(
     // 上界样本：非粘滞、非稀疏日的实测斜率。规格 §3③ 仅授权
     // 「剔除粘滞标记日」——零斜率的非粘滞有效日必须进入中位数样本
     // （复核批 F1：删去 *v > 0.0 过滤，该过滤把 0 斜率有效日错当
-    // 粘滞日剔除）。
+    // 粘滞日剔除）。FR-2 症状剔除：slope < 0 的日卡（充电净增益日
+    // 负斜率合法产生）不进中位数样本（冲突 C-2 已裁：只剔 slope<0
+    // 症状日，废弃 charging_spans / charge_recovery_pct 判据）。
     let slopes: Vec<f64> = cards
         .iter()
         .filter(|c| !c.sticky && !c.sparse)
         .filter_map(|c| c.slope_pct_per_hour)
+        .filter(|v| *v >= 0.0)
         .collect();
     let valid_days = slopes.len();
     let median_slope = median(slopes);
@@ -1001,16 +1048,13 @@ fn build_avg_estimate(
         }
         _ => (None, 0.0),
     };
-    let conflict = match (ledger, upper) {
-        (Some(l), Some(u)) => {
-            if l <= 0.0 {
-                u > 0.0
-            } else {
-                u > AVG_CONFLICT_RATIO * l
-            }
-        }
-        _ => false,
-    };
+    // FR-3（冲突 C-6 双向化 + u=0 护栏）：
+    // conflict = (u > R·l) || (u > 0 且 l > R·u)——l 远超 u 的倒挂
+    // 区间同样置真（渲染层两处无条件直出，无徽标会自相矛盾）；
+    // u == 0 时比值式判据失效，退化为绝对阈值 l > 1.0 %/天；
+    // l 或 u 任一为负直接置真；l <= 0 且 u > 0 的既有分支语义保持
+    // （N-4 回归锚，含于比值式第一臂）。
+    let conflict = avg_conflict(ledger, upper);
     let mut badges: Vec<String> = Vec::new();
     if valid_days < AVG_MIN_VALID_DAYS {
         badges.push("样本不足".to_string());
@@ -1038,16 +1082,68 @@ fn build_avg_estimate(
 }
 
 /// 周环比（融合稿 §3③/C-21：两个对比窗口均无粘滞标记且无口径冲突
-/// 时才给箭头，否则「不可比」）。
+/// 时才给箭头，否则「不可比」）。FR-5 两步走：窗口起止标注＋sparse
+/// 剔除＋缺口徽标（不含日历日锚定，登记为后续可选优化——E 裁决）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WeekOverWeek {
     pub suppressed: bool,
     pub reason: Option<String>,
-    /// 近 7 天日均耗电 − 前 7 天日均耗电（%/天；suppressed 时 None）。
+    /// 近 7 天日均耗电 − 前 7 天日均耗电（%/天；suppressed 时 None；
+    /// 日均分母剔除 sparse 日）。
     pub delta_pct_per_day: Option<f64>,
+    /// 对比窗口首日（YYYY-MM-DD，最近 2×RECENT_DAYS 张日卡中最早
+    /// 一张的日期；无日卡时 None）。
+    pub window_first: Option<String>,
+    /// 对比窗口末日（YYYY-MM-DD，最近一张日卡的日期；无日卡时 None）。
+    pub window_last: Option<String>,
+    /// 质量徽标（如「窗口含缺口」：日历缺口 >2 天不 suppress、
+    /// 照常给 delta，冲突 C-4 已裁）。
+    pub badges: Vec<String>,
+}
+
+/// `YYYY-MM-DD` → 自 epoch 起算的日序号（日差算术用；解析失败 None）。
+fn civil_days(date: &str) -> Option<i64> {
+    let mut it = date.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant days_from_civil（公历）。
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 fn build_week_over_week(cards: &[DailyCard], conflict: bool) -> WeekOverWeek {
+    // 对比窗口 = 最近 2×RECENT_DAYS 张日卡（prev 7 + recent 7），
+    // 窗口起止即窗口首末卡日期（FR-5 第一刀：纯展示标注）。
+    let window: Vec<&DailyCard> = cards
+        .iter()
+        .rev()
+        .take((2 * RECENT_DAYS) as usize)
+        .collect();
+    let window_first = window.last().map(|c| c.date.clone());
+    let window_last = window.first().map(|c| c.date.clone());
+    // 窗口内日历缺口检测：相邻两卡日期差 >2 天挂「窗口含缺口」
+    // 徽标（不 suppress、照常给 delta；冲突 C-4 已裁）。
+    let mut badges: Vec<String> = Vec::new();
+    let mut has_gap = false;
+    for pair in window.iter().rev().collect::<Vec<_>>().windows(2) {
+        if let (Some(a), Some(b)) = (civil_days(&pair[0].date), civil_days(&pair[1].date)) {
+            if b - a > WOW_GAP_THRESHOLD_DAYS {
+                has_gap = true;
+            }
+        }
+    }
+    if has_gap {
+        badges.push("窗口含缺口".to_string());
+    }
     let recent: Vec<&DailyCard> = cards.iter().rev().take(RECENT_DAYS as usize).collect();
     let prev: Vec<&DailyCard> = cards
         .iter()
@@ -1061,21 +1157,35 @@ fn build_week_over_week(cards: &[DailyCard], conflict: bool) -> WeekOverWeek {
             suppressed: true,
             reason: Some("不可比".to_string()),
             delta_pct_per_day: None,
+            window_first,
+            window_last,
+            badges,
         };
     }
-    if prev.is_empty() || recent.is_empty() {
+    // FR-5 第二刀：sparse 日剔除出周均值（样本空则「样本不足」；
+    // 20 分钟读数的 sparse 日对均值的系统性拉偏由此消除）。
+    let recent_eff: Vec<&DailyCard> = recent.iter().copied().filter(|c| !c.sparse).collect();
+    let prev_eff: Vec<&DailyCard> = prev.iter().copied().filter(|c| !c.sparse).collect();
+    if prev_eff.is_empty() || recent_eff.is_empty() {
         return WeekOverWeek {
             suppressed: true,
             reason: Some("样本不足".to_string()),
             delta_pct_per_day: None,
+            window_first,
+            window_last,
+            badges,
         };
     }
-    let r: f64 = recent.iter().map(|c| c.drain_pct as f64).sum::<f64>() / recent.len() as f64;
-    let p: f64 = prev.iter().map(|c| c.drain_pct as f64).sum::<f64>() / prev.len() as f64;
+    let r: f64 =
+        recent_eff.iter().map(|c| c.drain_pct as f64).sum::<f64>() / recent_eff.len() as f64;
+    let p: f64 = prev_eff.iter().map(|c| c.drain_pct as f64).sum::<f64>() / prev_eff.len() as f64;
     WeekOverWeek {
         suppressed: false,
         reason: None,
         delta_pct_per_day: Some(round2(r - p)),
+        window_first,
+        window_last,
+        badges,
     }
 }
 
@@ -1575,7 +1685,7 @@ footer table{font-size:12px}
 <tr><td>app 运行时长占比</td><td>堆叠横条</td><td>分段时长合计</td><td>实测</td><td>改名</td></tr>
 <tr><td>分段明细表</td><td>表格（证据层）</td><td>与 CSV 同数据同列</td><td>实测</td><td>rate 护栏（duration&lt;5min 或 delta 绝对值&lt;1% → None）</td></tr>
 </tbody></table>
-<p>工程口径：设备数 <b id="mdev">—</b>、聚合段数 <b id="mseg">—</b>、覆盖天数 <b id="mday">—</b>（不占首屏）。日界 = 本地 00:00（时区见页首）。</p>
+<p>工程口径：设备数 <b id="mdev">—</b>、聚合段数 <b id="mseg">—</b>、覆盖天数 <b id="mday">—</b>（不占首屏）。日界 = 本地 00:00（时区见页首）。日界按单一 UTC 偏移计算，跨夏令时切换日前后历史日存在 ≤1h 归属偏差（不做事件级时区库重算）。</p>
 <p>已移除：跨日段线性摊入柱图（日耗电口径已统一为当日首末差，避免同页双口径）；近 7 天耗速率摘要卡（分母语义错误：app 运行段由 run_start/run_stop 事件锚定）。</p>
 <p>单文件离线报告：零外部依赖，断网可开。</p>
 </footer>
@@ -1780,6 +1890,8 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
     var bds="";
     (a.badges||[]).forEach(function(b){bds+=badge(b,b==="口径冲突"?"b-conflict":"b-warn");});
     var wow=w[k]||{suppressed:true};
+    var wbadges="";(wow.badges||[]).forEach(function(b){wbadges+=badge(b,"b-warn");});
+    var wwin=(wow.window_first&&wow.window_last)?(' · 窗口 '+wow.window_first+' ~ '+wow.window_last):"";
     var wtxt=wow.suppressed?badge(wow.reason||"不可比","b-warn")
       :("周环比 "+(wow.delta_pct_per_day>0?"↑ +":"↓ ")+wow.delta_pct_per_day+" %/天");
     html+='<div class="card"><div class="k">日均耗电对账 · '+esc(name)+'</div>'
@@ -1787,8 +1899,8 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
       +'<div class="s">总账（下界）'+f(a.ledger_pct_per_day," %/天")
       +' · 中位斜率 '+f(a.median_slope_pct_per_hour," %/h")+'（×24h = 上界）<br>'
       +'有效样本 '+a.valid_days+' 天 · 窗口 '+a.window_days+' 天 · 粘滞 '+a.sticky_days+' 天'
-      +' · 口径冲突：'+(a.conflict?"是":"否")+'<br>'+wtxt+'</div>'
-      +badge("推断","b-infer")+bds+'</div>';
+      +' · 口径冲突：'+(a.conflict?"是":"否")+'<br>'+wtxt+wwin+'</div>'
+      +badge("推断","b-infer")+bds+wbadges+'</div>';
   });
   host.innerHTML=html;
 })();
@@ -3049,5 +3161,223 @@ mod filename_tests {
             stats_export_filename_local(p),
             "volttray-stats-20261018-090503.csv"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // RB2 修复落实批 FR-2/3/4/5/8 验证测试（E 签发终审稿）
+    // -------------------------------------------------------------------
+
+    /// FR-2：10 日样本（8 非负斜率 + 2 负斜率），断言 valid_days=8、
+    /// upper 非 None、负斜率两日不进样本；零斜率日仍在样本。
+    #[test]
+    fn fr2_negative_slope_days_excluded_from_median() {
+        let d0 = day_base();
+        let mut cards: Vec<DailyCard> = Vec::new();
+        for i in 0..10 {
+            let slope = match i {
+                // 两个隔夜充电净增益日：合法负斜率。
+                3 => Some(-0.4),
+                7 => Some(-0.6),
+                // 五个正常放电日 + 三个零斜率日（非粘滞）。
+                _ if i < 5 => Some(0.5 + i as f64 * 0.1),
+                _ => Some(0.0),
+            };
+            cards.push(card(
+                &fmt_local_date(d0 + i * 86400, CST),
+                2,
+                slope,
+                false,
+                false,
+            ));
+        }
+        let avg = build_avg_estimate(&[], &[], "d1", &cards, &BTreeSet::new());
+        assert_eq!(avg.valid_days, 8);
+        assert!(avg.upper_pct_per_day.is_some());
+        // 8 样本排序 = [0,0,0,0,0.5,0.6,0.7,0.9]，中位 = (0+0.5)/2 = 0.25。
+        assert_eq!(avg.median_slope_pct_per_hour, Some(0.25));
+        assert_eq!(avg.upper_pct_per_day, Some(6.0));
+        // 无 events/segments → ledger None → 不触发冲突。
+        assert!(!avg.conflict);
+        // 回归锚：零斜率日仍在样本（valid_days 已含 3 个零斜率日）。
+        let zero_only: Vec<DailyCard> = (0..10)
+            .map(|i| {
+                card(
+                    &fmt_local_date(d0 + i * 86400, CST),
+                    2,
+                    Some(0.0),
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let avg2 = build_avg_estimate(&[], &[], "d1", &zero_only, &BTreeSet::new());
+        assert_eq!(avg2.valid_days, 10);
+        assert_eq!(avg2.median_slope_pct_per_hour, Some(0.0));
+    }
+
+    /// FR-3：conflict 三验证用例 + 既有分支回归。
+    #[test]
+    fn fr3_conflict_bidirectional_and_u0_guard() {
+        // 终审稿验证：median_slope=0/ledger=0.9 → false。
+        assert!(!avg_conflict(Some(0.9), Some(0.0)));
+        // 终审稿验证：ledger=12/u=4 → true（l 远超 u 的倒挂区间）。
+        assert!(avg_conflict(Some(12.0), Some(4.0)));
+        // 终审稿验证：u=-1 → true（任一为负直接置真）。
+        assert!(avg_conflict(Some(2.0), Some(-1.0)));
+        assert!(avg_conflict(Some(-0.5), Some(2.0)));
+        // u=0 退化绝对阈值：l>1.0 才置真。
+        assert!(avg_conflict(Some(1.5), Some(0.0)));
+        assert!(!avg_conflict(Some(1.0), Some(0.0)));
+        // 既有上臂语义保持（N-4 回归锚）：u > 2l。
+        assert!(avg_conflict(Some(1.0), Some(2.5)));
+        assert!(!avg_conflict(Some(1.0), Some(2.0)));
+        // l<=0 且 u>0 保持置真。
+        assert!(avg_conflict(Some(0.0), Some(1.0)));
+        // 双方均为 0 → 不冲突。
+        assert!(!avg_conflict(Some(0.0), Some(0.0)));
+        // 任一侧 None → 不冲突。
+        assert!(!avg_conflict(None, Some(1.0)));
+        assert!(!avg_conflict(Some(1.0), None));
+    }
+
+    /// FR-4：崩溃+重启时 RunStart 覆盖未闭合 run，以「上一会话最后
+    /// 一个事件 ts」闭合，产出段不跨 4 天；open 后无事件则丢弃。
+    #[test]
+    fn fr4_crashed_run_closed_at_last_event_of_session() {
+        let d0 = day_base();
+        let events = vec![
+            StatsEvent::RunStart { ts: d0 + 9 * 3600 },
+            ev_read(d0 + 10 * 3600, "d1", 80, false, SOURCE_POLL),
+            StatsEvent::RunStart {
+                ts: d0 + 4 * 86400 + 9 * 3600,
+            },
+            ev_read(d0 + 4 * 86400 + 10 * 3600, "d1", 79, false, SOURCE_POLL),
+        ];
+        let spans = build_run_spans_by_day(&events, CST);
+        // 两段各一小时：周一崩溃段 + 周五末段——而非跨 4 天的段。
+        assert_eq!(spans.len(), 2);
+        let day1 = fmt_local_date(d0 + 9 * 3600, CST);
+        assert_eq!(spans[&day1], vec![(d0 + 9 * 3600, d0 + 10 * 3600)]);
+        // 周五会话末尾未闭合但有事件 → 以最后事件闭合。
+        let day5 = fmt_local_date(d0 + 4 * 86400 + 9 * 3600, CST);
+        assert_eq!(
+            spans[&day5],
+            vec![(d0 + 4 * 86400 + 9 * 3600, d0 + 4 * 86400 + 10 * 3600)]
+        );
+        // 崩溃段 open 之后无任何事件 → 丢弃不开段。
+        let lonely = vec![
+            StatsEvent::RunStart { ts: d0 + 9 * 3600 },
+            StatsEvent::RunStop { ts: d0 + 10 * 3600 },
+            StatsEvent::RunStart {
+                ts: d0 + 4 * 86400 + 9 * 3600,
+            },
+            StatsEvent::RunStart {
+                ts: d0 + 8 * 86400 + 9 * 3600,
+            },
+        ];
+        let spans2 = build_run_spans_by_day(&lonely, CST);
+        // 仅第一对 RunStart/RunStop 成段；后两个孤儿 RunStart 均丢弃。
+        assert_eq!(spans2.len(), 1);
+        assert_eq!(spans2[&day1], vec![(d0 + 9 * 3600, d0 + 10 * 3600)]);
+    }
+
+    /// FR-5：周末党 14 日样本（隔 5 天缺口）——suppressed=false、
+    /// delta 非 None、挂「窗口含缺口」徽标、窗口起止正确；含 1 个
+    /// sparse 日窗口分母排除该日。
+    #[test]
+    fn fr5_wow_window_annotation_sparse_removal_gap_badge() {
+        let d0 = day_base();
+        let date = |i: i64| fmt_local_date(d0 + i * 86400, CST);
+        // 周末党：每个周末 2 天（0,1 / 7,8 / … / 42,43），14 张卡，
+        // 相邻卡间隔 5 天 → 日历缺口 >2 天。
+        let weekend_days: Vec<i64> = (0..7).flat_map(|w| vec![w * 7, w * 7 + 1]).collect();
+        assert_eq!(weekend_days.len(), 14);
+        let cards: Vec<DailyCard> = weekend_days
+            .iter()
+            .map(|&i| {
+                card(
+                    &date(i),
+                    if i >= 22 { 6 } else { 10 },
+                    Some(0.3),
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let wow = build_week_over_week(&cards, false);
+        assert!(!wow.suppressed);
+        // recent（22..43）日均 6，prev（0..21）日均 10 → delta=-4。
+        assert_eq!(wow.delta_pct_per_day, Some(-4.0));
+        assert!(wow.badges.iter().any(|b| b == "窗口含缺口"));
+        assert_eq!(wow.window_first.as_deref(), Some(date(0).as_str()));
+        assert_eq!(wow.window_last.as_deref(), Some(date(43).as_str()));
+        // 连续 14 天无缺口 → 无徽标。
+        let contig: Vec<DailyCard> = (0..14)
+            .map(|i| card(&date(i), 4, Some(0.3), false, false))
+            .collect();
+        let wow2 = build_week_over_week(&contig, false);
+        assert!(wow2.badges.is_empty());
+        // sparse 日剔除出均值分母：recent 中 1 个 sparse 日（drain 100
+        // 拉偏值）被排除，delta = 0 而非被拉高。
+        let mut sparse_cards: Vec<DailyCard> = (0..14)
+            .map(|i| card(&date(i), 4, Some(0.3), false, false))
+            .collect();
+        sparse_cards[10].sparse = true;
+        sparse_cards[10].drain_pct = 100;
+        let wow3 = build_week_over_week(&sparse_cards, false);
+        assert!(!wow3.suppressed);
+        assert_eq!(wow3.delta_pct_per_day, Some(0.0));
+        // recent 全 sparse → 样本不足。
+        let mut all_sparse: Vec<DailyCard> = (0..14)
+            .map(|i| card(&date(i), 4, Some(0.3), false, false))
+            .collect();
+        for c in all_sparse.iter_mut().skip(7) {
+            c.sparse = true;
+        }
+        let wow4 = build_week_over_week(&all_sparse, false);
+        assert!(wow4.suppressed);
+        assert_eq!(wow4.reason.as_deref(), Some("样本不足"));
+    }
+
+    /// FR-8：跨 DST 切换（单一 UTC 偏移 ±1h）时，事件日归属偏差
+    /// ≤1 天，与页脚文案「≤1h 归属偏差」一致；页脚文案已渲染。
+    #[test]
+    fn fr8_dst_day_attribution_shift_within_one_hour() {
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 8 * 3600, "d1", 90),
+            // 本地 23:30 的事件：偏移 +1h（DST 切换）后落到次日 00:30。
+            ev_poll(d0 + 23 * 3600 + 1800, "d1", 85),
+            ev_poll(d0 + 86400 + 8 * 3600, "d1", 80),
+            ev_poll(d0 + 86400 + 20 * 3600, "d1", 75),
+        ];
+        let ts_list: Vec<i64> = vec![
+            d0 + 8 * 3600,
+            d0 + 23 * 3600 + 1800,
+            d0 + 86400 + 8 * 3600,
+            d0 + 86400 + 20 * 3600,
+        ];
+        // 每个事件在两个偏移下的日归属差 ≤1 天（与文案 ≤1h 一致）。
+        for &ts in &ts_list {
+            let a = civil_days(&fmt_local_date(ts, CST)).unwrap();
+            let b = civil_days(&fmt_local_date(ts, CST + 60)).unwrap();
+            assert!((b - a).abs() <= 1, "day shift > 1 for ts {ts}");
+        }
+        // 23:30 事件恰好被 1h 偏移推到次日。
+        let late = d0 + 23 * 3600 + 1800;
+        let a = civil_days(&fmt_local_date(late, CST)).unwrap();
+        let b = civil_days(&fmt_local_date(late, CST + 60)).unwrap();
+        assert_eq!(b - a, 1);
+        // build_daily_cards 双偏移下日集合大小一致（2 天）。
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let c1 = build_daily_cards(&events, &segs, &sd, CST);
+        let c2 = build_daily_cards(&events, &segs, &sd, CST + 60);
+        assert_eq!(c1["d1"].len(), 2);
+        assert_eq!(c2["d1"].len(), 2);
+        // 页脚文案在模板中（单一 UTC 偏移 + ≤1h 偏差 + 不重算声明）。
+        assert!(HTML_TEMPLATE.contains("日界按单一 UTC 偏移计算"));
+        assert!(HTML_TEMPLATE.contains("跨夏令时切换日前后历史日存在 ≤1h 归属偏差"));
+        assert!(HTML_TEMPLATE.contains("不做事件级时区库重算"));
     }
 }

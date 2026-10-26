@@ -8,7 +8,7 @@
 //! ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
-use volttray_app::settings_text::humanize_interval_secs;
+use volttray_app::settings_text::menu_poll_interval_label;
 use volttray_app::DeviceSnapshot;
 
 /// 菜单项 ID 集合（构建时从 muda 取回，事件匹配用）。
@@ -158,8 +158,14 @@ pub fn build_menu(
     // 2026-10-25 用户反馈：秒不易读——间隔显示改人性化单位（分钟/小时，
     // 换算规则见 settings_text::humanize_interval_secs）；显示层专用，
     // poll_secs 数值与配置存储保持秒不变。
+    // FR-7（RB2）：按配置真值显示，非 POLL_TIERS_SECS 档位值追加
+    // 「（非标准档）」（settings_text::menu_poll_interval_label），避免
+    // 手改 config 为档外值时菜单与设置窗口下拉选中档文案矛盾。
     let refresh = MenuItem::new(
-        format!("立即刷新（当前间隔 {}）", humanize_interval_secs(poll_secs)),
+        format!(
+            "立即刷新（当前间隔 {}）",
+            menu_poll_interval_label(poll_secs)
+        ),
         true,
         None,
     );

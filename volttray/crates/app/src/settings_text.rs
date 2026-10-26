@@ -5,7 +5,9 @@
 //! （tier_hint_dynamic / fine_tune_gate_text / lab_hint_text 及其
 //! 常量），阈值校验等其余纯逻辑留待后续窗口逐步抽离。
 
-use crate::config::{Config, DEFAULT_POLL_SECS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN};
+use crate::config::{
+    Config, DEFAULT_POLL_SECS, FONT_TIER_THRESHOLD_MAX, FONT_TIER_THRESHOLD_MIN, POLL_TIERS_SECS,
+};
 
 /// 轮询间隔人性化显示（2026-10-25 用户反馈：秒不易读）。换算规则：
 /// 能整除 3600 →「N 小时」，否则能整除 60 →「N 分钟」，否则保留「N 秒」。
@@ -17,6 +19,20 @@ pub fn humanize_interval_secs(secs: u64) -> String {
         format!("{} 分钟", secs / 60)
     } else {
         format!("{secs} 秒")
+    }
+}
+
+/// FR-7（RB2）：托盘菜单「当前间隔」按配置真值显示；值不在
+/// `POLL_TIERS_SECS` 档位内（如手改 config 为 900s）时追加
+/// 「（非标准档）」，避免菜单显示与设置窗口下拉选中档两处文案矛盾。
+/// 仅显示层一处条件分支：settings 吸附与回写逻辑不改，数值与持久化
+/// 存储保持秒不变。
+pub fn menu_poll_interval_label(secs: u64) -> String {
+    let base = humanize_interval_secs(secs);
+    if POLL_TIERS_SECS.contains(&secs) {
+        base
+    } else {
+        format!("{base}（非标准档）")
     }
 }
 
@@ -115,8 +131,8 @@ pub fn settings_applied_note(prev: &Config, next: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        fine_tune_gate_text, humanize_interval_secs, lab_hint_text, poll_tier_label,
-        settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
+        fine_tune_gate_text, humanize_interval_secs, lab_hint_text, menu_poll_interval_label,
+        poll_tier_label, settings_applied_note, tier_hint_dynamic, LAB_HINT_TEXT,
     };
     use crate::config::{Config, DEFAULT_POLL_SECS, POLL_TIERS_SECS};
 
@@ -161,6 +177,28 @@ mod tests {
         );
         // 「（默认）」标注锚定 DEFAULT_POLL_SECS，不硬编码档位位置。
         assert!(poll_tier_label(DEFAULT_POLL_SECS).ends_with("（默认）"));
+    }
+
+    /// FR-7（RB2）验证：构造 poll_interval_secs=900（手改 config 的非档值），
+    /// 菜单文案按配置真值显示并标注「（非标准档）」，与下拉文案指向同一
+    /// 语义（真值 15 分钟，而非被吸附档位 10 分钟）；标准档不追加标注。
+    #[test]
+    fn menu_poll_interval_label_marks_non_standard_tier() {
+        // 非档值 900s：真值 15 分钟 + 非标准档标注。
+        assert_eq!(menu_poll_interval_label(900), "15 分钟（非标准档）");
+        assert!(!POLL_TIERS_SECS.contains(&900));
+        // 下拉档位表无 900 一项——菜单不再假装它等于某个档位。
+        let dropdown_labels: Vec<String> = POLL_TIERS_SECS
+            .iter()
+            .map(|&s| poll_tier_label(s))
+            .collect();
+        assert!(!dropdown_labels.contains(&"15 分钟".to_string()));
+        // 标准档五档不追加标注，文案与 humanize 一致。
+        for &t in &POLL_TIERS_SECS {
+            assert_eq!(menu_poll_interval_label(t), humanize_interval_secs(t));
+        }
+        // 其他非档值（非整除分钟）同样标注。
+        assert_eq!(menu_poll_interval_label(90), "90 秒（非标准档）");
     }
 
     #[test]

@@ -120,6 +120,51 @@ pub fn channel_for_raw_path_classified(
     }
 }
 
+/// FR-1（RB2）：唤醒信号活动桶键来源。活映射（当前通道槽位
+/// unitId）优先 → 持久映射（last_known.json path_map）兜底 → 双 miss
+/// 落原路径键；双命中不一致以活映射为准（修-1：活映射为当前真值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKeySource {
+    /// 活映射命中：unitId 命名空间（与 Read 事件一致）。
+    Active,
+    /// 持久映射命中（重启空槽位窗口兜底）。
+    Persistent,
+    /// 双 miss：落原路径键（归因路径已计 channel_map_miss，桶键侧不重复计）。
+    RawPathAttributionMiss,
+    /// 归因命中通道但槽位无 unitId（身份不明 / 多槽不可归因）：
+    /// 桶键侧补计 channel_map_miss（归因路径计不到的 miss）。
+    RawPathChannelKeyUnresolved,
+}
+
+/// FR-1（RB2）：唤醒信号活动桶键解析——mark 前把 raw path 统一进
+/// unitId 命名空间（与 Read 事件同一命名空间），避免键冻结进对外
+/// schema 后热力带错位 / 导出幽灵设备 / 接收器场景两鼠标混串。
+/// `channel_resolved`：raw path 是否归因命中某通道（决定双 miss 细分）。
+pub fn activity_bucket_key(
+    active_unit_id: Option<&str>,
+    persistent_unit_id: Option<&str>,
+    raw_path: &str,
+    channel_resolved: bool,
+) -> (String, ActivityKeySource) {
+    if let Some(u) = active_unit_id.filter(|u| !u.is_empty()) {
+        return (u.to_string(), ActivityKeySource::Active);
+    }
+    if let Some(u) = persistent_unit_id.filter(|u| !u.is_empty()) {
+        return (u.to_string(), ActivityKeySource::Persistent);
+    }
+    if channel_resolved {
+        (
+            raw_path.to_string(),
+            ActivityKeySource::RawPathChannelKeyUnresolved,
+        )
+    } else {
+        (
+            raw_path.to_string(),
+            ActivityKeySource::RawPathAttributionMiss,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +340,67 @@ mod tests {
             channel_for_raw_path_classified("", &candidates),
             ChannelMatch::NoFingerprint
         );
+    }
+
+    // -----------------------------------------------------------------
+    // FR-1（RB2）验证：四场景 + E 双独立复核加测两场景
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fr1_active_mapping_takes_priority() {
+        // ① 正常在线场景：桶键取自活映射（与 Read 事件同命名空间）。
+        let (k, src) = activity_bucket_key(Some("UID-A"), Some("UID-X"), r"\\?\hid#dev", true);
+        assert_eq!(k, "UID-A");
+        assert_eq!(src, ActivityKeySource::Active);
+        // ③ 双命中不一致（持久=X、活=Y）→ 以活映射 Y 为准（修-1）。
+        let (k2, _) = activity_bucket_key(Some("UID-Y"), Some("UID-X"), r"\\?\hid#dev", true);
+        assert_eq!(k2, "UID-Y");
+    }
+
+    #[test]
+    fn fr1_persistent_mapping_fallback_on_empty_slots() {
+        // ② 重启后枚举未完成（空槽位窗口）：活映射 miss → 持久映射兜底。
+        let (k, src) = activity_bucket_key(None, Some("UID-P"), r"\\?\hid#dev", true);
+        assert_eq!(k, "UID-P");
+        assert_eq!(src, ActivityKeySource::Persistent);
+        // 活映射 miss 且通道也未归因命中 → 仍兜底持久映射。
+        let (k2, src2) = activity_bucket_key(None, Some("UID-P"), r"\\?\hid#dev", false);
+        assert_eq!(k2, "UID-P");
+        assert_eq!(src2, ActivityKeySource::Persistent);
+    }
+
+    #[test]
+    fn fr1_dual_miss_falls_back_to_raw_path() {
+        // 双 miss：落原路径键（归因路径计 channel_map_miss，桶键侧不重复计）。
+        let (k, src) = activity_bucket_key(None, None, r"\\?\hid#dev", false);
+        assert_eq!(k, r"\\?\hid#dev");
+        assert_eq!(src, ActivityKeySource::RawPathAttributionMiss);
+        // 归因命中通道但槽位无 unitId：桶键侧补计 miss 的细分来源。
+        let (k2, src2) = activity_bucket_key(None, None, r"\\?\hid#dev", true);
+        assert_eq!(k2, r"\\?\hid#dev");
+        assert_eq!(src2, ActivityKeySource::RawPathChannelKeyUnresolved);
+        // 空 unitId 视同 miss。
+        let (k3, src3) = activity_bucket_key(Some(""), Some(""), r"\\?\hid#dev", false);
+        assert_eq!(k3, r"\\?\hid#dev");
+        assert_eq!(src3, ActivityKeySource::RawPathAttributionMiss);
+    }
+
+    #[test]
+    fn fr1_receiver_two_mice_distinguishable() {
+        // ④ 接收器两鼠标场景：同一接收器两条 raw path 各自解析到
+        // 不同 unitId 桶键——热力带不混串。
+        let (k1, s1) =
+            activity_bucket_key(Some("UID-M1"), None, r"\\?\hid#vid_046d#p#c532#m1", true);
+        let (k2, s2) =
+            activity_bucket_key(Some("UID-M2"), None, r"\\?\hid#vid_046d#p#c532#m2", true);
+        assert_eq!((k1.as_str(), s1), ("UID-M1", ActivityKeySource::Active));
+        assert_eq!((k2.as_str(), s2), ("UID-M2", ActivityKeySource::Active));
+        assert_ne!(k1, k2);
+        // 重启空槽位窗口：持久映射同样可区分两鼠。
+        let (p1, _) =
+            activity_bucket_key(None, Some("UID-M1"), r"\\?\hid#vid_046d#p#c532#m1", false);
+        let (p2, _) =
+            activity_bucket_key(None, Some("UID-M2"), r"\\?\hid#vid_046d#p#c532#m2", false);
+        assert_ne!(p1, p2);
     }
 }

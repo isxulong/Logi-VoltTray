@@ -94,7 +94,7 @@ v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24
 - **v0.3.23 真机分析 P2 批（小修批第 2~5 项，已在 main 修复、未发版）**：
   - ② `wake_recovery_via_reenum` 计数已接线（upsert 前捕获 pre-registration 离线态；此前 upsert 后设备已 Online，事后检查恒 0）。
   - ③ `wake_miss_zero_match` 计数口径已文档化（`diag_export.rs` 字段注释：per-run 累计、粒度=每唤醒信号归因事件 +1、日志双采样器限速），并让两个采样器在 Shutdown 时冲出尾部压制数，对账公式：计数器值 = 可见 miss 行数 + Σ suppressed 汇报（含尾部行）——E10「修复前后计数对账」按此口径复核。
-  - ④ CSV `rate_pct_per_hour` 加 60s 最小段时长护栏（`MIN_RATE_DURATION_SECS`），短段速率返回 None（CSV 留空 / JSON null）。
+  - ④ CSV `rate_pct_per_hour`：300s 最小段时长护栏（`MIN_RATE_DURATION_SECS`）＋|Δ%|<1 速率返回 None（`MIN_RATE_ABS_DELTA_PCT`=1，批次 1 收紧）（CSV 留空 / JSON null）。
   - ⑤ stats 段类型 `active` 口径定为「app 运行中且未判充电/休眠」，**不改名**（CSV/JSON schema 已对外稳定、recheck.py 质检与 E10 对账按现列名取值；改名属 HTML 报告重构范围，由报告层映射展示文案）——口径单一来源：`attribution.rs` `SegmentType::Active` 注释与本条。
 
 - **统计 HTML 重构批观察项（P2 ×4，登记于 2026-10-25）**：

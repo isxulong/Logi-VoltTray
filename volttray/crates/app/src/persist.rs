@@ -21,7 +21,7 @@
 //! stats.jsonl 的防抖/兜底/fsync 口径整体继承本文件（v3 WP-B 节
 //! 「落盘频率与丢失口径整体继承 A-1」）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -45,6 +45,9 @@ pub const GLOBAL_DEBOUNCE: Duration = Duration::from_secs(10);
 pub const FLUSH_FALLBACK: Duration = Duration::from_secs(60);
 /// fsync 定时间隔（退出时无条件 fsync 一次，掉电最坏丢 5 分钟）。
 pub const FSYNC_INTERVAL: Duration = Duration::from_secs(300);
+/// FR-1（RB2）：raw path → unitId 持久映射条目上限（FIFO 淘汰；
+/// raw path 键空间较大，独立于 MAX_DEVICES 的 LRU 主淘汰机制）。
+pub const MAX_PATH_MAP_ENTRIES: usize = 64;
 
 /// 持久化文件名 / 备份名 / 目录名（v3 A-1）。
 pub const STORE_FILE_NAME: &str = "last_known.json";
@@ -104,6 +107,11 @@ pub struct PersistedDevice {
 struct LastKnownFile {
     version: u32,
     devices: Vec<PersistedDevice>,
+    /// FR-1（RB2）：raw path → unitId 持久映射（唤醒信号活动桶键的
+    /// 重启空槽位窗口兜底）。version 保持 1：旧读者忽略未知字段、
+    /// 新读者对缺失字段取空（serde default），双向兼容。
+    #[serde(default)]
+    path_map: BTreeMap<String, String>,
 }
 
 /// 加载结果（调用方据此记日志 / 决定是否重建）。
@@ -157,6 +165,14 @@ pub struct LastKnownStore {
     /// 读写在入口即 no-op——不加载存量、不播种虚拟条目、不落盘（相位二
     /// 第 4 项：实验功能新装默认关，关闭即彻底停用而非静默继续）。
     enabled: bool,
+    /// FR-1（RB2）：raw path → unitId 持久映射（内存当前值）。
+    path_map: BTreeMap<String, String>,
+    /// 最近一次成功落盘的 path_map 镜像（dirty 判定基准）。
+    path_map_persisted: BTreeMap<String, String>,
+    /// path_map 有变化、等待落盘。
+    path_map_dirty: bool,
+    /// path_map 插入序（FIFO 淘汰基准）。
+    path_map_order: Vec<String>,
 }
 
 impl LastKnownStore {
@@ -178,6 +194,10 @@ impl LastKnownStore {
             writes_since_fsync: 0,
             last_fsync: None,
             conflicted: HashSet::new(),
+            path_map: BTreeMap::new(),
+            path_map_persisted: BTreeMap::new(),
+            path_map_dirty: false,
+            path_map_order: Vec::new(),
             enabled: true,
         }
     }
@@ -271,6 +291,27 @@ impl LastKnownStore {
             .map(|r| (r.physical_key.clone(), r))
             .collect();
         store.persisted = store.records.clone();
+        // FR-1（RB2）：恢复 raw path → unitId 持久映射（超上限截最老）。
+        let mut pm: BTreeMap<String, String> = BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for (k, v) in file.path_map {
+            if k.is_empty() || v.is_empty() {
+                continue;
+            }
+            order.push(k.clone());
+            pm.insert(k, v);
+        }
+        while pm.len() > MAX_PATH_MAP_ENTRIES {
+            if let Some(oldest) = order.first().cloned() {
+                order.remove(0);
+                pm.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        store.path_map = pm;
+        store.path_map_persisted = store.path_map.clone();
+        store.path_map_order = order;
         let n = store.records.len();
         (store, LoadOutcome::Loaded(n))
     }
@@ -364,6 +405,38 @@ impl LastKnownStore {
         removed
     }
 
+    /// FR-1（RB2）：注册期落 raw path → unitId 持久映射（变更驱动；
+    /// 超过 [`MAX_PATH_MAP_ENTRIES`] 按 FIFO 淘汰最老条目）。返回是否
+    /// 有变化（新键 / 值更新）。
+    pub fn note_path_map(&mut self, raw_path: &str, unit_id: &str) -> bool {
+        if !self.enabled || raw_path.is_empty() || unit_id.is_empty() {
+            return false;
+        }
+        if self.path_map.get(raw_path).map(|v| v.as_str()) == Some(unit_id) {
+            return false;
+        }
+        if !self.path_map.contains_key(raw_path) {
+            self.path_map_order.push(raw_path.to_string());
+        }
+        self.path_map
+            .insert(raw_path.to_string(), unit_id.to_string());
+        while self.path_map.len() > MAX_PATH_MAP_ENTRIES {
+            if let Some(oldest) = self.path_map_order.first().cloned() {
+                self.path_map_order.remove(0);
+                self.path_map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.path_map_dirty = true;
+        true
+    }
+
+    /// FR-1（RB2）：查询 raw path → unitId 持久映射（未命中 None）。
+    pub fn path_map_unit_id(&self, raw_path: &str) -> Option<String> {
+        self.path_map.get(raw_path).cloned()
+    }
+
     /// 防抖落盘（IO 循环每 tick 调用一次）：
     /// - 无 dirty → 仅检查 fsync 定时点；
     /// - 全局 ≤1/10s 且（就绪设备 = 距上次持久化 ≥30s；兜底 = 最老 dirty
@@ -374,7 +447,7 @@ impl LastKnownStore {
         if !self.enabled {
             return Ok(outcome);
         }
-        if !self.dirty_since.is_empty() {
+        if !self.dirty_since.is_empty() || self.path_map_dirty {
             let global_ok = self
                 .last_flush
                 .is_none_or(|t| now.duration_since(t) >= self.tuning.global_debounce);
@@ -393,7 +466,7 @@ impl LastKnownStore {
                     })
                     .cloned()
                     .collect();
-                if !ready.is_empty() {
+                if !ready.is_empty() || self.path_map_dirty {
                     outcome = self.flush_keys(&ready, now)?;
                 }
             }
@@ -418,7 +491,9 @@ impl LastKnownStore {
             return Ok(FlushOutcome::default());
         }
         let keys: Vec<String> = self.dirty_since.keys().cloned().collect();
-        let mut outcome = if keys.is_empty() {
+        // FR-1（RB2）：仅 path_map 有变化（无设备 dirty）时也必须落盘，
+        // 否则重启空槽位窗口的持久映射在退出路径丢失。
+        let mut outcome = if keys.is_empty() && !self.path_map_dirty {
             FlushOutcome::default()
         } else {
             self.flush_keys(&keys, now)?
@@ -442,6 +517,9 @@ impl LastKnownStore {
             self.dirty_since.remove(k);
             self.last_persisted_at.insert(k.clone(), now);
         }
+        // FR-1（RB2）：path_map 随本次落盘一并持久化并清 dirty。
+        self.path_map_persisted = self.path_map.clone();
+        self.path_map_dirty = false;
         let mut all: Vec<PersistedDevice> = self.persisted.values().cloned().collect();
         let evicted = enforce_caps(&mut all);
         for k in &evicted {
@@ -470,6 +548,7 @@ impl LastKnownStore {
     fn write_atomic(&self) -> io::Result<()> {
         let file = LastKnownFile {
             version: SCHEMA_VERSION,
+            path_map: self.path_map.clone(),
             devices: {
                 let mut v: Vec<_> = self.persisted.values().cloned().collect();
                 v.sort_by(|a, b| a.physical_key.cmp(&b.physical_key));
@@ -551,12 +630,86 @@ fn serialized_len(records: &[PersistedDevice]) -> usize {
     let file = LastKnownFile {
         version: SCHEMA_VERSION,
         devices: records.to_vec(),
+        path_map: BTreeMap::new(),
     };
     serde_json::to_string(&file).map(|s| s.len()).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
+    // FR-1（RB2）path_map 验证：往返 / 旧文件兼容 / 上限淘汰 / 空值拒绝
+    fn fr1_tmp() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "vt-fr1-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn fr1_path_map_roundtrip_and_flush() {
+        let path = fr1_tmp();
+        let now = Instant::now();
+        let mut st = LastKnownStore::with_tuning(path.clone(), FlushTuning::default());
+        assert!(st.note_path_map(r"\\?\hid#vid_046d#c532#m1", "UID-M1"));
+        // 同值重复 note 不再标 dirty。
+        assert!(!st.note_path_map(r"\\?\hid#vid_046d#c532#m1", "UID-M1"));
+        // 值更新标 dirty。
+        assert!(st.note_path_map(r"\\?\hid#vid_046d#c532#m1", "UID-M1B"));
+        assert_eq!(
+            st.path_map_unit_id(r"\\?\hid#vid_046d#c532#m1"),
+            Some("UID-M1B".to_string())
+        );
+        assert!(st.path_map_unit_id(r"\\?\other").is_none());
+        st.shutdown_flush(now).unwrap();
+        // 重启加载：持久映射恢复。
+        let (st2, outcome) = LastKnownStore::load(path.clone(), FlushTuning::default());
+        // 文件已随 path_map 落盘但无 devices 记录 → Loaded(0)。
+        assert_eq!(outcome, LoadOutcome::Loaded(0));
+        assert_eq!(
+            st2.path_map_unit_id(r"\\?\hid#vid_046d#c532#m1"),
+            Some("UID-M1B".to_string())
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fr1_path_map_old_file_compat() {
+        // 旧版文件（无 path_map 字段）：加载成功、映射为空、不损坏。
+        let path = fr1_tmp();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"devices":[{"physical_key":"pk1","display_name":"D","percent":50,"charging":false,"last_seen":100,"source":"poll"}]}"#,
+        )
+        .unwrap();
+        let (st, outcome) = LastKnownStore::load(path.clone(), FlushTuning::default());
+        assert_eq!(outcome, LoadOutcome::Loaded(1));
+        assert!(st.path_map_unit_id(r"\\?\any").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fr1_path_map_cap_fifo_eviction_and_empty_reject() {
+        let path = fr1_tmp();
+        let mut st = LastKnownStore::with_tuning(path.clone(), FlushTuning::default());
+        for i in 0..(MAX_PATH_MAP_ENTRIES + 5) {
+            assert!(st.note_path_map(&format!(r"\\?\p{i}"), &format!("UID-{i}")));
+        }
+        assert_eq!(st.path_map.len(), MAX_PATH_MAP_ENTRIES);
+        // 最老 5 条被 FIFO 淘汰。
+        for i in 0..5 {
+            assert!(st.path_map_unit_id(&format!(r"\\?\p{i}")).is_none());
+        }
+        assert!(st.path_map_unit_id(r"\\?\p5").is_some());
+        // 空值拒绝。
+        assert!(!st.note_path_map("", "UID"));
+        assert!(!st.note_path_map(r"\\?\x", ""));
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
     use std::fs;
 
@@ -595,6 +748,7 @@ mod tests {
         let file = LastKnownFile {
             version: SCHEMA_VERSION,
             devices,
+            path_map: BTreeMap::new(),
         };
         fs::write(
             dir.join(STORE_FILE_NAME),
