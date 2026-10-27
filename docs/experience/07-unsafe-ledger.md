@@ -9,8 +9,10 @@
 
 ## 计数口径
 
-- 统计方式：`grep -rn 'unsafe' volttray/crates/*/src/*.rs`，人工剔除非代码命中
+- 统计方式：`grep -rna 'unsafe' volttray/crates/*/src/*.rs`，人工剔除非代码命中
   （注释 / 文档中的 "unsafe" 字样，如 `autostart.rs` L278–279 的说明性 doc 注释）。
+  `-a` 不可省：含多字节字符的 rs 文件会被 grep 判为二进制，不加 `-a` 时报
+  "binary file matches" 而漏数（2026-10-26 实测 main.rs 不加 `-a` 即误判）。
 - 实测总数 **96 处**＝69 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
   `unsafe extern "system" fn`（后者为 windows crate 回调签名要求）。
 - 终审报告口径为「90 处」，台账初建（2026-10-24）实测 97，差 7；差异未
@@ -18,7 +20,10 @@
   披露，不影响逐块登记的完整性。
 - 变更注记（2026-10-25 复核）：main.rs / single.rs 重构净减、export.rs 新增入册，
   实测总数 97→96，本表已同步；以最新实测为准。
-- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（96）。任一处新增 /
+- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（96）。精确核验命令：
+  `grep -ra 'SAFETY(E9)' volttray/crates | wc -l`（2026-10-26 实测＝96）；字面「全仓 grep」
+  会把经验库文档自身引用计入（本台账 5 处、[06](06-release-reconciliation.md) 引用 1 处，合计 6 处，得 102）而误判漂移，故范围必须限定 `volttray/crates`。
+  本命令固化进 [06](06-release-reconciliation.md) F.1 发布对账复核项引用。任一处新增 /
   删除 unsafe 代码，必须同批增删对应 SAFETY 注释并更新本台账。
 
 ## 分布（按文件）
@@ -41,7 +46,8 @@
 ## 注释约定
 
 - 每处 unsafe 正上方一行 `// SAFETY(E9): <不变量>`，内容为该处成立所依赖的
-  指针生命周期 / 句柄有效性 / 对齐与容量 / 所有权与线程契约。
+  指针生命周期 / 句柄有效性 / 对齐与容量 / 所有权与线程契约。注释属于整个
+  item：注释与 `fn` 之间允许隔 attribute 行（唯一既有例外登记：`settings.rs` `create_ctl`）。
 - 对「转调已注释函数」的调用点（如 settings.rs 中 edit_text /
   handle_color_pick 的调用点），注释指向被调函数的不变量，不重复展开。
 - 注释是登记而非背书：后续改动若破坏不变量，先更新注释再改码，评审时对账。

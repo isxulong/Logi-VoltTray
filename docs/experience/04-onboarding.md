@@ -29,9 +29,8 @@ Logi-VoltTray/
     ├── RELEASES.md           # 各版本发布说明（v0.3.6 起；最新版本可能滞后，见 §10）
     ├── docs/
     │   └── decisions.md      # 实现决策记录 D-01 起至实尾（以 decisions.md 实载为准；最重要的单一文档）
-    ├── fixtures/             # 协议黄金样例与测试数据（golden/、battery_map_cases.json、
-    │                         # features.json、voltage_curves.json 及生成脚本 gen_golden.py）
-    ├── fuzz/                 # cargo-fuzz 模糊测试入口（fuzz_targets/frame_fuzz.rs，打协议帧解析）
+    ├── fixtures/             # 协议黄金样例与测试数据（清单以实载为准；golden/ 由 gen_golden.py 生成，勿手改）
+    ├── fuzz/                 # cargo-fuzz 模糊测试入口（fuzz_targets/ 下多个 target，清单以 fuzz/Cargo.toml 实载为准；含打协议帧解析的 frame_fuzz）
     ├── assets/volttray.ico
     └── crates/
         ├── protocol/         # HID++ 纯编解码：无 I/O、不依赖系统时间，黄金样例 + proptest
@@ -61,7 +60,7 @@ cargo build --release --locked -p volttray-tray
 ### 本地与 CI 工具导读
 
 - **verify.sh（本地一键自检）**：仓库根 `bash verify.sh`（`--quick` 跳过交叉编译 check）一键跑 PR 门禁三件套——`cargo fmt --check` / `clippy -D warnings` / `cargo test --locked`——外加 release 目标交叉编译 check 与 commit trailer 契约 lint（提示模式）。脚本只读、不改任何文件；覆盖范围声明见脚本头注释（windows 真机环境、协议冻结 python 测试等不在其覆盖范围，完整门禁以 CI 为准）。
-- **fuzz（协议帧模糊测试）**：`volttray/fuzz/`（cargo-fuzz），目标 `frame_fuzz` 打协议帧解析，本地跑 `cargo fuzz run frame_fuzz`（需 nightly 工具链）；`.github/workflows/nightly.yml` 每晚自动跑 5 分钟真实烟测，失败自动开单。「30 晚」时钟自该 workflow 合入日起算，判据与时钟挂载见 [06 F.1](06-release-reconciliation.md)。
+- **fuzz（模糊测试）**：`volttray/fuzz/`（cargo-fuzz），target 清单以 `fuzz/Cargo.toml` 实载为准（含打协议帧解析的 `frame_fuzz`）；nightly 仅自动跑 `frame_fuzz`（`.github/workflows/nightly.yml` 每晚 5 分钟真实烟测，失败自动开单），其余 target 本地按需自跑（`cargo fuzz run <target>`，需 nightly 工具链）。「30 晚」时钟自该 workflow 合入日起算，判据与时钟挂载见 [06 F.1](06-release-reconciliation.md)。
 - **fixtures 再生成**：协议黄金样例与测试数据由 `volttray/fixtures/gen_golden.py` 生成（产出 `fixtures/golden/` 向量等），协议编解码行为改动后重跑该脚本再生成，勿手改 golden 文件。
 - **git 端点失效时的核对 / 推送范式**：沙箱或受限网络下 github.com 的 git 端点可能 502 / TLS 不可用——一律改走 api.github.com：读取用 codeload tarball 或 REST API，全量核对 commit / tag target 用 Git Data API（blobs → tree → commit → update ref，fast-forward、绝不 force push）。该范式经 2026-10-25 经验库红蓝对抗修订批 A/B 双方独立互证（611 commits 全核、结论一致），作为可复用经验段落入册。
 - **audit.yml 周检结果查看**：cargo audit 供应链周检（`.github/workflows/audit.yml`，每周一跑），结果在仓库 Actions 页的 audit 工作流运行记录中查看；扫描失败或发现漏洞均自动开单（label 查重防噪）。
@@ -120,7 +119,7 @@ cargo build --release --locked -p volttray-tray
 | `last_enum` | 同一台鼠标出现在多条通道（有线模式枚举出 7 个 USB 接口 MI_00~MI_06、各注册一条）→ 确诊 T6 重复条目（E17），无需再查他处 |
 | `devices` 为空数组 | 不等于 bug：先回第一步确认物理情境（E4） |
 | `devices` 事件流 | 「电量显示不准 / 跳变」类报障：文件夹暂无已定性根因——按 E7 纪律先取证（事件流中的连续读数、电量来源回退路径、版本号与轮询档位），如实标注「未定性」，不凭猜测给用户结论 |
-| 蓝牙/有线诊断导出处理（T-08＝[06](06-release-reconciliation.md) 对账表登记位编号，非操作指令；触发式归因） | 收到 ≥1 份蓝牙或直连（实验性通道）诊断导出 → 按既有原因码归因：RELEASES.md v0.3.9 段五分类（query_timeout / io_error / error_response / no_battery_features / device_gone）＋ diag_export.rs wake miss 子分类（no_path / no_match / ambiguous），结果登记对账表 T-08 行并留痕（验收＝首单登记记录）。**30 天零样本则维持现状披露，不做降级动作**（K-4，不设兜底时钟——不做任何未验证蓝牙/有线代码通路改动） |
+| 蓝牙/有线诊断导出处理（T-08＝[06](06-release-reconciliation.md) 对账表登记位编号，非操作指令；触发式归因） | 收到 ≥1 份蓝牙或直连（实验性通道）诊断导出 → 按既有原因码归因：RELEASES.md v0.3.9 段五分类（query_timeout / io_error / error_response / no_battery_features / device_gone）＋ diag_export.rs wake miss 子分类（D-90 拆分后现行四字段：wake_miss_no_path / wake_miss_zero_match / wake_miss_no_fingerprint / wake_miss_ambiguous），结果登记对账表 T-08 行并留痕（验收＝首单登记记录）。**30 天零样本则维持现状披露，不做降级动作**（K-4，不设兜底时钟——不做任何未验证蓝牙/有线代码通路改动） |
 
 **第三步：定根因、给动作。** 休眠无应答 = 物理事实不是 bug（E3），让用户动一下鼠标即可（v0.3.11 F5 起秒级恢复）；连败 + IO 错误 = 句柄死，走 E2 自愈路径；开机早期 panic = E1，升级到 ≥ v0.3.13；配置异常 = 看启动日志的逐条 warning（红线 5）；同一鼠标在充电时裂出多条重复条目 = T6 已知问题（有线枚举出 7 个 USB 接口所致），主干已按 D-70/D-71 修复（PhysicalKey 物理键去重 + 晋级验明，见 [01 E17](01-engineering-lessons.md#e17-设备身份必须锚定物理设备而不是某次枚举的通道快照)）；**该修复已随 v0.3.16 发布**——对 ≤v0.3.15 的用户可直接建议升级至 ≥v0.3.16（T6 修复本体见 D-70/D-71；v0.3.16 发布说明未单列该修复，发布状态依 v0.3.15…v0.3.16 提交区间核实：修复提交 `5e265e26b0b`、`700ccf80bd0` 在区间内）；开机自启勾选了却不自启 = exe 换版致注册表指向旧路径（v0.3.19 U-7），≥v0.3.19 启动期自动对账修复，旧版本手动关→开一次即可。
 
@@ -170,7 +169,7 @@ cargo build --release --locked -p volttray-tray
 
 ## 10. 已知文档滞后点（以代码为准）
 
-- 根 README 下载区滞后核销机制：找最新版本先看 GitHub Releases 页，再对 `volttray/RELEASES.md`；每次发布对账时按此复核并登记核销项（最新核销：2026-10-24 核指向 v0.3.23；上一次 2026-10-23 核指向 v0.3.21）。对账断档如实登记：v0.3.22 / v0.3.23 的逐项对账当批未补齐，欠账与原因见 [06](06-release-reconciliation.md) 头部与 [HANDOVER](../HANDOVER.md) §3 待办，不留白。
+- **「最新版本」唯一权威口径**：找最新版本先看 GitHub Releases 页——本句为全仓「最新版本」口径的唯一权威声明，其余文档出现的版本裸数一律非权威、以该页为准（HANDOVER 侧裸数同步由维护者终审时执行）。根 README 下载区滞后核销机制：先看 GitHub Releases 页，再对 `volttray/RELEASES.md`；每次发布对账时按此复核并登记核销项（最新核销：2026-10-24 核指向 v0.3.23；上一次 2026-10-23 核指向 v0.3.21）。对账断档如实登记：v0.3.22 / v0.3.23 的逐项对账当批未补齐，欠账与原因见 [06](06-release-reconciliation.md) 头部与 [HANDOVER](../HANDOVER.md) §3 待办，不留白。
 - 决策范围上界表述曾滞后：D-84（版本窗口计划）2026-10-23 登记进 `decisions.md` 后，本文件与 AGENTS.md 中的决策记录范围上界（原止于 D-83）未同步回写——2026-10-23 已全仓更新为含 D-84。该类滞后 2026-10-24 随 D-85~D-90 追加当日复发一次（当日再次回写）；教训：上界一律以 `decisions.md` 实尾为准，不写死裸数。本条登记为「机制声明与机制实效脱节」元教训的实例——声明「即日消除」并不能阻止同类滞后复发，自限语比一次性修复更可靠。
 - 轮询档位曾长期存在文档旧口径（60/300/600/900/1800 秒），现已统一为 `crates/app/src/config.rs` 的 `POLL_TIERS_SECS = [300, 600, 1800, 3600, 7200]`（5/10/30/60/120 分钟）、`DEFAULT_POLL_SECS = 1800`（D-66）。文档与代码冲突时**永远以代码 + RELEASES.md 为准**。
 - 「30 秒槽位扫描」旧文档表述为「每 30 秒例行枚举」，实际是嵌在枚举循环内、外层每次迭代才查门限：空闲时一个轮询周期至多扫一次（v0.3.15 起文档口径已修正，定性见 [01 E18](01-engineering-lessons.md#e18-托盘应用性能审查先定性每个周期唤醒几次查几次画几次再谈优化)）。
@@ -206,5 +205,5 @@ cargo build --release --locked -p volttray-tray
 
 1. 读本文件 + 根 README，装环境跑通构建与全量测试；
 2. 通读 `decisions.md` 的 D-15 ~ D-22（协议实证）与 D-33 / D-65 ~ D-69（休眠与重连主线）、D-70 ~ D-71（设备身份与 T6 修复）、D-72 起至实尾（v0.3.16–v0.3.19 设计包落地与发布修复主线；上界以 decisions.md 实载为准），理解主战场；
-3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部条目（以 [README 索引](README.md#e-编号总索引) 为准，2026-10-25 实测 01 含 24 条），其中高优先级标注条目（当前为 01 头部点名的三大事故 E1 / E2 / E3；逐条优先级标注由维护者定标后补齐）优先吸收，把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
+3. 读 [01 工程经验教训](01-engineering-lessons.md) 全部条目（条目范围以 [README 索引](README.md#e-编号总索引) 为准），其中高优先级标注条目（当前为 01 头部点名的三大事故 E1 / E2 / E3；逐条优先级标注由维护者定标后补齐）优先吸收，把 E1 / E2 / E3 对应的代码（`reconnect.rs`、`diag_export.rs`）实地看一遍；
 4. 接到用户报障时先走 §7 排查入口；领任务前读 [02 协作方法论](02-collaboration-playbook.md)，交付前照 [03 门禁清单](03-release-quality-gate.md) 自查。

@@ -9,8 +9,9 @@
 | --- | --- | --- | --- |
 | A1 | 版本号升级为**独立 chore 提交** | workspace `Cargo.toml` 的 `workspace.package.version` + `Cargo.lock` 同步，只动版本 | 版本号夹在业务提交里顺手改 |
 | A2 | tag 指向该 chore 提交（已知例外登记见 [01 E5 注](01-engineering-lessons.md)：v0.3.19 的 tag 实际指向 clippy fix-forward 提交 48676bf138c9） | `git ls-remote --tags` 或 API 比对 tag 的 commit sha | tag 指在 chore 之前的提交上 |
-| A3 | tag 与发布 diff 内**无业务代码混入** | 对 tag 与上一 tag 做 diff，确认只有版本号与 lock 变化 | 「顺手修个小问题」混入发布 |
+| A3 | tag 与发布 diff 内**无业务代码混入** | 对 tag 指向的 chore 提交与其父提交做 diff，确认仅含版本号 / lock / 发布说明类文件（非「tag 对上一 tag」——后者跨全部中间提交，字面不可执行） | 「顺手修个小问题」混入发布 |
 | A4 | 版本号一处修改、全仓生效 | 确认 workspace 统一 `version.workspace = true`，无 crate 单独漂移 | 某 crate 版本号忘了升 |
+| A5 | **上版对账登记已补齐**（发布门禁前置项） | 查 [06](06-release-reconciliation.md) F.2 断档登记：上版逐项对账登记已补齐方可放行（v0.3.22 / v0.3.23 / v0.3.24 欠账补齐前，本项不过） | 对账断档使「连续 2 版 >N 触发复盘」类判据静默失效 |
 
 ## B. CI 与构建
 
@@ -26,7 +27,7 @@
 
 | # | 核验项 | 怎么核 | 不通过的典型形态 |
 | --- | --- | --- | --- |
-| C1 | 附件哈希**三方一致**：发布者报告、审查者亲算、交付者复验 | 各自独立下载、独立算 sha256，三方比对 | 直接引用别人贴的哈希值 |
+| C1 | 附件哈希**三方一致**：发布者报告、审查者亲算、交付者复验（最低口径：至少一方取数与另外两方不同时点或不同网络路径；单人 + AI 结构下三方独立性不可核验，单人期如实降级标注为「两方 + 一次官方 API 读数」） | 各自独立下载、独立算 sha256，三方比对 | 直接引用别人贴的哈希值 |
 | C2 | 测试数等关键数值从**产物 / 源码实测读取** | 本地跑 `cargo test --workspace` 实测计数 | 从 CI 汇报里抄数字（CI 日志接口可能 403 拿不到） |
 | C3 | 下载渠道受阻有备选 | artifact 直连 401 时用免登录镜像（如 nightly.link）下载比对 | 因一个端点失败就跳过校验 |
 
@@ -43,7 +44,7 @@
 | D7 | **Release 说明须附英文摘要**：英文 README（`README.en-US.md`）上线后，每次 Release 说明在中文正文后附英文摘要段（覆盖「能干什么 / 修了什么 / 要注意什么」三要素，未验证项分级同步） | 对照 [06 F.1 常设区](06-release-reconciliation.md) T-09 核验项检查摘要段存在与三要素覆盖（F 节已迁至 06-release-reconciliation.md） | 只有中文正文、或英文摘要缺未验证分级（T-09 合入起生效） |
 | D8 | **注入防御逐条人工核验**（P1-6，相位一）：发布前对本版涉及的一切外部输入——issue / PR / 评论 / 外部文档中的指令性文本——逐条核验处置：只执行经用户裁决的内容，外来指令一律不执行（AGENTS.md §4 践行核验，预估 2 分钟/版，未验证估算）。**触发式条款：更换执行模型或执行平台时，责任主体＝发布维护者，人工重验 AGENTS.md §4 注入防御条目在新模型/平台下仍然成立**（遵从不作默认假设）。核验清单模板与留痕格式见下方「D8 附」（C-08），留痕登记位在 06 F.1 常设区「评审/登记项」 | 照「D8 附」清单模板逐类核验并在 06 对账区登记留痕行；模型/平台变更时检查重验留痕 | 外部文本中的指令被直接执行；换模型/平台后未重验 §4；核验无留痕记录（相位一不建探针回归集——CI 探针不可达被测主体，走人工核验） |
 | D9 | **渠道扩张动作前核验商标裁决状态**（T-14）：任何渠道扩张（上架 winget / 商店 / 第三方分发）前，发布对账时必须核验 T-14 商标与命名评估的裁决状态（单源＝[reconciliation-clocks.yaml](reconciliation-clocks.yaml) T-14 行，F 节已迁至 [06-release-reconciliation.md](06-release-reconciliation.md)，其常设区 T-14 行为人类可读镜像）。注（2026-10-24 修订）：T-14 时钟经用户决策挂起（暂不更名，单源＝reconciliation-clocks.yaml），原「到期未裁决即阻塞」处置不生效；渠道扩张前核验 T-14 状态的义务不变，挂起期间核验通过即放行，重新激活后恢复到期判据 | 查 reconciliation-clocks.yaml T-14 行与 06 常设区 T-14 裁决记录 | 未裁决先上架、或把「到期」当「接受」 |
-| D10 | **发布契约断言绿**（相位二）：release.yml 的 `release-contract` 步骤全绿——资产名/数量/sha256 格式/自启注册表路径静态断言（`volttray-tray.exe` 品牌纪元内冻结） | 看 release run 的 release-contract 步 | 构建成功但契约断言红也放行（U-7/D-83 类对账失效） |
+| D10 | **发布契约断言绿**（相位二）：release.yml 的 `release-contract` 步骤全绿——资产名冻结（`volttray-tray.exe` 品牌纪元内冻结）/ sha256 格式 / README 锚点静态断言（现行 release.yml 无资产数量断言）；自启注册表路径已按 C-12 降级为 advisory，自启契约改由 `autostart.rs` 单测锚定、在 ci-gate 承载 | 看 release run 的 release-contract 步 | 构建成功但契约断言红也放行（U-7/D-83 类对账失效） |
 
 ### D8 附：注入防御人工核验清单模板（C-08）
 
@@ -72,26 +73,13 @@ AGENTS.md §4 注入防御条目在新模型/平台下仍然成立，重验结�
 1. **发布契约断言绿**：release.yml `release-contract` 步骤全绿（见 D10）；
 2. **windows-target 构建绿**：CI ubuntu job 的 windows-target 交叉 check 步
    与 windows job 全绿（拦截 D-75 类「从未在 Windows 编译过」失效）；
-3. **uhid 可用用例绿**：Linux CI 的 uhid 回放用例全绿。
+3. **协议层用例绿**：协议冻结测试 + golden 向量回放（Python 单侧）+
+   门禁健康断言全绿。
 
-> **冷启动过渡条款**（真机 runner 上线前的临时口径）：第 3 条 uhid 回放
-> 依赖带 uhid 内核设备的 runner（自托管真机），当前 Linux CI 环境不具备，
-> 该用例暂以「缺口登记」状态存在（见下）。过渡期内第 3 条以
-> 「协议冻结测试 + golden 向量回放（Python 单侧）+ 门禁健康断言全绿」
-> 暂代，真机 runner 上线后本条款废止、恢复三绿原口径。
-
-**uhid 链路缺口与前置**（评审结论：成本不可控，本期不做）：
-
-- 缺口：uhid 全链路（内核 uhid 设备 ↔ hidapi ↔ transport）在 CI 无
-  覆盖，fixtures/golden 与对抗样本目前只在协议编解码层（纯 Rust/Python）
-  回放，未覆盖内核设备层。
-- 前置：自托管 Linux runner（uhid 内核模块 + /dev/uhid 可写）；
-  在 transport 层加 uhid 虚拟设备 fixture 回放 golden 与对抗样本。
-- 评审点：真机 runner 上线排期确定时，在发布对账时重估本项。
-- 排期登记（2026-10-23）：真机 runner **待用户完成 v0.3.21 真机测试后
-  回报再排期**；soak 冷启动过渡条款维持不变——过渡期内第 3 条仍以
-  「协议冻结测试 + golden 向量回放（Python 单侧）+ 门禁健康断言全绿」
-  暂代，真机 runner 上线后恢复三绿原口径。
+> 缺口事实注记（2026-10-27 修订）：uhid 内核设备层（内核 uhid 设备 ↔
+> hidapi ↔ transport）在 CI 无覆盖，golden 与对抗样本仅覆盖协议编解码层。
+> 原第 3 条「uhid 可用用例绿」、冷启动过渡条款与 uhid 自托管真机 runner
+> 排期经用户裁决删除（2026-10-27），第 3 条自该日起以协议层用例口径常驻。
 
 ## E. 收口
 
@@ -121,7 +109,7 @@ AGENTS.md §4 注入防御条目在新模型/平台下仍然成立，重验结�
 
 P2-7（相位一）：删除类调用的静态模式检查以 **report-only** 形态挂 CI——`ci.yml` `redline-guard-advisory` job（`continue-on-error: true`，仿 actionlint advisory 先例，红只在 run 页留痕、不阻断任何提交）。检查项：① 裸调用（`std::fs::remove_file` / `remove_dir` / `remove_dir_all` 未经 `let _ =` 兜底）；② 删除调用同行参数命中用户文件路径特征（config_dir / data_dir / home_dir / 用户）。红线锚点：E20「绝不自动删除用户文件」。
 
-**基线**（2026-10-22 本地实测，方法与 job 内一致）：`volttray/crates` 内删除类调用共 54 处（含 `tray/src/main.rs` 8 处，该文件须 `grep -a` 否则被二进制误判漏检），全部 `let _ =` 兜底形态，①② 均 0 命中；裸调用与用户路径命中的正向捕获能力已经注入用例反向自证。
+**基线**：`volttray/crates` 内删除类调用全部 `let _ =` 兜底形态，①② 均 0 命中；裸调用与用户路径命中的正向捕获能力已经注入用例反向自证。计数基线见当版发布对账（06）备注列——2026-10-26 实测 60 处、`main.rs` 0 处；原基线行「54 处、含 main.rs 8 处」为 2026-10-22 时点值，其中 main.rs 命中系二进制误判的沙箱伪影（须 `grep -a`，口径与 ci.yml E1 勘误一致；计数口径细则见 07 台账）。此注即计数修订留痕。
 
 **命中 / 误报统计口径**：每版发布对账时读取该期 `redline-guard-advisory` run 页——命中数＝①+② 报出的行数；误报数＝人工复核确认安全的行数；误报率＝误报数÷命中数（命中数为 0 记「无命中」）。结果记入 06 度量登记行表的**备注列**，不新增指标。已知误报/漏报源（复核时按此豁免、不另开单）：多行续行（调用拆行后首行含 `let _ =`、续行不含，会被①误报）；同一行混合兜底形态（裸调用与兜底调用同行，①会漏报）——两者都指向「行级静态检查的固有边界」，升级评审时一并权衡。
 
@@ -140,7 +128,7 @@ P2-7（相位一）：删除类调用的静态模式检查以 **report-only** �
 | 构建期 | 某平台从未编译过（D-75 类） | 该 target 的交叉 `cargo check` 进 CI | ci.yml ubuntu job windows-target 步 |
 | 发布契约 | 资产名/数量漂移、sha256 缺失、自启路径写错（U-7/D-83 类） | 发布流水线静态断言（不跑真机） | release.yml `release-contract` 步（D10） |
 | 协议层 | 编解码行为漂移 | 黄金向量 + 冻结测试（纯编解码，零硬件） | `python -m unittest discover -s tests` + fixtures/golden |
-| 运行时硬件 | 真机握手/唤醒/枚举失效 | 真机 runner 或 uhid 回放（最贵，最后上） | 缺口登记见 D+ 节，真机 runner 上线前排期评审 |
+| 运行时硬件 | 真机握手/唤醒/枚举失效 | CI 无硬件覆盖（缺口注记见 D+ 节），靠协议层门禁拦截 + 真机手动复验兜底 |
 
 原则：失效在哪一层发生，就在那一层的门禁拦——下层门禁绿了不代表上层
 安全（Linux 全绿 ≠ Windows 能编译），上层门禁也不必为下层已拦的失效
