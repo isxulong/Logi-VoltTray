@@ -5,7 +5,7 @@
 # （fmt --check / clippy -D warnings / test --locked）＋ release 目标交叉编译 check
 # ＋ commit trailer 契约 lint（提示模式）＋ 只读 diff 报告。
 # 本脚本【不】宣称复现完整 CI 门禁：windows-latest 真机环境、winres 图标嵌入、
-# protocol freeze python unittest、release/nightly workflow 行为均不在覆盖范围。
+# protocol freeze python unittest、release/nightly workflow 行为、CI 侧 blocking 门禁 fuzz-smoke 与 decisions-append-only、microbench 基准均不在覆盖范围（2026-10-27 裁决扩列：本地自查定位为推送前快速自检，fuzz/bench/git 历史检查属 CI 语义，不纳入本地必跑）。
 # 对账表见 docs/experience/06-release-reconciliation.md F 节（F.1 常设区 / F.2 本期对账区；人工维护，本脚本只读、不覆盖写）。
 #
 # 用法：bash verify.sh [--quick]        # --quick 跳过交叉编译 check

@@ -198,11 +198,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 第 0 步（实施令裁决）：actionlint 提示模式——先跑完本期、实测误报率后再
-      # 评审升必过（评审项已登记进 docs/experience/06-release-reconciliation.md F.1 常设区）。
-      - name: actionlint (advisory mode)
+      # actionlint 已于 2026-10-27 升必过（维护者授权主 AD 裁定；依据：v0.3.22–v0.3.24
+      # 三个发布窗口实测零告警、误报率为零；留痕见 docs/experience/06-release-reconciliation.md F.1/F.2）。
+      - name: actionlint
         uses: raven-actions/actionlint@v2
-        continue-on-error: true
 
   # E20（红蓝对抗终审 P2b 批，2026-10-24）：纯逻辑链 criterion 微基准进 CI。
   # 首版口径（终审报告 E20 条目原文）：只跑数、不设阈值门禁——先把三条
