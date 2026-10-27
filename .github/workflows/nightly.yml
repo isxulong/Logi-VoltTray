@@ -389,7 +389,7 @@ jobs:
           missing_E=$(comm -13 <(printf '%s\n' "$defs_E") <(printf '%s\n' "$refs_E"))
           echo "定义 $(printf '%s\n' "$defs_E" | wc -l) 条；引用 $(printf '%s\n' "$refs_E" | wc -l) 个编号"
           if [ -n "$missing_E" ]; then
-            echo "缺失定义：$(printf '%s ' $missing_E)"
+            echo "缺失定义：${missing_E//$'\n'/ }"
             fail=1
           else
             echo "（引用全部有定义）"
@@ -400,7 +400,7 @@ jobs:
           missing_D=$(comm -13 <(printf '%s\n' "$defs_D") <(printf '%s\n' "$refs_D"))
           echo "定义 $(printf '%s\n' "$defs_D" | wc -l) 条；引用 $(printf '%s\n' "$refs_D" | wc -l) 个编号"
           if [ -n "$missing_D" ]; then
-            echo "缺失定义：$(printf '%s ' $missing_D)"
+            echo "缺失定义：${missing_D//$'\n'/ }"
             fail=1
           else
             echo "（引用全部有定义）"
@@ -411,8 +411,8 @@ jobs:
           # 节标题唯一：`## 大写字母.` 不得重复（防双 G 节撞号）
           dup_sec=$(grep -oE '^## [A-Z]\.' docs/experience/03-release-quality-gate.md | sort | uniq -d || true)
           if [ -n "$dup_D" ] || [ -n "$dup_sec" ]; then
-            [ -n "$dup_D" ] && echo "重复 D 编号：$(printf '%s ' $dup_D)"
-            [ -n "$dup_sec" ] && echo "重复节标题：$(printf '%s ' $dup_sec)"
+            [ -n "$dup_D" ] && echo "重复 D 编号：${dup_D//$'\n'/ }"
+            [ -n "$dup_sec" ] && echo "重复节标题：${dup_sec//$'\n'/ }"
             fail=1
           else
             echo "（D 编号与节标题均唯一）"

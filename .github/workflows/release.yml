@@ -176,7 +176,8 @@ jobs:
           # PATH 双保险：GITHUB_PATH 跨步生效是主路径；此处再显式补一遍
           # （cygpath 转 POSIX，避免 Windows 盘符冒号切碎 PATH），
           # 使本步不依赖跨步 PATH 传递机制的细节。
-          export PATH="$(cygpath -u "$RUNNER_TEMP")/minisign-bin/minisign-win64/x86_64:$PATH"
+          PATH="$(cygpath -u "$RUNNER_TEMP")/minisign-bin/minisign-win64/x86_64:$PATH"
+          export PATH
           minisign -v
           # 契约：启用签名必须同步提交公钥（用户验签入口，README 验证段引用）
           test -f ../minisign.pub || { echo "::error::已配置签名密钥但仓库根缺 minisign.pub 公钥——启用批次必须同步提交公钥"; exit 1; }
