@@ -41,6 +41,50 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.25
+
+充电三态「立即刷新」菜单文案（红蓝对抗 E 终审签发方案逐字落地，决策 D-91）＋ tier_interval 注释对齐实际行为（U-2）。本版无配置默认值变化、无新增配置键、无新增迁移标记；零轮询行为变更，菜单固定项数不变（仍 9 项）。
+
+### 用户可见变化
+
+1. **「立即刷新」菜单文案按充电态区分**（实验开关「充电时加快刷新（15 秒）」默认开启、未改默认值；关闭时文案逐字回现状，无残留）：修复「鼠标充电时菜单显示配置间隔（如 30 分钟）、实际 15 秒」的显示与实际节拍脱节问题。以配置 30 分钟为例——
+   - 不充电（逐字不变）：`立即刷新（当前间隔 30 分钟）`
+   - 全部在排程设备均在充电（含单设备充电）：`立即刷新（当前间隔 15 秒·充电中，常规 30 分钟）`
+   - 部分设备充电（任意占比）：`立即刷新（当前间隔 30 分钟 · 充电快档 15 秒）`
+
+   资格谓词为 DeviceState 枚举逐变体穷尽比对（Sleeping／Disconnected 不排程显式排除，防未来新增设备状态时静默放行）；实验开关入菜单签名（第 9 分量）＋ GuiState 镜像＋对账环回填，开关翻转即时触发菜单重建。档外配置值仍按 FR-7 追加「（非标准档）」标注，该口径零变化；「15 秒」快档值取 core.rs `POLL_CHARGING` 常量单一真值，快档常量未来调整时文案自动跟随。
+
+### 工程与质量（开发者向摘要）
+
+- **tier_interval 注释修正（U-2）**：core.rs 注释对齐实际行为——「已断连但快照残留充电标记」的设备实际返回 15 秒快档节拍（断连设备真实排程由 gone 路径摘除，该返回值在该场景下不被实际消费，经红蓝对抗核实不构成现行缺陷），纯注释修正、零行为变化。
+- **CI 布局修复（commit 4aa5cb79）**：menu_sig_tests 测试模块移至 main.rs 文件尾部，消除 ubuntu clippy items_after_test_module——纯测试布局移位，零断言改动。
+- **测试基线**：CI run 40702084478（head 4aa5cb79，2026-10-28）job 日志实测全绿——ubuntu 435 项、windows 489 项测试通过（windows 侧含三态文案断言与固定项 9 回归）；fmt / clippy -D warnings / fuzz-smoke / microbench / redline-guard-advisory 全过，decisions-append-only 按预期跳过。发版证据见「验证口径」。
+
+### 已知项声明（D3 红线状态）
+
+- **E10 独占窗口未启动（在册未修复项，随下一代码窗口处理）**：① P0——wake-force 重枚举：0 注册槽位时每 5s 全量扫槽，且 force 轮清死槽冷却与 0xFF 负缓存，结构性穿透既有降频成果（D-67 违规形态的 6 倍频率），修复方向＝退避＋不穿透缓存；② P1——在线灰显装填探测绕开轮询档（5s 冷却 ≈0.2Hz，E18 同族），修复方向＝并入 per-device 节流。本版全部改动位于显示层／注释层，零设备 I/O，D-33 逐条合规。
+- **U-1（用户决策挂起）**：双独立复核一席长期不可用时的替补规则未定，临时口径＝批次挂起＋主动推送等用户裁决；不影响本版发布内容。
+- **托盘状态滞后观感**：休眠后托盘状态滞后最长约 60 分钟——已实证鼠标休眠正常、属解释性说明（E10 窗口登记），非本版缺陷修复项。
+- **微基准阈值门禁未设**（v0.3.23 已知项顺延，待基线积累后评审）。
+
+### 验证口径与未验证项分级（D2）
+
+- **CI 实测（一级证据）**：本版代码末提交 4aa5cb79 的 check-runs 经 GitHub Actions API 实测全绿；v0.3.25 版本 chore 提交后的 CI run 与 tag 触发的 release.yml run（ci-gate 复用 CI 全门禁 → verify-tag-on-main → build-release 含 release-contract 断言与 minisign 签名自验）以实际 run 结果为准，逐项留痕于 docs/experience/06 发布对账当版区。
+- **未验证（如实分级）**：发布执行环境为 Linux 沙箱、无法本地跑 Windows Rust 构建——构建、签名与发布契约证据一律取自 CI run 的 API 实测，不引用任何缓存副本；三态文案实际显示、开关翻转触发菜单重建、部分充电混合态观感未在 Windows 真机验证。
+- **用户可见面登记（E44 口径）**：README（中英双语）菜单描述保留基线形态「立即刷新（当前间隔 N 分钟 / N 小时）」，未随三态条件文案扩展——登记为遗留观察项，是否补充条件文案说明待维护者裁决。
+
+### 升级注意事项（D4）
+
+- 本版无配置默认值变化、无新增迁移标记；`config.toml` 格式零变化，退出旧版后启动新版即可。实验开关「充电时加快刷新（15 秒）」为既有开关（默认开启），本版未改其默认值与配置键名。
+
+### 下载与安装注意
+
+本软件 EXE 未经商业代码签名，Windows SmartScreen 首次运行可能提示「Windows 已保护你的电脑」——点「更多信息」→「仍要运行」即可。这是未签名软件的常态提示，非病毒告警（已决策不采购代码签名证书，拦截为已接受状态）。Release 附 `volttray-tray.exe.minisig` 签名文件（自 v0.3.23 起启用），可选验签：`minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig`（公钥 `minisign.pub` 在仓库根目录）；sha256 核验照旧：`Get-FileHash .\volttray-tray.exe -Algorithm SHA256`。
+
+### English Summary
+
+v0.3.25 ships the charging-aware three-state "Refresh now" tray menu label (the signed-off red/blue adversarial verdict, decision D-91) plus a comment-only fix aligning tier_interval's doc comment with actual behavior (U-2). User-facing: with the experimental switch "faster refresh while charging (15 s)" (on by default, unchanged) enabled, the tray menu's refresh item now reflects the actual polling cadence instead of showing the configured interval while a device is charging — the configured interval is kept verbatim as a "regular …" annotation; three states: no device charging (label verbatim unchanged), all scheduled devices charging, and partially charging; turning the switch off reverts the label verbatim with no residue. No config default changes, no new config keys, no migration markers, no polling-behavior changes, and the fixed menu item count stays at 9. Engineering: eligibility is decided by an exhaustive per-variant DeviceState match (Sleeping/Disconnected explicitly excluded so future new states cannot slip through silently), the experimental switch now participates in the menu content signature (9th component) with a GuiState mirror and reconciliation backfill, and flipping the switch triggers an immediate menu rebuild; the tier_interval comment fix is documentation-only (a disconnected device with a stale charging snapshot does return the 15 s fast tier, but its real schedule is removed by the gone path, so the value is never consumed there); a CI-only fix moved the menu signature test module to the end of main.rs (layout-only, zero assertion changes). Test baseline measured from CI run 40702084478 logs: 435 tests passed on ubuntu, 489 on windows. Unverified, stated plainly: the release environment cannot build Windows Rust binaries locally, so build, signing, and release-contract evidence is taken from the GitHub Actions API (runs measured directly, no cached copies); the actual on-screen rendering of the three label states and the switch-flip menu rebuild have not been verified on a physical Windows machine. Known issues disclosed: the E10 exclusive window has not started — the P0 wake-force re-enumeration (5s full-slot scans at zero registered slots, punching through dead-slot cooldown and the 0xFF negative cache) and the P1 grayed-out-online probing bypass remain in the ledger; the dual-review substitute rule (U-1) stays pending user decision. Note: the EXE is not Authenticode-signed, so Windows SmartScreen may warn on first run — choose "More info" → "Run anyway"; verify downloads with the shipped `.minisig` (public key `minisign.pub` at the repo root) or the `.sha256.txt` checksum.
+
 ## v0.3.24
 
 RB2 修复批（FR-1~13）＋统计 HTML 报告重构批＋P2 修复批＋轮询间隔人性化显示＋小修批五项缺陷修复，叠加经验库红蓝对抗修订批与协作规则文档批（docs-only，不产生运行时行为变化）。本版无配置默认值变化、无新增迁移标记；数据文件 `last_known.json` schema v1 追加 `path_map` 字段（`#[serde(default)]`，旧文件双向兼容）。
@@ -134,7 +178,7 @@ v0.3.24 ships the RB2 fix batch (FR-1 through FR-13) on top of the statistics HT
 
 v0.3.23 lands the red/blue adversarial-review improvement series (items E1–E24) and enables minisign release signing. User-facing: three fixes from physical-machine sleep feedback — sleeping devices now show the last known battery grayed out with the number rendered (instead of "--"), HID++1 0x8F/0x08 replies are judged as sleep rather than generic failures, and wake attribution gains a single-candidate VID/PID fallback plus a new wake-recovery-via-reenumeration telemetry counter; receiver ghost-slot (0x01) and dead-slot (0x08) handling fixed so charge/offline false alarms no longer repeat every polling round; diagnostics export capacity raised (256→2048 events, 200→4096 log tail lines, about 2 h of coverage); config saves now preserve unknown keys; CSV export hardened (atomic writes, formula-injection guard); font names with quotes/backslashes no longer corrupt config.toml. Engineering: fuzz targets for battery/stats/config parsers with a blocking PR-level smoke job; structured redaction registry with field-level diff audit; release signing chain (fail-open when the key is absent, fail-closed self-verification when present — this is the first signed release); reconciliation clocks migrated to structured YAML; criterion micro-benchmarks in CI (no threshold gate yet, pending baseline accumulation). Known issues: a pre-existing latent panic when adding a tier while the trailing threshold is already 99 is pinned by a `#[should_panic]` test and scheduled for the next batch (unchanged legacy behavior). Note: the EXE is not Authenticode-signed, so Windows SmartScreen may warn on first run — choose "More info" → "Run anyway"; verify downloads with the shipped `.minisig` (public key `minisign.pub` at the repo root) or the `.sha256.txt` checksum.
 
-## 后续版本（已登记待办，自 v0.3.24 窗口移交）
+## 后续版本（已登记待办，自 v0.3.25 窗口移交）
 
 - **登记来源**：PR #15 质检复核 P2 三项，经评估移入后续版本（v0.3.23 窗口仅修 P0-1／P1-1 与红蓝对抗整改批，见 v0.3.22 / v0.3.23 节）。
 - ① roundtrip 派生字段覆盖（质检 P2：往返测试对派生字段断言不足）。
