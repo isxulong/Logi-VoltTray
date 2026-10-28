@@ -38,6 +38,7 @@ HID++ 通信、托盘图标绘制、右键菜单既有语义、电量显示、�
 - **新依赖准入**：先跑 `cargo audit`，再评估 `cfg` 条件与平台影响，最后在 PR 描述中说明引入理由。
 - **工具链锁定**：`rust-toolchain.toml` 钉 1.90.0，勿在贡献中升级。
 - **触及 `cfg(windows)` 代码**：推送前必须做 Windows target 本地交叉验证（门禁 B5；CI ubuntu job 也有 windows-target check 步兜底）。
+- **经验 / 决策编号以仓内索引为准**：经验条目编号（E-xx）的权威索引是 `docs/experience/README.md`「E 编号总索引」，决策编号（D-xx）的权威是 `volttray/docs/decisions.md`；引用编号遇到断链时以该索引为准，不凭记忆补号、不凭印象扩号。
 
 ## 发版流程
 

@@ -42,7 +42,7 @@
 | --- | --- | --- | --- |
 | `EnumSnapshot.at_ms` / `forced` / `candidate_channels` / `registered_slots` | 枚举时刻数值 | 无 | 无需覆盖 |
 | `EnumSnapshot.error`（skip） | 枚举过程错误 `e.to_string()`（hidapi init/枚举错误原文） | 错误原文可能含设备路径 → 形态上属 `C:\Users\<段>` 即被规则一全文覆盖；hidapi Windows 错误文本一般不含用户名 | 规则一兜底覆盖 |
-| `ChannelEnumResult.key` | `format!("{:04X}|{}", pid, tag)`（`hid_impl.rs` L159） | 实例指纹段（同 tag），无用户名/路径/设备名 | 不命中两规则；维持现状（同 tag 处置） |
+| `ChannelEnumResult.key` | `format!("{:04X}|{}", pid, tag)`（`hid_impl.rs` `ChannelInfo::key()`） | 实例指纹段（同 tag），无用户名/路径/设备名 | 不命中两规则；维持现状（同 tag 处置） |
 | `ChannelEnumResult.pid` | `format!("0x{:04X}", pid)` | 硬件 PID | 无需覆盖 |
 | `ChannelEnumResult.tag` | `path_tag(d.path())`：HID 实例路径 `#` 分隔第二段去 `&ColNN` 后缀（`hid_impl.rs` L164-174） | **必查点一**，见第三节 | 不命中两规则（形态无 `C:\Users`、非设备名）；处置见第三节 |
 | `ChannelEnumResult.open` | 固定枚举：`"ok"` / `"failed"` / `"cached"` / `"reopened"` / `"cached-reopen-failed"`（`main.rs` 事件循环内三处构造点，行号以当版代码为准） | 无 | 无需覆盖 |
@@ -53,7 +53,7 @@
 
 **① `ChannelEnumResult.tag`（BTHHID 蓝牙实例 ID 形态）**
 
-BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID_b01a#9&1c2d3e4f&0&0000#{4d1e55b2-...}`——`path_tag` 取 `#` 分隔第二段，即 `9&1c2d3e4f&0&0000`。USB 形态同构：`7&DEADBEEF&0&0001`。
+BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` 测试内的 BTHHID 路径常量）：`\\?\BTHHID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID_b01a#9&1c2d3e4f&0&0000#{4d1e55b2-...}`——`path_tag` 取 `#` 分隔第二段，即 `9&1c2d3e4f&0&0000`。USB 形态同构：`7&DEADBEEF&0&0001`。
 
 评估：不含用户名、不含文件路径、不含设备产品名；是 Windows 生成的设备实例 ID（同设备跨导出稳定，**可作设备指纹**）。敏感度等同 VID/PID 序列号级——用于排障的核心信息（通道 key 配对、同型号去重、BTHHID 降级判断均依赖）。
 
@@ -67,7 +67,7 @@ BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{0000
 
 **③ `log_tail.lines`（设置类日志）**
 
-覆盖判定：**路径形态已覆盖**——bootlog 全部消息模板本轮逐一核验（`main.rs` 中 `bootlog::note` 调用共 88 处，含 `format!` 模板、多行构造与常量字符串；原稿误写「22 个 `format!` 模板 + 10 个常量字符串 = 32 处」，R1 评审更正，88 为批⑤合入时 `rg -c 'bootlog::note'` 对 main 现状实测——该数为时点快照；复核请重跑 `rg -c 'bootlog::note' volttray/crates/tray/src/main.rs`（2026-10-26 修订批实测：main.rs 101 处、全 crates 118 处，此注即计数漂移留痕）），含路径的模板两处：`persist {key} to {} failed: {e}`（settings 写回失败，目标为 APPDATA 下配置文件）与 `default config persist to {} failed: {e2}`（默认配置落盘失败，main.rs L2410；原稿漏数此模板，R1 评审更正），均命中规则一；其余模板为状态码/计数/错误消息，不含用户名。**bootlog 当前不记录设备名**（模板核验结论）。
+覆盖判定：**路径形态已覆盖**——bootlog 全部消息模板本轮逐一核验（`main.rs` 中 `bootlog::note` 调用共 88 处，含 `format!` 模板、多行构造与常量字符串；原稿误写「22 个 `format!` 模板 + 10 个常量字符串 = 32 处」，R1 评审更正，88 为批⑤合入时 `rg -c 'bootlog::note'` 对 main 现状实测——该数为时点快照；复核请重跑 `rg -c 'bootlog::note' volttray/crates/tray/src/main.rs`（2026-10-26 修订批实测：main.rs 101 处、全 crates 118 处，此注即计数漂移留痕）），含路径的模板两处：`persist {key} to {} failed: {e}`（settings 写回失败，目标为 APPDATA 下配置文件）与 `default config persist to {} failed: {e2}`（默认配置落盘失败，`main.rs` 日志模板 `default config persist to {} failed: {e2}`；原稿漏数此模板，R1 评审更正），均命中规则一；其余模板为状态码/计数/错误消息，不含用户名。**bootlog 当前不记录设备名**（模板核验结论）。
 
 残余（F-A2 裁决遗留，诚实登记）：observer 锁中毒时 `device_names` 收集为空、规则二失效。该残余在 lines 侧的**当前实际暴露为零**（bootlog 模板不含设备名），但**未来防线**存在缺口：若后续新增记录设备名的 `bootlog::note` 调用，该设备名不受规则二保护（锁中毒场景下）。处置：①不硬堵（F-A2 裁决：真正兜底是本审计）；②本节作为该缺口的登记位——后续新增 bootlog 消息模板若含设备名/用户名，须回本表补行并评估是否追加规则；③第五节回归测试对「字段集漂移」的强制同步不覆盖「消息模板漂移」，后者依赖本登记与人工对账。
 
@@ -78,6 +78,7 @@ BTHHID 路径实证（`wakechannel.rs` L153-155 测试内）：`\\?\BTHHID#{0000
 | 锁中毒时规则二失效（T-02a 已登记，F-A2 裁决不硬堵） | events 侧：锁中毒时 `devices` 本身降级为空数组，无设备名可泄；lines 侧：当前模板无设备名，实际暴露为零 | 本审计第三节③为登记位；对账表（06 文档 F 节）T-02b 行跟踪 |
 | `tag`/`key`/`id` 设备实例指纹未脱敏 | 低（无个人身份信息） | 维持现状，可选后续项进对账滚动（第三节①） |
 | bootlog 未来新增模板可能引入新泄露面 | 中期漂移风险 | 第三节③登记位 + 人工对账 |
+| 非 C 系统盘路径不脱敏（redact 规则一硬编码 `C:\Users\` 前缀，非 C 盘路径不命中） | 中：非 C 盘下的用户目录名会原样留在导出与日志文本里 | 现状登记，本批不改码；盘符泛化（A–Z 枚举＋golden 回归保护）按 P2 条件触发（收到非 C 盘报障时启动） |
 
 未发现需要**立即追加** redact 规则的新泄露点：三处必查点中 ①为低敏感维持现状、②③已被现有规则全文级覆盖。
 

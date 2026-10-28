@@ -9,7 +9,8 @@
 1. 先读本文件（工作方式与红线）；
 2. 再读 `docs/experience/04-onboarding.md`（项目全貌、构建、红线清单、报障排查入口）；
 3. 再读根 `README.md`（产品功能与用户视角行为）；
-4. 最后读任务点名的材料（按任务指定）。
+4. 涉及代码 / 发布的工作，开工前再读 `docs/HANDOVER.md` §2 状态快照（当前进展与在册未发版内容）；
+5. 最后读任务点名的材料（按任务指定）。
 
 **第一原则：证据优于自述。** 任何数字、状态、行为结论以仓库实测（代码、commit、CI、GitHub Releases 页）为准，不抄旧文档、不凭记忆。
 
@@ -59,12 +60,16 @@
 | `docs/experience/05-diag-export-field-audit.md` | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
 | `docs/experience/06-release-reconciliation.md` | 发布对账机制与本期对账表（内部维护区） |
 | `docs/experience/07-unsafe-ledger.md` | unsafe 代码台账（红蓝对抗改进项 E9），改动 unsafe 代码前后同步核对 |
-| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 起、上界以 decisions.md 实尾为准（2026-10-25 实测 D-90）的决策记录，改代码前必读相关条目 |
+| `volttray/docs/decisions.md` | 「为什么代码长这样」——D-01 起、上界以 decisions.md 实尾为准的决策记录，改代码前必读相关条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
 | `CONTRIBUTING.md` | 提交规范、PR 自检清单与行为红线 |
 | `SECURITY.md` | 安全问题报告渠道、范围声明与供应链 |
 | `verify.sh` | 本地推送前一键三件套自检（fmt / clippy / test + 交叉 check），用法见 `docs/experience/04-onboarding.md` §3 工具导读 |
 
+**本表为子集**：这里只列高频入口，不是完整导航——经验库完整文档清单见 [`docs/experience/04-onboarding.md` §9 关键文档导航](docs/experience/04-onboarding.md#9-关键文档导航)（含本知识库索引 `docs/experience/README.md` 与治理时钟单源 `docs/experience/reconciliation-clocks.yaml`）。
+
 **分工声明**：本文件（AGENTS.md）＝工作方式约定（怎么干活、红线与授权边界）；`docs/HANDOVER.md`＝状态口径（当前进展、在册红线项、欠账与待办）。两者互补不重叠，冲突时工作状态以 HANDOVER 为准、工作方式以本文件为准。
 
-**动线约定**：「首次接手」以 `docs/HANDOVER.md` 冷启动阅读顺序为唯一权威；「日常上手」以本文件 §1 启动序列为唯一权威——两条动线各司其职，不存在第三套顺序。
+**动线约定**：「首次接手」以 `docs/HANDOVER.md` 冷启动阅读顺序为唯一权威；「日常上手」以本文件 §1 启动序列为唯一权威——两条动线各自唯一权威，其余文档中的阅读顺序均为场景补充，不构成第三套顺序。
+
+**入口判据**：本任务属于**首次接手本仓库**（新会话 / 新 AI / 未读过状态口径）→ 走 `docs/HANDOVER.md` 冷启动阅读顺序；本任务属于**已在本仓库日常干活**（已知项目与红线，只做具体改动）→ 走本文件 §1 启动序列。判不准时按「是否已在本仓库做过至少一次实际改动」判定：否 → 首次接手线；是 → 日常上手线。

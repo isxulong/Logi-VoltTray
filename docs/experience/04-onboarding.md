@@ -75,6 +75,7 @@ cargo build --release --locked -p volttray-tray
 
 - 全量测试计数（**口径 + 取数命令**形态，D3 修复：数字随时点漂移，引用前重取、不落历史定值）：
   - **源码静态口径**：`grep -rc '#\[test\]' volttray/crates --include='*.rs' | awk -F: '{s+=$2} END {print s}'` —— 2026-10-22 实测 **390**（含 `cfg(windows)` 专属与各平台条件编译项；静态计数 ≠ 任何单一平台的运行时测试数）；
+  - **最近实测 476（2026-10-28 红蓝对抗局复核）**，引用前重取、以最新实跑为准；
   - **平台实测口径**：目标平台实跑 `cargo test --workspace --locked` 计数——Windows CI（windows-latest）为全量，Linux 侧因 `cfg(windows)` 条件编译而少于全量；引用时写明平台与取数日期；
   - 每个关键数字须**两条独立取数路径且结果一致**（跨口径换算见 [02 E22](02-collaboration-playbook.md#e22-红蓝对抗编排进阶裁决注入断点防御时序核对取数口径) 取数口径段；门禁 C2：测试数从产物 / 源码实测读取，不从汇报抄）。
 - 测试文化：每个真机事故的修复都伴随「能区分旧行为」的回归测试（例：D-64 的红态证据测试——分档模式 map 无 Default 键，正是真机日志卡点）。
@@ -152,12 +153,14 @@ cargo build --release --locked -p volttray-tray
 | [`docs/ai-orchestration.md`](../ai-orchestration.md) | 多智能体编排规则：派单规程、巡检清单、双独立复核条款 |
 | `volttray/docs/decisions.md`（D-01 起至实尾，以 decisions.md 实载为准） | 「为什么代码长这样」——每个偏差 / 裁决的证据与理由，改代码前必读相关 D 条目 |
 | `volttray/RELEASES.md` | 各版本修了什么、怎么修的、未验证项 |
+| [本知识库 README（索引与维护约定）](README.md) | 经验条目一句话索引、编号总索引、增补戳口径与维护约定（增补戳口径见「维护约定」） |
 | [本知识库 01](01-engineering-lessons.md) | 事故教训三段式 |
 | [本知识库 02](02-collaboration-playbook.md) | 证据优于自述、红蓝对抗、收口纪律等协作方法论（条目范围以 [README 索引](README.md#e-编号总索引) 为准） |
 | [本知识库 03](03-release-quality-gate.md) | 发布前逐条核验 |
 | [本知识库 05](05-diag-export-field-audit.md) | 诊断导出 JSON 逐字段泄露面审计（T-02b） |
 | [本知识库 06](06-release-reconciliation.md) | 发布对账机制与本期对账表（内部维护区，外部读者可忽略） |
 | [本知识库 07](07-unsafe-ledger.md) | unsafe 代码台账（红蓝对抗改进项 E9），改动 unsafe 代码前后同步核对 |
+| [本知识库 reconciliation-clocks.yaml](reconciliation-clocks.yaml) | 治理时钟单源（T-05 / T-14 / T-09 的起算日、到期日、状态、责任主体）；06 F.1 表为人类可读镜像，两处冲突以 YAML 为准 |
 | [`docs/naming-risk-assessment.md`](../naming-risk-assessment.md) | 商标与命名 go/no-go 评估载体（T-14，结论待维护者裁决） |
 | [`CONTRIBUTING.md`](../../CONTRIBUTING.md) | 贡献指南：提交规范、PR 自检清单与行为红线 |
 | [`SECURITY.md`](../../SECURITY.md) | 安全策略：报告渠道、范围声明与供应链 |

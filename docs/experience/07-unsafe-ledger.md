@@ -10,14 +10,17 @@
 ## 计数口径
 
 - 统计方式：`grep -rna 'unsafe' volttray/crates/*/src/*.rs`，人工剔除非代码命中
-  （注释 / 文档中的 "unsafe" 字样，如 `autostart.rs` L278–279 的说明性 doc 注释）。
-  `-a` 不可省：含多字节字符的 rs 文件会被 grep 判为二进制，不加 `-a` 时报
-  "binary file matches" 而漏数（2026-10-26 实测 main.rs 不加 `-a` 即误判）。
+  （注释 / 文档中的 "unsafe" 字样，如 `autostart.rs` 内以「实现说明」开头的说明性 doc 注释）。
+  `-a` 不可省：防短读伪影，**与 E1 勘误口径一致**（`ci.yml`「src files must not be judged binary (E1)」2026-10-24 字节级实测：源文件本身干净、GNU grep 对文件内容的判定是确定的；此前「main.rs 含会被 grep 误判为二进制的字节序列」的说法系本地沙箱网络盘短读伪影，须以 `-a` 兜住，不归因于「文件含多字节字符」）。
+- 剔除步骤已固化为命令（不靠人工记忆、不靠行号记忆）：
+  `grep -rna 'unsafe' volttray/crates/*/src/*.rs | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)' | wc -l`
+  —— 过滤掉整行以 `//` 或 `/*` 开头的注释行（SAFETY 注释与说明性 doc 注释）；
+  2026-10-28 实测＝96，与下表逐文件小计逐行一致（settings 46 / main 11 / statsexport 10 / export 6 / rawinput 5 / bootlog 5 / autostart 5 / icon 3 / single 2 / aumid 2 / timelocal 1）。
 - 实测总数 **96 处**＝69 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
   `unsafe extern "system" fn`（后者为 windows crate 回调签名要求）。
-- 终审报告口径为「90 处」，台账初建（2026-10-24）实测 97，差 7；差异未
-  逐条回溯（报告统计时点与当时基线之间可能存在代码漂移），作为已知差异
-  披露，不影响逐块登记的完整性。
+- 口径勘误（2026-10-28 红蓝对抗局复核）：终审报告口径「90 处」为**旧口径**，
+  以台账最新实测（当前 96）为准；差异未逐条回溯（报告统计时点与当时基线之间
+  可能存在代码漂移），作为已知差异披露，不影响逐块登记的完整性。
 - 变更注记（2026-10-25 复核）：main.rs / single.rs 重构净减、export.rs 新增入册，
   实测总数 97→96，本表已同步；以最新实测为准。
 - 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（96）。精确核验命令：
