@@ -85,6 +85,209 @@ pub fn request_restart() {
 #[cfg(windows)]
 pub const RESTART_CHILD_ENV: &str = "LOGIVOLTTRAY_RESTART_CHILD";
 
+/// 菜单内容签名：任一分量变化即触发 set_menu 重建（v0.3.3 P3-1 缓解）。
+/// R1-F2（T-04③ 修复）：签名并入 `enum_failure_hint`（枚举失败摘要）——
+/// 失败候选出现/消失本身即触发重建，兜底提示行不再依赖其余分量变化
+/// 才出现。分量与重建分支（build_menu + append_direct_enum_failure_hint）
+/// 一一对应，新增分量须同步两处。
+/// 第 9 分量 `x{fast_enabled}`（充电快档实验开关）：开关翻转即改变
+/// FastPollState 三态判定与「立即刷新」文案，须触发重建。
+/// 纯字符串逻辑，置于 crate root（无 cfg 门控）使签名回归测试在
+/// Linux 侧可跑（照 frame_lru / wakesampler 跨平台先例）。
+#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+fn menu_content_sig(
+    pinned: Option<&str>,
+    poll_secs: u64,
+    blink_enabled: bool,
+    autostart_on: bool,
+    silent: bool,
+    default_id: Option<&str>,
+    devices: &[volttray_app::DeviceSnapshot],
+    enum_failure_hint: bool,
+    fast_enabled: bool,
+) -> String {
+    let mut s = format!(
+        "{}|p{:?}|b{}|a{}|s{}|d{:?}|h{}|x{}",
+        pinned.unwrap_or("-"),
+        poll_secs,
+        blink_enabled,
+        autostart_on,
+        silent,
+        default_id,
+        enum_failure_hint as u8,
+        fast_enabled as u8
+    );
+    for d in devices {
+        s.push_str(&format!(
+            "/{}:{}:{:?}:{}:{}",
+            d.id,
+            d.percent
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into()),
+            d.charging,
+            d.gray,
+            d.state
+        ));
+    }
+    s
+}
+
+/// 菜单签名回归（原 imp::menu_sig_tests 随 menu_content_sig 移至 crate
+/// root，使其在 Linux 侧可跑；既有用例语义零改动，仅按第 9 分量补参）。
+#[cfg(test)]
+mod menu_sig_tests {
+    use super::*;
+
+    fn dev(id: &str, link: &str) -> volttray_app::DeviceSnapshot {
+        volttray_app::DeviceSnapshot {
+            id: id.into(),
+            name: id.into(),
+            percent: Some(80),
+            charging: false,
+            link: link.into(),
+            state: "online".into(),
+            gray: false,
+            source: None,
+            physical_key: None,
+            is_virtual: false,
+            last_seen: None,
+        }
+    }
+
+    /// R1-F2 锁定①：同分量输入 → 签名逐字节相等（不触发重建）。
+    #[test]
+    fn same_inputs_yield_same_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let a = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let b = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        assert_eq!(a, b);
+    }
+
+    /// R1-F2 锁定②（T-04③ 主场景）：其余分量不变、仅枚举失败摘要
+    /// 翻转（新快照含失败候选）→ 签名不同 → 触发菜单重建，兜底提示行
+    /// 随 rebuild 出现。修复前该布尔不进签名，主场景下兜底行不触发。
+    #[test]
+    fn enum_failure_flip_changes_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let base = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let with_failure = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            true,
+            false,
+        );
+        assert_ne!(base, with_failure);
+    }
+
+    /// R1-F2 锁定③：空设备列表下失败摘要翻转同样改变签名
+    /// （兜底行恰在「无 direct 行」时出现，空列表是其典型现场）。
+    #[test]
+    fn enum_failure_flip_changes_sig_with_empty_devices() {
+        let base = menu_content_sig(None, 60, false, false, false, None, &[], false, false);
+        let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true, false);
+        assert_ne!(base, with_failure);
+    }
+
+    /// 第 9 分量锁定①（本方案）：其余分量不变、仅充电快档实验开关
+    /// 翻转 → 签名必变（FastPollState 三态随开关切换，文案须重建）。
+    #[test]
+    fn fast_poll_flag_flip_changes_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let base = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let with_fast = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            true,
+        );
+        assert_ne!(base, with_fast);
+    }
+
+    /// 第 9 分量锁定②（本方案）：仅设备 charging 翻转 → 签名必变
+    /// （charging 是 FastPollState 资格谓词的输入，菜单文案随之分态）。
+    /// 既有回归同守：charging 本就进逐设备分量，此处锚定不回退。
+    #[test]
+    fn charging_flip_changes_sig() {
+        let base_devs = vec![dev("m1", "btle")];
+        let mut charging_dev = dev("m1", "btle");
+        charging_dev.charging = true;
+        let a = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &base_devs,
+            false,
+            false,
+        );
+        let b = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &[charging_dev],
+            false,
+            false,
+        );
+        assert_ne!(a, b);
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::collections::HashSet;
@@ -120,10 +323,10 @@ mod imp {
     use volttray_app::diag_export::{ChannelEnumResult, EnumSnapshot};
     use volttray_app::{
         identity_confirmed, pick_promotion, repin, wake_action, wake_arm_set, Alert, AliasSlot,
-        AppCore, ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition, Observer,
-        PollDecision, Reconnect, SharedObserver, SlotOutcome, SlotScanFailure, SlotScanStreak,
-        Snapshot, TimeoutOutcome, UpsertOutcome, WakeAction, HANDLE_INVALIDATE_THRESHOLD,
-        SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
+        AppCore, ChannelLiveness, Config, ConfigWatcher, DeadSlotScan, EnumTransition,
+        FastPollState, Observer, PollDecision, Reconnect, SharedObserver, SlotOutcome,
+        SlotScanFailure, SlotScanStreak, Snapshot, TimeoutOutcome, UpsertOutcome, WakeAction,
+        HANDLE_INVALIDATE_THRESHOLD, SLOT_SCAN_REOPEN_THRESHOLD, WAKE_PROBE_INVALIDATE_THRESHOLD,
     };
     use volttray_device::battery::{
         probe_battery, probe_battery_with_policy, UnknownDiagPolicy, UnknownReason,
@@ -2582,6 +2785,9 @@ mod imp {
         icon_font: IconFontColor,
         icon_family: String,
         poll_secs: u64,
+        /// 充电快档实验开关镜像（本方案）：配置侧开关翻转经签名第 9
+        /// 分量触发菜单重建，文案随 FastPollState 三态变化。
+        experimental_fast_poll: bool,
         blink_enabled: bool,
         low_threshold: u8,
         /// 分档着色镜像（v0.3.3 #4）：阈值数组 + 颜色数组，热重载生效。
@@ -2612,6 +2818,7 @@ mod imp {
                 icon_font: cfg.icon_font_color,
                 icon_family: cfg.icon_font_family.clone(),
                 poll_secs: cfg.poll_interval_secs,
+                experimental_fast_poll: cfg.experimental_per_device_polling,
                 blink_enabled: cfg.blink_enabled,
                 low_threshold: cfg.low_threshold,
                 tiers_enabled: cfg.icon_font_tiers_enabled,
@@ -2955,6 +3162,13 @@ mod imp {
                 }
             }
         };
+        // 充电快档三态（本方案）：启动点设备列表为空 → fast_poll_state
+        // 恒 Off（无在排程设备），与首帧菜单一起在首个 Snapshot 到达时经
+        // 签名分量重建为实际态。
+        let fast_state = core
+            .lock()
+            .map(|c| c.fast_poll_state(state.experimental_fast_poll))
+            .unwrap_or(FastPollState::Off);
         let (menu_obj, mut ids) = build_menu(
             &[],
             None,
@@ -2963,6 +3177,7 @@ mod imp {
             state.blink_enabled,
             state.autostart_on,
             state.silent,
+            fast_state,
         );
         bootlog::stage("tray-build");
         let tray = match TrayIconBuilder::new()
@@ -3204,6 +3419,7 @@ mod imp {
                     || cfg.icon_font_color != state.icon_font
                     || cfg.icon_font_family != state.icon_family
                     || cfg.poll_interval_secs != state.poll_secs
+                    || cfg.experimental_per_device_polling != state.experimental_fast_poll
                     || cfg.blink_enabled != state.blink_enabled
                     || cfg.low_threshold != state.low_threshold
                     || cfg.notification_silent != state.silent
@@ -3219,6 +3435,7 @@ mod imp {
                     state.icon_font = cfg.icon_font_color;
                     state.icon_family = cfg.icon_font_family.clone();
                     state.poll_secs = cfg.poll_interval_secs;
+                    state.experimental_fast_poll = cfg.experimental_per_device_polling;
                     state.blink_enabled = cfg.blink_enabled;
                     state.low_threshold = cfg.low_threshold;
                     state.silent = cfg.notification_silent;
@@ -3387,7 +3604,7 @@ mod imp {
         // 非 tick 的 pump 只在内容变化（快照/配置/DPI）时重绘——事件
         // 驱动后不再存在「每 500ms 无条件刷新」的常驻开销。
         if snap_changed || (phase_tick && outcome.blinking) {
-            refresh_ui(tray, state, cache, ids, enum_snap);
+            refresh_ui(tray, state, cache, ids, enum_snap, core);
         }
 
         // 托盘图标事件：仅「左键按下」停闪（M11「单击停闪」原意）。
@@ -3405,7 +3622,7 @@ mod imp {
                 }
             );
             if stop_blink_click && state.blink.acknowledge_click() {
-                refresh_ui(tray, state, cache, ids, enum_snap);
+                refresh_ui(tray, state, cache, ids, enum_snap, core);
             }
         }
 
@@ -3459,7 +3676,7 @@ mod imp {
                     "menu toggle: blink_enabled -> {}",
                     state.blink_enabled
                 ));
-                refresh_ui(tray, state, cache, ids, enum_snap);
+                refresh_ui(tray, state, cache, ids, enum_snap, core);
             } else if e.id == ids.autostart {
                 let now_on = if state.autostart_on {
                     autostart::disable().is_ok()
@@ -3472,7 +3689,7 @@ mod imp {
                 }
                 persist_bool(cfg_path, "autostart", state.autostart_on);
                 bootlog::note(&format!("menu toggle: autostart -> {}", state.autostart_on));
-                refresh_ui(tray, state, cache, ids, enum_snap);
+                refresh_ui(tray, state, cache, ids, enum_snap, core);
             } else if e.id == ids.silent {
                 state.silent = !state.silent;
                 if let Ok(mut guard) = cfg_arc.write() {
@@ -3483,7 +3700,7 @@ mod imp {
                     "menu toggle: notification_silent -> {}",
                     state.silent
                 ));
-                refresh_ui(tray, state, cache, ids, enum_snap);
+                refresh_ui(tray, state, cache, ids, enum_snap, core);
             } else if e.id == ids.exit {
                 let _ = cmd_tx.send(IoCmd::Shutdown);
                 // WP-B（I-02 同口径）：等 IO 线程 run_stop + 双 store
@@ -3499,7 +3716,7 @@ mod imp {
                 unsafe { PostQuitMessage(0) };
             } else if let Some((_, dev_id)) = ids.device_rows.iter().find(|(mid, _)| *mid == e.id) {
                 state.pinned = Some(dev_id.clone());
-                refresh_ui(tray, state, cache, ids, enum_snap);
+                refresh_ui(tray, state, cache, ids, enum_snap, core);
             }
         }
 
@@ -3529,53 +3746,13 @@ mod imp {
         s.devices.get(idx)
     }
 
-    /// 菜单内容签名：任一分量变化即触发 set_menu 重建（v0.3.3 P3-1 缓解）。
-    /// R1-F2（T-04③ 修复）：签名并入 `enum_failure_hint`（枚举失败摘要）——
-    /// 失败候选出现/消失本身即触发重建，兜底提示行不再依赖其余分量变化
-    /// 才出现。分量与重建分支（build_menu + append_direct_enum_failure_hint）
-    /// 一一对应，新增分量须同步两处。
-    #[allow(clippy::too_many_arguments)]
-    fn menu_content_sig(
-        pinned: Option<&str>,
-        poll_secs: u64,
-        blink_enabled: bool,
-        autostart_on: bool,
-        silent: bool,
-        default_id: Option<&str>,
-        devices: &[volttray_app::DeviceSnapshot],
-        enum_failure_hint: bool,
-    ) -> String {
-        let mut s = format!(
-            "{}|p{:?}|b{}|a{}|s{}|d{:?}|h{}",
-            pinned.unwrap_or("-"),
-            poll_secs,
-            blink_enabled,
-            autostart_on,
-            silent,
-            default_id,
-            enum_failure_hint as u8
-        );
-        for d in devices {
-            s.push_str(&format!(
-                "/{}:{}:{:?}:{}:{}",
-                d.id,
-                d.percent
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".into()),
-                d.charging,
-                d.gray,
-                d.state
-            ));
-        }
-        s
-    }
-
     fn refresh_ui(
         tray: &tray_icon::TrayIcon,
         state: &mut GuiState,
         cache: &mut IconCache,
         ids: &mut crate::menu::MenuIds,
         enum_snap: &Arc<Mutex<Option<EnumSnapshot>>>,
+        core: &Arc<Mutex<AppCore>>,
     ) {
         let (devices, default_idx) = match &state.snapshot {
             Some(s) => (s.devices.clone(), s.default_device),
@@ -3595,7 +3772,7 @@ mod imp {
                 guard.as_ref().and_then(|g| g.as_ref()),
             )
         };
-        let sig = menu_content_sig(
+        let sig = crate::menu_content_sig(
             state.pinned.as_deref(),
             state.poll_secs,
             state.blink_enabled,
@@ -3604,8 +3781,16 @@ mod imp {
             default_id.as_deref(),
             &devices,
             enum_failure_hint,
+            state.experimental_fast_poll,
         );
         if sig != state.menu_sig {
+            // 充电快档三态（本方案）：持 core 锁按当前设备快照与实验开关
+            // 镜像计算（对账环已有 core.lock() 先例）；锁获取失败退 Off，
+            // 不因菜单重建阻塞 GUI 线程，下个 tick 对账回写后再建。
+            let fast_state = core
+                .lock()
+                .map(|c| c.fast_poll_state(state.experimental_fast_poll))
+                .unwrap_or(FastPollState::Off);
             let (menu_obj, new_ids) = build_menu(
                 &devices,
                 default_id.as_deref(),
@@ -3614,6 +3799,7 @@ mod imp {
                 state.blink_enabled,
                 state.autostart_on,
                 state.silent,
+                fast_state,
             );
             // T-04③：枚举含蓝牙/有线候选且失败、而菜单无 direct 行时，追加禁用态提示行
             if let Ok(guard) = enum_snap.lock() {
@@ -3819,57 +4005,6 @@ mod imp {
             assert!(!r.should_enumerate(now, true));
             r.request_refresh();
             assert!(r.should_enumerate(now, true));
-        }
-    }
-
-    #[cfg(test)]
-    mod menu_sig_tests {
-        use super::*;
-
-        fn dev(id: &str, link: &str) -> volttray_app::DeviceSnapshot {
-            volttray_app::DeviceSnapshot {
-                id: id.into(),
-                name: id.into(),
-                percent: Some(80),
-                charging: false,
-                link: link.into(),
-                state: "online".into(),
-                gray: false,
-                source: None,
-                physical_key: None,
-                is_virtual: false,
-                last_seen: None,
-            }
-        }
-
-        /// R1-F2 锁定①：同分量输入 → 签名逐字节相等（不触发重建）。
-        #[test]
-        fn same_inputs_yield_same_sig() {
-            let devices = vec![dev("m1", "btle")];
-            let a = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
-            let b = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
-            assert_eq!(a, b);
-        }
-
-        /// R1-F2 锁定②（T-04③ 主场景）：其余分量不变、仅枚举失败摘要
-        /// 翻转（新快照含失败候选）→ 签名不同 → 触发菜单重建，兜底提示行
-        /// 随 rebuild 出现。修复前该布尔不进签名，主场景下兜底行不触发。
-        #[test]
-        fn enum_failure_flip_changes_sig() {
-            let devices = vec![dev("m1", "btle")];
-            let base = menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, false);
-            let with_failure =
-                menu_content_sig(None, 60, true, false, false, Some("m1"), &devices, true);
-            assert_ne!(base, with_failure);
-        }
-
-        /// R1-F2 锁定③：空设备列表下失败摘要翻转同样改变签名
-        /// （兜底行恰在「无 direct 行」时出现，空列表是其典型现场）。
-        #[test]
-        fn enum_failure_flip_changes_sig_with_empty_devices() {
-            let base = menu_content_sig(None, 60, false, false, false, None, &[], false);
-            let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true);
-            assert_ne!(base, with_failure);
         }
     }
 }

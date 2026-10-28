@@ -3,13 +3,16 @@
 //! 设备区行不计入额度）。
 //!
 //! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
-//! ── / 立即刷新（当前间隔 {人性化单位，如 30 分钟}）/ 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
+//! ── / 立即刷新（当前间隔 {人性化单位，如 30 分钟}；实验快档生效时
+//! 按充电三态分文案——统一充电形「15 秒·充电中，常规 …」/ 混合形
+//! 「… · 充电快档 15 秒」，见 settings_text::menu_refresh_label）/
+//! 低电闪烁提醒✓ / 通知静音✓ / 开机自启✓ /
 //! ── / 设置… / 导出诊断信息… / 导出耗电统计… / 检查更新（当前 v{X}）/
 //! ── / 退出。
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
-use volttray_app::settings_text::menu_poll_interval_label;
-use volttray_app::DeviceSnapshot;
+use volttray_app::settings_text::menu_refresh_label;
+use volttray_app::{DeviceSnapshot, FastPollState};
 
 /// 菜单项 ID 集合（构建时从 muda 取回，事件匹配用）。
 pub struct MenuIds {
@@ -124,8 +127,13 @@ pub fn append_direct_enum_failure_hint(
 ///
 /// - `poll_secs`：当前轮询间隔（秒），用于「立即刷新（当前间隔 …）」文案
 ///   （M10 可见可调；显示层经 humanize_interval_secs 换算为分钟/小时）；
+/// - `fast_state`：充电快档三态（FastPollState；实验快档生效且存在
+///   符合资格的充电设备时「立即刷新」项分三态文案，见
+///   settings_text::menu_refresh_label——业务判定在 AppCore，此处只收
+///   已判定的状态）；
 /// - `blink`：低电闪烁提醒开关（M11，菜单可直接关）；
 /// - `autostart` / `silent`：沿用 v0.2.0 开关。
+#[allow(clippy::too_many_arguments)]
 pub fn build_menu(
     devices: &[DeviceSnapshot],
     default_device: Option<&str>,
@@ -134,6 +142,7 @@ pub fn build_menu(
     blink: bool,
     autostart: bool,
     silent: bool,
+    fast_state: FastPollState,
 ) -> (Menu, MenuIds) {
     let menu = Menu::new();
     let mut device_rows = Vec::new();
@@ -161,14 +170,10 @@ pub fn build_menu(
     // FR-7（RB2）：按配置真值显示，非 POLL_TIERS_SECS 档位值追加
     // 「（非标准档）」（settings_text::menu_poll_interval_label），避免
     // 手改 config 为档外值时菜单与设置窗口下拉选中档文案矛盾。
-    let refresh = MenuItem::new(
-        format!(
-            "立即刷新（当前间隔 {}）",
-            menu_poll_interval_label(poll_secs)
-        ),
-        true,
-        None,
-    );
+    // 充电三态：实验快档生效时按 fast_state 分三态文案
+    // （settings_text::menu_refresh_label；FR-7 例外条款登记于该函数
+    // 文档注释——配置真值以「常规 …」右注逐字保留）。
+    let refresh = MenuItem::new(menu_refresh_label(poll_secs, fast_state), true, None);
     let blink_item = CheckMenuItem::new("低电闪烁提醒", true, blink, None);
     // v0.3.14：改名澄清语义——该开关实际只控制 toast 提示音
     // （toast.rs 的 <audio silent="true"/>），既不抑制弹通知本身，
@@ -386,7 +391,7 @@ mod t07_tests {
     #[test]
     fn t07_fixed_item_count_is_nine() {
         use tray_icon::menu::MenuItemKind;
-        let (menu, _ids) = build_menu(&[], None, None, 1800, true, true, false);
+        let (menu, _ids) = build_menu(&[], None, None, 1800, true, true, false, FastPollState::Off);
         let fixed = menu
             .items()
             .into_iter()
@@ -403,7 +408,7 @@ mod t07_tests {
     #[test]
     fn t07_check_update_item_text_contains_version() {
         use tray_icon::menu::MenuItemKind;
-        let (menu, ids) = build_menu(&[], None, None, 1800, true, true, false);
+        let (menu, ids) = build_menu(&[], None, None, 1800, true, true, false, FastPollState::Off);
         let text = menu
             .items()
             .into_iter()
@@ -421,5 +426,46 @@ mod t07_tests {
             "文案须含编译期版本号 {}：{text}",
             env!("CARGO_PKG_VERSION")
         );
+    }
+
+    /// 充电三态「立即刷新」项逐字文案（签发稿测试要点 5）：Off/Unified/
+    /// Mixed 三态下 refresh 项文本与 settings_text::menu_refresh_label
+    /// 输出逐字一致；固定项计数回归仍为 9——三态只改写既有 refresh 项
+    /// 纯文案，不新增固定项（M13 上限纪律零破坏）。menu 依赖
+    /// tray-icon，测试由 Windows CI 承载（本文件 cfg(windows) 门控，
+    /// Linux 无法本地编译——属登记的未验证边界）。
+    #[test]
+    fn t07_refresh_item_text_follows_fast_poll_state() {
+        use tray_icon::menu::MenuItemKind;
+        let cases = [
+            (FastPollState::Off, "立即刷新（当前间隔 30 分钟）"),
+            (
+                FastPollState::Unified,
+                "立即刷新（当前间隔 15 秒·充电中，常规 30 分钟）",
+            ),
+            (
+                FastPollState::Mixed,
+                "立即刷新（当前间隔 30 分钟 · 充电快档 15 秒）",
+            ),
+        ];
+        for (state, expected) in cases {
+            let (menu, ids) = build_menu(&[], None, None, 1800, true, true, false, state);
+            let text = menu
+                .items()
+                .into_iter()
+                .find_map(|k| match k {
+                    MenuItemKind::MenuItem(mi) if mi.id() == &ids.refresh => Some(mi.text()),
+                    _ => None,
+                })
+                .expect("refresh 项应存在于固定项区");
+            assert_eq!(text, expected, "三态 refresh 项逐字文案");
+            // 固定项计数回归：三态不改变固定项个数（仍 9）。
+            let fixed = menu
+                .items()
+                .into_iter()
+                .filter(|k| !matches!(k, MenuItemKind::Predefined(_)))
+                .count();
+            assert_eq!(fixed, 9, "三态只改写 refresh 项文案，不新增固定项");
+        }
     }
 }

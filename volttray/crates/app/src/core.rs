@@ -45,6 +45,18 @@ pub enum PollDecision {
     Skip,
 }
 
+/// 充电快档三态（托盘「立即刷新」菜单文案的分态依据；资格口径与
+/// 判定规则见 `AppCore::fast_poll_state`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastPollState {
+    /// 无快档：无符合资格的充电设备，或实验开关关闭。
+    Off,
+    /// 统一快档：全部在排程设备均在充电（含单设备充电）。
+    Unified,
+    /// 混合：部分在排程设备充电（任意占比）。
+    Mixed,
+}
+
 /// `upsert_device` 的结果（T6）：调用方（IO 线程）据此发诊断事件、
 /// 把旧端点槽位标记为别名（跳过轮询 / 不进菜单 / 不 toast）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,7 +137,11 @@ impl DeviceEntry {
 
     /// WP-C（v3 C-1）：本设备当前轮询档——Charging 15s /
     /// Normal 配置档；休眠与虚拟条目不排程（None）。Disconnected
-    /// 归 Normal 档（重枚举前的兜底节奏，实际槽位已随通道移除）。
+    /// 不单独分档——与在线设备同口径按 charging 态取档（实验开关开
+    /// 且 charging=true 时同样返回 Charging 15s 快档）；其真实排程由
+    /// gone 路径摘除（record_failure(gone=true) 落 Disconnected 的
+    /// 同时 next_due=None、槽位随通道移除），本函数返回值在该场景
+    /// 下不被实际消费。
     /// 相位二（第 4 项）：experimental_per_device_polling=false 时充电
     /// 设备不再走 15s 快档、统一按配置档——每设备分档轮询本身是实验
     /// 特性，关闭即退回单档节奏；D-33 休眠零查询不受影响（上面的
@@ -400,6 +416,53 @@ impl AppCore {
 
     pub fn entries(&self) -> &[DeviceEntry] {
         &self.entries
+    }
+
+    /// 充电快档三态判定（托盘「立即刷新」菜单文案的分态依据）。
+    ///
+    /// 资格口径：非虚拟 且 state ∉ {Sleeping, Disconnected} 且
+    /// charging=true——休眠设备不排程不计入；虚拟条目不排程不计入；
+    /// 灰显（派生展示态）不影响计入（与 tier_interval 同口径不看灰显）；
+    /// Disconnected 排除（gone 路径残留快照 charging=true 时若计入，
+    /// 菜单将显示「有快档」而该设备完全不刷新）。DeviceState 枚举穷尽
+    /// 比对、逐变体无通配：未来新增变体时编译失败，强制评审补分支。
+    ///
+    /// 分母 = 在排程设备数（资格口径中的状态要求）：全部在排程设备
+    /// 充电 → Unified，部分 → Mixed，零个 → Off。fast_enabled=false
+    /// （experimental_per_device_polling 关闭）时恒 Off——无残留状态、
+    /// 文案逐字回基线。
+    pub fn fast_poll_state(&self, fast_enabled: bool) -> FastPollState {
+        if !fast_enabled {
+            return FastPollState::Off;
+        }
+        let mut scheduled = 0usize;
+        let mut charging = 0usize;
+        for e in &self.entries {
+            if e.is_virtual {
+                continue;
+            }
+            // 逐变体穷尽比对（无通配）：Sleeping/Disconnected 不排程；
+            // Connected/Online/GrayedOut 在排程（GrayedOut 为派生展示态、
+            // 不落库，防御性计入）。
+            let in_schedule = match e.device.state {
+                DeviceState::Sleeping | DeviceState::Disconnected => false,
+                DeviceState::Connected | DeviceState::Online | DeviceState::GrayedOut => true,
+            };
+            if !in_schedule {
+                continue;
+            }
+            scheduled += 1;
+            if e.device.battery.is_some_and(|b| b.charging) {
+                charging += 1;
+            }
+        }
+        if scheduled == 0 || charging == 0 {
+            FastPollState::Off
+        } else if charging == scheduled {
+            FastPollState::Unified
+        } else {
+            FastPollState::Mixed
+        }
     }
 
     /// A-1b 启动注入：把一条持久化记录播种为虚拟条目。返回是否播种。
@@ -2297,5 +2360,157 @@ mod tests {
         core.entries[0].device.set_state(DeviceState::Sleeping);
         assert_eq!(core.entries[0].tier_interval(&cfg_on), None);
         assert_eq!(core.entries[0].tier_interval(&cfg_off), None);
+    }
+
+    // ===== 充电三态「立即刷新」菜单文案（资格谓词与行为锚定测试）=====
+
+    /// 资格谓词断言用前提：构造一台 Online 且 charging 的设备。
+    fn core_one_charging() -> (AppCore, Instant) {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, true), now);
+        (core, now)
+    }
+
+    /// 资格矩阵①：休眠充电设备不计入——Online+charging 但休眠后，
+    /// 无其他在排程设备 → Off（休眠不排程，即使 charging 残留）。
+    #[test]
+    fn fast_poll_state_sleeping_charging_not_counted() {
+        let (mut core, _) = core_one_charging();
+        core.entries[0].device.set_state(DeviceState::Sleeping);
+        assert_eq!(core.fast_poll_state(true), FastPollState::Off);
+    }
+
+    /// 资格矩阵②：虚拟条目不计入——同上构造但 is_virtual=true → Off。
+    #[test]
+    fn fast_poll_state_virtual_entry_not_counted() {
+        let (mut core, _) = core_one_charging();
+        core.entries[0].is_virtual = true;
+        assert_eq!(core.fast_poll_state(true), FastPollState::Off);
+    }
+
+    /// 资格矩阵③：灰显（派生展示态）充电设备计入——Online+charging、
+    /// last_success 距今已过灰显阈值（is_gray 成立）仍计入 → Unified
+    /// （资格口径与 tier_interval 同源，不看灰显）。
+    #[test]
+    fn fast_poll_state_gray_charging_counted() {
+        let (core, t0) = core_one_charging();
+        let later = t0 + core.gray_threshold_for(&core.entries()[0]) + Duration::from_secs(1);
+        assert!(core.entries()[0].is_gray(later, core.gray_threshold_for(&core.entries()[0])));
+        assert_eq!(core.fast_poll_state(true), FastPollState::Unified);
+    }
+
+    /// 资格矩阵④：Disconnected+charging 不计入——gone 路径残留快照
+    /// charging=true（record_failure 不清 battery）时若计入，菜单将
+    /// 显示「有快档」而该设备完全不刷新（A 找茬 2 实据修正）→ Off。
+    #[test]
+    fn fast_poll_state_disconnected_charging_not_counted() {
+        let (mut core, _) = core_one_charging();
+        core.record_failure("a", true); // gone → Disconnected，charging 残留
+        assert_eq!(core.entries()[0].device.state, DeviceState::Disconnected);
+        assert!(core.entries()[0].device.battery.is_some_and(|b| b.charging));
+        assert_eq!(core.fast_poll_state(true), FastPollState::Off);
+    }
+
+    /// 资格矩阵⑤：flag=false 一律 Off——即使存在符合资格的充电设备。
+    #[test]
+    fn fast_poll_state_flag_false_always_off() {
+        let (core, _) = core_one_charging();
+        assert_eq!(core.fast_poll_state(false), FastPollState::Off);
+    }
+
+    /// 三态归属：全部在排程设备充电 → Unified；部分 → Mixed；零个 → Off。
+    #[test]
+    fn fast_poll_state_classifies_unified_mixed_off() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        // 两个都不充电 → Off。
+        core.record_success("a", reading(50, false), now);
+        core.record_success("b", reading(60, false), now);
+        assert_eq!(core.fast_poll_state(true), FastPollState::Off);
+        // 一个充电 → Mixed。
+        core.record_success("a", reading(50, true), now);
+        assert_eq!(core.fast_poll_state(true), FastPollState::Mixed);
+        // 全部充电 → Unified。
+        core.record_success("b", reading(60, true), now);
+        assert_eq!(core.fast_poll_state(true), FastPollState::Unified);
+    }
+
+    /// 已定案行为锚定（签发稿第二节）：混合形与充电占比无关——
+    /// 「1 充 3 不充」与「3 充 1 不充」均为 Mixed（文案随 fast_poll_state
+    /// 渲染，两形逐字相同）；两台全充电拔一台充电标记 → 由 Unified 切
+    /// Mixed（已接受行为，签名机制下随行重建）。
+    #[test]
+    fn fast_poll_state_mixed_independent_of_ratio() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        for i in 1..=4 {
+            core.upsert_device(dev(&format!("d{i}"), i as u8));
+        }
+        // 1 充 3 不充 → Mixed。
+        for (i, charging) in [(1, true), (2, false), (3, false), (4, false)] {
+            core.record_success(&format!("d{i}"), reading(50, charging), now);
+        }
+        let mixed_1of4 = core.fast_poll_state(true);
+        // 3 充 1 不充 → Mixed（文案渲染层据此输出同一混合形）。
+        for (i, charging) in [(1, true), (2, true), (3, true), (4, false)] {
+            core.record_success(&format!("d{i}"), reading(50, charging), now);
+        }
+        let mixed_3of4 = core.fast_poll_state(true);
+        assert_eq!(mixed_1of4, FastPollState::Mixed);
+        assert_eq!(mixed_3of4, FastPollState::Mixed);
+        // 两台全充电 → Unified；摘除一台充电标记 → Mixed。
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core2.upsert_device(dev("x", 1));
+        core2.upsert_device(dev("y", 2));
+        core2.record_success("x", reading(50, true), now);
+        core2.record_success("y", reading(60, true), now);
+        assert_eq!(core2.fast_poll_state(true), FastPollState::Unified);
+        core2.record_success("y", reading(60, false), now);
+        assert_eq!(core2.fast_poll_state(true), FastPollState::Mixed);
+    }
+
+    /// 快照序列化一致性防御检查（签发稿测试要点 3）：DeviceState 全变体
+    /// name() 逐字断言；快照 state 字段与 name() 同源对照——谓词已不
+    /// 依赖字符串比对，但 String 镜像仍存在于设备行等链路。
+    #[test]
+    fn device_state_name_matches_snapshot_state_strings() {
+        use DeviceState::*;
+        // 全变体 name() 逐字断言（序列化契约）。
+        assert_eq!(Connected.name(), "connected");
+        assert_eq!(Online.name(), "online");
+        assert_eq!(Sleeping.name(), "sleeping");
+        assert_eq!(Disconnected.name(), "disconnected");
+        assert_eq!(GrayedOut.name(), "grayed_out");
+        // 快照 state 字段 = e.device.state.name()：逐变体过 snapshot 对照
+        //（GrayedOut 为派生展示态不落库，此处经直赋防御性对照——
+        // snapshot 序列化链路不得对任一变体名漂移）。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.upsert_device(dev("c", 3));
+        core.upsert_device(dev("d", 4));
+        core.upsert_device(dev("e", 5));
+        core.entries[0].device.state = Connected;
+        core.entries[1].device.state = Online;
+        core.entries[2].device.state = Sleeping;
+        core.entries[3].device.state = Disconnected;
+        core.entries[4].device.state = GrayedOut;
+        let snap = core.snapshot(now);
+        let states: Vec<&str> = snap.devices.iter().map(|d| d.state.as_str()).collect();
+        assert_eq!(
+            states,
+            vec![
+                Connected.name(),
+                Online.name(),
+                Sleeping.name(),
+                Disconnected.name(),
+                GrayedOut.name(),
+            ]
+        );
     }
 }
