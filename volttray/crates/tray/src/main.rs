@@ -133,161 +133,6 @@ fn menu_content_sig(
     s
 }
 
-/// 菜单签名回归（原 imp::menu_sig_tests 随 menu_content_sig 移至 crate
-/// root，使其在 Linux 侧可跑；既有用例语义零改动，仅按第 9 分量补参）。
-#[cfg(test)]
-mod menu_sig_tests {
-    use super::*;
-
-    fn dev(id: &str, link: &str) -> volttray_app::DeviceSnapshot {
-        volttray_app::DeviceSnapshot {
-            id: id.into(),
-            name: id.into(),
-            percent: Some(80),
-            charging: false,
-            link: link.into(),
-            state: "online".into(),
-            gray: false,
-            source: None,
-            physical_key: None,
-            is_virtual: false,
-            last_seen: None,
-        }
-    }
-
-    /// R1-F2 锁定①：同分量输入 → 签名逐字节相等（不触发重建）。
-    #[test]
-    fn same_inputs_yield_same_sig() {
-        let devices = vec![dev("m1", "btle")];
-        let a = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            false,
-            false,
-        );
-        let b = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            false,
-            false,
-        );
-        assert_eq!(a, b);
-    }
-
-    /// R1-F2 锁定②（T-04③ 主场景）：其余分量不变、仅枚举失败摘要
-    /// 翻转（新快照含失败候选）→ 签名不同 → 触发菜单重建，兜底提示行
-    /// 随 rebuild 出现。修复前该布尔不进签名，主场景下兜底行不触发。
-    #[test]
-    fn enum_failure_flip_changes_sig() {
-        let devices = vec![dev("m1", "btle")];
-        let base = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            false,
-            false,
-        );
-        let with_failure = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            true,
-            false,
-        );
-        assert_ne!(base, with_failure);
-    }
-
-    /// R1-F2 锁定③：空设备列表下失败摘要翻转同样改变签名
-    /// （兜底行恰在「无 direct 行」时出现，空列表是其典型现场）。
-    #[test]
-    fn enum_failure_flip_changes_sig_with_empty_devices() {
-        let base = menu_content_sig(None, 60, false, false, false, None, &[], false, false);
-        let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true, false);
-        assert_ne!(base, with_failure);
-    }
-
-    /// 第 9 分量锁定①（本方案）：其余分量不变、仅充电快档实验开关
-    /// 翻转 → 签名必变（FastPollState 三态随开关切换，文案须重建）。
-    #[test]
-    fn fast_poll_flag_flip_changes_sig() {
-        let devices = vec![dev("m1", "btle")];
-        let base = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            false,
-            false,
-        );
-        let with_fast = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &devices,
-            false,
-            true,
-        );
-        assert_ne!(base, with_fast);
-    }
-
-    /// 第 9 分量锁定②（本方案）：仅设备 charging 翻转 → 签名必变
-    /// （charging 是 FastPollState 资格谓词的输入，菜单文案随之分态）。
-    /// 既有回归同守：charging 本就进逐设备分量，此处锚定不回退。
-    #[test]
-    fn charging_flip_changes_sig() {
-        let base_devs = vec![dev("m1", "btle")];
-        let mut charging_dev = dev("m1", "btle");
-        charging_dev.charging = true;
-        let a = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &base_devs,
-            false,
-            false,
-        );
-        let b = menu_content_sig(
-            None,
-            60,
-            true,
-            false,
-            false,
-            Some("m1"),
-            &[charging_dev],
-            false,
-            false,
-        );
-        assert_ne!(a, b);
-    }
-}
-
 #[cfg(windows)]
 mod imp {
     use std::collections::HashSet;
@@ -4072,5 +3917,160 @@ mod restart_request_tests {
             Some(std::ffi::OsStr::new("1")),
             "重启 spawn 必须注入 RESTART_CHILD_ENV=1"
         );
+    }
+}
+
+/// 菜单签名回归（原 imp::menu_sig_tests 随 menu_content_sig 移至 crate
+/// root，使其在 Linux 侧可跑；既有用例语义零改动，仅按第 9 分量补参）。
+#[cfg(test)]
+mod menu_sig_tests {
+    use super::*;
+
+    fn dev(id: &str, link: &str) -> volttray_app::DeviceSnapshot {
+        volttray_app::DeviceSnapshot {
+            id: id.into(),
+            name: id.into(),
+            percent: Some(80),
+            charging: false,
+            link: link.into(),
+            state: "online".into(),
+            gray: false,
+            source: None,
+            physical_key: None,
+            is_virtual: false,
+            last_seen: None,
+        }
+    }
+
+    /// R1-F2 锁定①：同分量输入 → 签名逐字节相等（不触发重建）。
+    #[test]
+    fn same_inputs_yield_same_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let a = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let b = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        assert_eq!(a, b);
+    }
+
+    /// R1-F2 锁定②（T-04③ 主场景）：其余分量不变、仅枚举失败摘要
+    /// 翻转（新快照含失败候选）→ 签名不同 → 触发菜单重建，兜底提示行
+    /// 随 rebuild 出现。修复前该布尔不进签名，主场景下兜底行不触发。
+    #[test]
+    fn enum_failure_flip_changes_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let base = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let with_failure = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            true,
+            false,
+        );
+        assert_ne!(base, with_failure);
+    }
+
+    /// R1-F2 锁定③：空设备列表下失败摘要翻转同样改变签名
+    /// （兜底行恰在「无 direct 行」时出现，空列表是其典型现场）。
+    #[test]
+    fn enum_failure_flip_changes_sig_with_empty_devices() {
+        let base = menu_content_sig(None, 60, false, false, false, None, &[], false, false);
+        let with_failure = menu_content_sig(None, 60, false, false, false, None, &[], true, false);
+        assert_ne!(base, with_failure);
+    }
+
+    /// 第 9 分量锁定①（本方案）：其余分量不变、仅充电快档实验开关
+    /// 翻转 → 签名必变（FastPollState 三态随开关切换，文案须重建）。
+    #[test]
+    fn fast_poll_flag_flip_changes_sig() {
+        let devices = vec![dev("m1", "btle")];
+        let base = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            false,
+        );
+        let with_fast = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &devices,
+            false,
+            true,
+        );
+        assert_ne!(base, with_fast);
+    }
+
+    /// 第 9 分量锁定②（本方案）：仅设备 charging 翻转 → 签名必变
+    /// （charging 是 FastPollState 资格谓词的输入，菜单文案随之分态）。
+    /// 既有回归同守：charging 本就进逐设备分量，此处锚定不回退。
+    #[test]
+    fn charging_flip_changes_sig() {
+        let base_devs = vec![dev("m1", "btle")];
+        let mut charging_dev = dev("m1", "btle");
+        charging_dev.charging = true;
+        let a = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &base_devs,
+            false,
+            false,
+        );
+        let b = menu_content_sig(
+            None,
+            60,
+            true,
+            false,
+            false,
+            Some("m1"),
+            &[charging_dev],
+            false,
+            false,
+        );
+        assert_ne!(a, b);
     }
 }
