@@ -11,8 +11,8 @@
 
 导出走 `DiagExport::to_json_string_with(&device_names)`：先把**整个结构体** `serde_json::to_string_pretty` 序列化为 JSON 文本，再对**全文**执行 `redact::redact_text`（T-02a，`redact.rs`）。因此两条规则都是**字段无关的全文级**：
 
-- 规则一：`C:\Users\<段>` 的 `<段>` → `<USER>`，JSON 转义形态（`C:\\Users\\`）与原始形态（`C:\Users\`）都识别——任何字段值里出现该形态都会被处理，**不依赖字段名单**；
-- 规则二：设备名按收集顺序 → 「设备N」。设备名由 tray 侧 `export_diag` 在同一次持锁内从事件流 `DiagKind::DeviceFound` 收集（现于 `export.rs`，DeviceFound 收集段 2026-10-26 时点为 L256–263；原锚点「`main.rs` L3344 起」已随组装迁移失效，后续以符号引用 `export.rs` `export_diag` 为准）；锁中毒时收集为空数组，仅规则一生效（T-02a 已登记残余，见第四节）。
+- 规则一：`C:\Users\<段>` 的 `<段>` → `<USER>`，JSON 转义形态（`C:\\Users\\`）与原始形态（`C:\Users\`）都识别——任何字段值里出现该形态都会被处理，**不依赖字段名单**；**G-33 起前缀匹配为 ASCII 大小写不敏感**（`c:\users\` / `C:\USERS\` 等变体同样命中，命中前缀保留原文大小写、只替换用户名段）；
+- 规则二：设备名按收集顺序 → 「设备N」。设备名由 tray 侧 `export_diag` 在同一次持锁内从事件流 `DiagKind::DeviceFound` 收集（现于 `export.rs`，DeviceFound 收集段 2026-10-26 时点为 L256–263；原锚点「`main.rs` L3344 起」已随组装迁移失效，后续以符号引用 `export.rs` `export_diag` 为准）；锁中毒时收集为空数组，仅规则一生效（T-02a 已登记残余，见第四节）；**G-33 起设备名匹配同为 ASCII 大小写不敏感**（日志文本与收集名大小写不一致时同样脱敏）。
 
 另外 `devices` 字段（事件流）在序列化前还有**字段级**帧脱敏：`observer::export_value(true)` 对 `FrameTx`/`FrameRx` 的 `hex` 按 features.json 的 `sensitive_offsets` 遮蔽（`mask_event`，P1-6）。
 
@@ -79,6 +79,7 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 | `tag`/`key`/`id` 设备实例指纹未脱敏 | 低（无个人身份信息） | 维持现状，可选后续项进对账滚动（第三节①） |
 | bootlog 未来新增模板可能引入新泄露面 | 中期漂移风险 | 第三节③登记位 + 人工对账 |
 | 非 C 系统盘路径不脱敏（redact 规则一硬编码 `C:\Users\` 前缀，非 C 盘路径不命中） | 中：非 C 盘下的用户目录名会原样留在导出与日志文本里 | 现状登记，本批不改码；盘符泛化（A–Z 枚举＋golden 回归保护）按 P2 条件触发（收到非 C 盘报障时启动） |
+| ~~大小写变体不命中~~（规则一/二原为大小写敏感精确匹配，`c:\users\` 形态路径与设备名大小写变体可绕过脱敏） | 中：窗口期任何诊断导出/日志分享可能带出未脱敏变体 | **G-33 已修（2026-10-31，本行即核销留痕）**：规则一前缀与规则二设备名均改 ASCII 大小写不敏感匹配，golden 变体用例钉板（`golden_error_frame_case_variants` 等 4 个新增测试）；范围不因恐慌扩大——盘符泛化仍按上一行 P2 条件触发 |
 
 未发现需要**立即追加** redact 规则的新泄露点：三处必查点中 ①为低敏感维持现状、②③已被现有规则全文级覆盖。
 
