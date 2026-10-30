@@ -55,6 +55,7 @@ cargo build --release --locked -p volttray-tray
 - 关键依赖速览：tray-icon 0.26 / muda（托盘与菜单）、windows crate（Win32 API）、hidapi（HID 通道），均只在 `cfg(windows)` 目标下启用。
 - release profile：体积优先（`opt-level="z"` + LTO + 单 codegen unit + strip，单文件 EXE ≤ 5MB 目标）；**`panic = "unwind"` 是有意选择**（PRD 要求 GUI 边界用 `catch_unwind`，不能开 abort——这也是 E1 中「线程 panic 进程不死」的制度背景）。
 - 无本地 Rust 环境时：fork 后 push 触发 CI，从云端 artifact 取 EXE。
+- **Linux 宿主前置（G-30 写明）**：在 Linux 上跑 workspace `cargo test` / `clippy`（含 verify.sh 与 CI ubuntu job）需 libudev 开发库——transport 默认特性把 hidapi 拉入全平台构建；缺 libudev 是**编译失败、不是跳过**。Debian/Ubuntu 前置命令：`sudo apt install libudev-dev`（CI ubuntu job 同此前置）。
 - 非 Windows 环境预检：用 zig 交叉 check 路径（交叉目标 `cargo check`，详见 [01 E16](01-engineering-lessons.md) 与 [03 门禁 B5](03-release-quality-gate.md)）。「fork 后 push 触发 CI」仅适用于你自己 fork 的仓库——向本仓库 push 默认一律禁止，须维护者当轮明确指令（边界见 [AGENTS.md §4](../../AGENTS.md)）。
 
 ### 本地与 CI 工具导读
