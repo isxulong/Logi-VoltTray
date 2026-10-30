@@ -1937,9 +1937,7 @@ mod imp {
                         // 非休眠条目的 Skip 仅虚拟条目，真实槽位不会命中）。
                         if core.poll_decision(&s.id, now) == PollDecision::Skip {
                             if sleeping {
-                                telemetry
-                                    .poll_skipped_sleep
-                                    .fetch_add(1, Ordering::Relaxed);
+                                telemetry.poll_skipped_sleep.fetch_add(1, Ordering::Relaxed);
                             }
                             i += 1;
                             continue;
