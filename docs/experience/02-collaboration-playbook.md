@@ -340,6 +340,28 @@
 1. 凡改动下列任一用户可见面——**菜单名 / 配置键 / 默认值 / 版本号 / 阈值 / 状态文案**——验收标准必含「README.md 与 README.en-US.md 对应条目双语同步」；
 2. 判据可机械核对：对关键文案做 grep 命中核验（如菜单项名在 README 双语中各至少命中一次）；
 3. UI / 文案类变更纳入双独立复核的清单范围（两席＝**全栈代码质检官** + **高级开发工程师**，与 `docs/ai-orchestration.md`「代码批次质检复核」条一致；其中第二席把第 2 条的 grep 核验纳入清单）。
+4. **CI 机械门禁（G-01，2026-10-31 升级：纯验收条款无强制力已被 v0.3.25「立即刷新」三态文案双语未同步实证穿透，机械化是唯一收敛路径）**：以下方「用户可见状态语义 ID 对照表」为单一事实源——中英 README 各自维护「语义 ID → 本语言呈现」映射；CI 校验两侧映射的**语义 ID 集合一致**、且对照表登记的中文实载串在代码侧仍命中，任一不命中即红。误报条目进白名单迭代收敛——白名单逐条带裁决记录与撤销条件，不整批豁免。CI 侧接线属 CI 配置变更，不在纯文档批次内落地，随下一代码窗口接线；**接线前第 2 条 grep 命中核验照旧执行**，不因门禁已规划而豁免任何一次验收。
+5. **条件性 / 动态文案行同属同步范围（G-02，随 G-01 一处修订）**：带动态槽位的菜单行（三态「立即刷新（当前间隔 {label}）」、「检查更新（当前 v{X}）」）按行登记语义 ID，槽位以语义占位符标注，两侧 README 引用同一语义 ID——条件文案不算「例外」，漏同步与固定文案同责。**观察项降级限期裁决**：无法机械核验的用户可见面条目降级为观察项时，必须同时登记一个版本窗口内的裁决期限，到期裁决去留；不允许无限期挂观察、不立「必填登记行」式人治中间态。
+
+**用户可见状态语义 ID 对照表（首版，G-01 随本批建立；实载锚点只标文件与函数、不标行号，避免行号漂移；英文呈现为意译，非逐字直译）**：
+
+| 语义 ID | 中文实载 | EN README 呈现（意译） | 实载锚点 |
+| --- | --- | --- | --- |
+| menu.refresh | 立即刷新（当前间隔 {label}）——三态：Off / Unified=立即刷新（当前间隔 {fast}·充电中，常规 {label}）/ Mixed=立即刷新（当前间隔 {label} · 充电快档 {fast}） | Refresh now (current interval N min / N h) | `crates/tray/src/menu.rs`（build_menu）、`crates/app/src/settings_text.rs`（menu_refresh_label） |
+| menu.blink | 低电闪烁提醒 | Low-battery blinking alert | `crates/tray/src/menu.rs`（build_menu） |
+| menu.silent | 通知静音（仅关提示音） | Notification mute (audio only) | 同上 |
+| menu.autostart | 开机自启 | Start with Windows | 同上 |
+| menu.settings | 设置… | Settings… | 同上 |
+| menu.diag | 导出诊断信息… | Export diagnostics… | 同上 |
+| menu.stats | 导出耗电统计… | Export battery stats… | 同上 |
+| menu.checkupdate | 检查更新（当前 v{X}） | Check for updates (current vX) | 同上 |
+| menu.exit | 退出 | Exit | 同上 |
+| menu.device.unverified | （该通道未验证，读不到请用『导出诊断信息…』） | (channel not verified on hardware — export diagnostics to report) | `crates/tray/src/menu.rs`（device_row_text） |
+| icon.full | 满 | "full"（意译；**不是**字面 FULL） | `crates/tray/src/icon.rs`（icon_text） |
+| icon.unknown | ? | "?" | 同上 |
+| icon.no-reading | -- | "--" | 同上 |
+| toast.lowbat | LogiVoltTray 电量偏低 / {name} 电量剩余 {p}%，请及时充电 | low-battery notification (title/body) | `crates/tray/src/main.rs`（低电通知派发） |
+| toast.stale | LogiVoltTray 电量显示已过期 / 设备 {id} 的电量读数已过期，已灰显最后一次已知电量 | stale-reading notification (title/body) | `crates/tray/src/main.rs`（过期通知派发） |
 
 **写入三查记录**（2026-10-26 红蓝对抗第一轮采纳，融合层起草、主 AD 终审）：
 
@@ -347,6 +369,6 @@
 - 二查（无循环指涉）：本条只定义验收判据的**内容**（双语同步 + grep 可核）；E36 管「谁来核、怎么核」，本条仅把 UI / 文案变更纳入其清单范围、不改变 E36 机制本身；E26 管「何时回写入库」，本条是回写内容的验收前置；E24 管红线传导，本条非红线、与 E24 不重叠。
 - 三查（覆盖重叠裁决）：与 E36 重叠处（质检范围声明）以本条为准——本条是对 E36 范围的显式扩围；与 E24 重叠处（判据须可机械核对）以 E24 为准。
 
-**溯源**：2026-10-26 红蓝对抗第一轮 r6-Q4（UI 审查发现「检查更新」菜单项双语 README 未同步）裁决采纳登记；联动修订见根 README 双语与本索引头戳。
+**溯源**：2026-10-26 红蓝对抗第一轮 r6-Q4（UI 审查发现「检查更新」菜单项双语 README 未同步）裁决采纳登记；2026-10-31 红蓝对抗修复波一按 39 条修订报告 G-01/G-02 升级为 CI 机械门禁（语义 ID 对照表＋条件文案范围＋观察项限期裁决）。联动修订见根 README 双语与本索引头戳。
 
 **相关条目**：E36、E26、E24（主题相近，互链检索；不合并、不移册、不改编号）
