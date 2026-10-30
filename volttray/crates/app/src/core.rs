@@ -1024,7 +1024,7 @@ impl AppCore {
     /// 调用点（tray 侧 bootlog），防未来改动破坏 None 兜底语义时无
     /// 声断流。休眠设备不在此路径（D-33：等唤醒信号重排，零主动查
     /// 询）；虚拟条目同排除。挂 experimental_stall_requeue（默认开，
-    /// false 回 v0.3.26 行为——仅 None 兜底、无显式重排）。
+    /// false 回回本特性引入前行为——仅 None 兜底、无显式重排）。
     pub fn requeue_stalled(&mut self, now: Instant) -> usize {
         let cfg = self.config();
         if !cfg.experimental_stall_requeue {
@@ -3010,7 +3010,7 @@ mod tests {
 
     #[test]
     fn e10_quota_disabled_returns_to_v0325() {
-        // 回滚开关（C-2 裁 A 侧：默认开；关闭即回 v0.3.25 行为）——
+        // 回滚开关（C-2 裁 A 侧：默认开；关闭即回回本特性引入前行为）——
         // 无封顶、无退避、无保底。
         let cfg = Config {
             experimental_wake_quota: false,
