@@ -134,7 +134,10 @@ mod tests {
             .iter()
             .map(|r| r["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, vec!["R1-user-path", "R2-device-name"]);
+        assert_eq!(
+            ids,
+            vec!["R1-user-path", "R2-device-name", "R3-stats-display-name"]
+        );
         // 字段字典原样透出。
         assert_eq!(m["fields"]["csv_columns"].as_array().unwrap().len(), 11);
         assert_eq!(
@@ -180,7 +183,9 @@ mod tests {
         }
         assert!(c.contains("# manifest.schema_version=1\n"));
         assert!(c.contains("# manifest.generated_at=42\n"));
-        assert!(c.contains("# manifest.redaction_rules=R1-user-path,R2-device-name\n"));
+        assert!(c.contains(
+            "# manifest.redaction_rules=R1-user-path,R2-device-name,R3-stats-display-name\n"
+        ));
     }
 
     /// CSV 列字典与 CSV_HEADER 逐字一致（A 要素防漂移）。

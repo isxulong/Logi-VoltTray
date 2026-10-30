@@ -27,6 +27,14 @@
 //! 均被覆盖），整值优先只影响可读性。**G-33 起设备名匹配同为
 //! ASCII 大小写不敏感**（如收集名 "MX Audit Pro" 与日志文本
 //! "mx audit pro" 互相命中）。
+//!
+//! 规则三（R3-stats-display-name，组5 5b，C-3）：统计面设备型号
+//! （display_name）anonymize=on 时替换为「设备N」，与本规则二同
+//! 口径。映射**每导出会话生成、会话内稳定、两面共用单点函数**
+//! （`device_session_map`）、**不承诺跨导出稳定**（BvA-7：FNV-1a
+//! 低熵可字典反查、稳定伪名助长跨文件关联，故编号不承担匿名化
+//! 职责）；型号默认保留（U-2C），回滚键关闭时 GUI 层强制提示
+//! 「脱敏修复已回退」。
 
 /// 脱敏规则注册表条目（E17）。字段全部为静态文本，注册表是
 /// 编译期常量——审计与测试可枚举全部规则而无需执行脱敏。
@@ -39,8 +47,9 @@ pub struct RedactionRule {
     pub doc_anchor: &'static str,
 }
 
-/// 结构化脱敏注册表（E17，A-R11）。当前两条全文级规则；
-/// 设备名编号语义（收集顺序 → 设备N）属 R2 的口径一部分。
+/// 结构化脱敏注册表（E17，A-R11）。三条规则；设备名编号语义
+///（收集顺序 → 设备N）为 R2/R3 共用口径（单点函数
+/// `device_session_map`）。新增规则只追加、不重排、不改 id。
 pub const REDACTION_RULES: &[RedactionRule] = &[
     RedactionRule {
         id: "R1-user-path",
@@ -52,32 +61,53 @@ pub const REDACTION_RULES: &[RedactionRule] = &[
         summary: "设备名按收集顺序 → 设备N；整值替换优先（长名先替换）；ASCII 大小写不敏感匹配",
         doc_anchor: "05 文档第一节规则二",
     },
+    RedactionRule {
+        id: "R3-stats-display-name",
+        summary: "统计面 display_name anonymize=on 时按会话收集顺序 → 设备N（会话内映射，不承诺跨导出稳定）",
+        doc_anchor: "05 文档统计面姊妹篇规则三（volttray/docs/stats-export-field-audit.md）",
+    },
 ];
 
-/// 对文本执行注册表全部规则（当前：规则一＋规则二）的完整脱敏。
+/// 会话内设备编号映射（组5 5b，C-3）：收集顺序 → 「设备N」。
+/// 统计面与诊断面共用的单点函数——同一批设备名（同一收集顺序）
+/// 在两面的编号必然一致（anonymize=on 三件套同设备同名断言的
+/// 语义来源）。编号只在本次导出会话内稳定，不承诺跨导出稳定
+/// （BvA-7）；编号不承担匿名化职责。空名不编号（与 redact_text
+/// 跳过空名同口径——空名不进映射，查表落空即原样保留）。
+pub fn device_session_map(names: &[String]) -> std::collections::HashMap<String, String> {
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_empty())
+        .map(|(i, n)| (n.clone(), format!("设备{}", i + 1)))
+        .collect()
+}
+
+/// 对文本执行注册表全文级规则（当前：规则一＋规则二）的完整脱敏。
 ///
 /// - `C:\Users\<段>`（含 JSON 转义形态 `C:\\Users\\<段>`，ASCII 大小写
 ///   不敏感，G-33）的 `<段>` 替换为 `<USER>`；
 /// - `device_names` 中收集序第 i 个名字（ASCII 大小写不敏感，G-33）
-///   替换为「设备i+1」；替换执行按名字长度降序（E17 整值替换优先），
+///   替换为「设备i+1」（编号取自 `device_session_map`，与统计面 R3
+///   同函数同序号）；替换执行按名字长度降序（E17 整值替换优先），
 ///   等长保持收集顺序；
 /// - 其余字符逐字保留；空设备名跳过（避免空串替换把全文打碎）。
 pub fn redact_text(input: &str, device_names: &[String]) -> String {
     let mut out = redact_user_paths(input);
+    let map = device_session_map(device_names);
     // E17 整值替换优先：按名字长度降序执行替换（等长稳定保持收集
     // 顺序），编号仍取原收集序号——长名先整体替换，避免短名先把
     // 长名的前缀部分吃掉产生半替换失真。
     let mut order: Vec<(usize, &String)> = device_names.iter().enumerate().collect();
     order.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
-    for (idx, name) in order {
-        if name.is_empty() {
+    for (_, name) in order {
+        let Some(repl) = map.get(name) else {
             continue;
-        }
-        let repl = format!("设备{}", idx + 1);
+        };
         // G-33：ASCII 大小写不敏感命中——导出文本里设备名的大小写
         // 变体（日志模板与收集名不一致时）同样必须脱敏。
         if find_ascii_ci(&out, name).is_some() {
-            out = replace_ascii_ci(&out, name, &repl);
+            out = replace_ascii_ci(&out, name, repl);
         }
     }
     out
@@ -240,14 +270,37 @@ mod tests {
 
     /// E17 注册表钉板：规则集合（id 序列）与文档锚点锁定——新增
     /// 规则只追加；删改既有 id 在此失败，强制同步 05 文档与审计。
+    /// 组5 5b 追加 R3-stats-display-name（统计面姊妹篇规则三）。
     #[test]
     fn redaction_rules_registry_is_pinned() {
         let ids: Vec<&str> = REDACTION_RULES.iter().map(|r| r.id).collect();
-        assert_eq!(ids, vec!["R1-user-path", "R2-device-name"]);
+        assert_eq!(
+            ids,
+            vec!["R1-user-path", "R2-device-name", "R3-stats-display-name"]
+        );
         for rule in REDACTION_RULES {
             assert!(!rule.summary.is_empty());
             assert!(rule.doc_anchor.contains("05 文档"));
         }
+    }
+
+    /// 组5 5b（C-3）：device_session_map 是两面共用的单点函数——
+    /// 收集序第 i 个名字 → 「设备i+1」，与 redact_text 的编号一致；
+    /// 空名不编号、不位移后续序号。
+    #[test]
+    fn device_session_map_numbers_by_collection_order() {
+        let names = vec![
+            "MX Master 3S".to_string(),
+            String::new(),
+            "MX Keys Mini".to_string(),
+        ];
+        let map = device_session_map(&names);
+        assert_eq!(map.len(), 2, "空名不进映射");
+        assert_eq!(map["MX Master 3S"], "设备1");
+        assert_eq!(map["MX Keys Mini"], "设备3", "序号取原收集序不位移");
+        // 与 redact_text 编号互证（同输入同输出）。
+        let out = redact_text("MX Master 3S / MX Keys Mini", &names);
+        assert_eq!(out, "设备1 / 设备3");
     }
 
     /// E17 golden：含令牌值（用户名路径 + 设备名）的错误帧全文比对。

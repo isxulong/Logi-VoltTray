@@ -3627,7 +3627,17 @@ mod imp {
                 export_diag(observer, enum_snap, channel_map_miss, telemetry);
             } else if e.id == ids.stats_export {
                 // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
-                crate::statsexport::begin_export(cmd_tx);
+                // 组5 5b：脱敏回滚/时区/知情提示闸门从配置读取注入
+                //（读锁失败按默认闸门：脱敏开、UTC 关、提示开）。
+                let gates = cfg_arc
+                    .read()
+                    .map(|c| crate::statsexport::ExportGates {
+                        redact_display_name: c.experimental_export_redact_display_name,
+                        tz_utc: c.experimental_export_tz_utc,
+                        privacy_notice: c.experimental_export_privacy_notice,
+                    })
+                    .unwrap_or_default();
+                crate::statsexport::begin_export(cmd_tx, gates);
             } else if e.id == ids.check_update {
                 // T-07（实施令零网络形态）：手动「检查更新」＝ShellExecuteW
                 // 交系统默认浏览器打开 /releases/latest——无 HTTP 客户端、

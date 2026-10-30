@@ -27,9 +27,13 @@
 //!   不早于前段终点）」的同型段——倒置段不参与合并、独立保留，
 //!   coalesce 绝不产出 end_ts < start_ts 的段。
 //! - 匿名化（R5-I-04）：按 physical_key 哈希值（FNV-1a 64，16 字符
-//!   hex）字典序排序后依次编号（D1=最小），不依赖首现顺序；仅
-//!   device_key 列脱敏，display_name 保留真实值；开关覆盖 CSV / JSON
-//!   导出 / HTML 报告三路与 volttray-data 数据块（R5-I-07）。
+//!   hex）字典序排序后依次编号（D1=最小），不依赖首现顺序；开关覆盖
+//!   CSV / JSON 导出 / HTML 报告三路与 volttray-data 数据块（R5-I-07）。
+//!   组5 5b（N-12②/U-2C，C-3）：anonymize=on 且脱敏闸门开时
+//!   display_name 同步按会话内映射替换为「设备N」（R3，与诊断面
+//!   redact::device_session_map 同函数同序号；会话内稳定、不承诺跨
+//!   导出稳定，编号不承担匿名化职责）；闸门关闭（回退）时保留真实
+//!   型号并由 GUI 层强制提示「脱敏修复已回退」。
 //!
 //! 红线：纯主机侧记账回放，不新增任何设备查询。
 
@@ -1224,15 +1228,45 @@ fn display_key(key: &str, anon: Option<&HashMap<String, String>>) -> String {
         .unwrap_or_else(|| key.to_string())
 }
 
+/// 组5 5b（C-3）：导出会话内 display_name 的收集顺序——Read 事件
+/// 首现顺序去重、空名跳过（与 redact 空名跳过同口径）。返回值喂给
+/// `redact::device_session_map` 构造「设备N」映射，统计面与诊断面
+/// 共用同一映射函数（同设备同名）。
+pub fn display_name_session_order(events: &[StatsEvent]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for ev in events {
+        if let StatsEvent::Read(e) = ev {
+            if !e.display_name.is_empty() && !seen.contains(&e.display_name) {
+                seen.push(e.display_name.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// anonymize=on 时 display_name → 「设备N」（names 由
+/// `redact::device_session_map` 从 `display_name_session_order` 构造）；
+/// None（anonymize=off 或闸门回退）原样保留真实型号（U-2C）。
+fn map_display_name(name: &str, names: Option<&HashMap<String, String>>) -> String {
+    names
+        .and_then(|m| m.get(name).cloned())
+        .unwrap_or_else(|| name.to_string())
+}
+
 /// 单行 CSV（unknown 段 rate 留空）。
-fn csv_row(seg: &Segment, key: &str, offset_minutes: i32) -> String {
+fn csv_row(
+    seg: &Segment,
+    key: &str,
+    names: Option<&HashMap<String, String>>,
+    offset_minutes: i32,
+) -> String {
     let rate = seg
         .rate_pct_per_hour()
         .map(|r| format!("{r:.2}"))
         .unwrap_or_default();
     [
         csv_field(key),
-        csv_field(&seg.display_name),
+        csv_field(&map_display_name(&seg.display_name, names)),
         seg.seg_type.as_str().to_string(),
         fmt_rfc3339(seg.start_ts, offset_minutes),
         fmt_rfc3339(seg.end_ts, offset_minutes),
@@ -1250,9 +1284,12 @@ fn csv_row(seg: &Segment, key: &str, offset_minutes: i32) -> String {
 /// recheck.py 跳过 `#` 行后再字节对账）+ 表头 + 每段一行（行序 =
 /// 展示键字典序 + start_ts；匿名化后 D1/D2… 顺序即哈希字典序）。
 /// `generated_at` 为导出时刻 epoch 秒（进 manifest 注释块）。
+/// `names`（组5 5b）：anonymize=on 时的 display_name 会话映射
+/// （「设备N」，R3）；None 保留真实型号。
 pub fn render_csv(
     segments: &[Segment],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
     offset_minutes: i32,
     generated_at: i64,
 ) -> String {
@@ -1266,7 +1303,7 @@ pub fn render_csv(
     out.push_str(CSV_HEADER);
     out.push('\n');
     for (key, seg) in rows {
-        out.push_str(&csv_row(seg, &key, offset_minutes));
+        out.push_str(&csv_row(seg, &key, names, offset_minutes));
         out.push('\n');
     }
     out
@@ -1289,11 +1326,13 @@ pub fn stats_export_filename_local(p: crate::diag_export::LocalTimeParts) -> Str
 /// 渲染 JSON 导出：`{version, exported_at, manifest, events:[...]}`——events 为
 /// current+archive 原始事件序列（与 jsonl 行同构）；空态输出空结构
 ///（events: []，R5-P-03）。匿名化开启时 physical_key 字段（读取事件、
-/// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏，
-/// display_name 保留真实值。
+/// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏；
+/// display_name 按 `names` 会话映射替换为「设备N」（组5 5b R3，
+/// 与诊断面同函数同序号），names=None 时保留真实型号（U-2C）。
 pub fn render_json_events(
     events: &[StatsEvent],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
     exported_at: i64,
 ) -> String {
     let mut arr = Vec::with_capacity(events.len());
@@ -1302,7 +1341,7 @@ pub fn render_json_events(
             StatsEvent::Read(e) => serde_json::json!({
                 "ts": e.ts,
                 "physical_key": display_key(&e.physical_key, anon),
-                "display_name": e.display_name,
+                "display_name": map_display_name(&e.display_name, names),
                 "percent": e.percent,
                 "charging": e.charging,
                 "source": e.source,
@@ -1363,18 +1402,23 @@ pub fn build_report_data(
     events: &[StatsEvent],
     segments: &[Segment],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
     offset_minutes: i32,
     generated_ts: i64,
 ) -> serde_json::Value {
     let anonymized = anon.is_some();
     // 设备清单（展示键 + 显示名；序 = 展示键字典序）；raw_of 为展示键
     // 到原始键的反映射——内部聚合（日卡 / 对账 / 粘滞）在原始键上做，
-    // 透出前统一换展示键。
+    // 透出前统一换展示键。组5 5b：display_name 按 names 会话映射
+    // （「设备N」，R3）；None 保留真实型号（U-2C）。
     let mut name_of: BTreeMap<String, String> = BTreeMap::new();
     let mut raw_of: HashMap<String, String> = HashMap::new();
     for ev in events {
         if let StatsEvent::Read(e) = ev {
-            name_of.insert(display_key(&e.physical_key, anon), e.display_name.clone());
+            name_of.insert(
+                display_key(&e.physical_key, anon),
+                map_display_name(&e.display_name, names),
+            );
             raw_of.insert(display_key(&e.physical_key, anon), e.physical_key.clone());
         }
     }
@@ -1398,7 +1442,7 @@ pub fn build_report_data(
         .map(|s| {
             serde_json::json!({
                 "device_key": s.device_key,
-                "display_name": s.display_name,
+                "display_name": map_display_name(&s.display_name, names),
                 "segment_type": s.seg_type.as_str(),
                 "start_ts": s.start_ts,
                 "end_ts": s.end_ts,
@@ -2353,7 +2397,7 @@ mod tests {
                 &[NOTE_EVIDENCE_MISSING],
             ),
         ];
-        let csv = render_csv(&segs, None, CST, 1_760_000_000);
+        let csv = render_csv(&segs, None, None, CST, 1_760_000_000);
         let mut lines = csv.lines();
         let first = lines.next().unwrap();
         assert!(first.starts_with('\u{feff}'), "BOM 缺失");
@@ -2378,7 +2422,7 @@ mod tests {
     #[test]
     fn csv_empty_state_is_header_only_and_rows_sorted_by_display_key() {
         // 空态：BOM + 表头。
-        let csv = render_csv(&[], None, CST, 1_760_000_000);
+        let csv = render_csv(&[], None, None, CST, 1_760_000_000);
         assert_eq!(
             csv,
             format!(
@@ -2393,10 +2437,10 @@ mod tests {
         ];
         let keys: BTreeSet<String> = ["dev-0", "dev-1"].iter().map(|s| s.to_string()).collect();
         let anon = anonymize_map(&keys);
-        let csv = render_csv(&segs, Some(&anon), CST, 1_760_000_000);
+        let csv = render_csv(&segs, Some(&anon), None, CST, 1_760_000_000);
         let rows: Vec<&str> = csv
             .lines()
-            .filter(|l| !l.starts_with("# "))
+            .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
             .skip(1)
             .collect();
         assert_eq!(rows.len(), 2);
@@ -2412,7 +2456,9 @@ mod tests {
     // -- JSON 导出（I-07）-----------------------------------------------------
 
     #[test]
-    fn json_export_anonymizes_physical_key_and_preserves_names() {
+    fn json_export_anonymizes_physical_key_and_maps_display_names() {
+        // 组5 5b 语义翻转：anonymize=on 且 names 会话映射在场时，
+        // display_name 替换为「设备N」（R3）；原「保留真实值」口径作废。
         let events = vec![
             ev_poll(1000, "kbd-1", 90),
             StatsEvent::SleepEnter {
@@ -2437,8 +2483,14 @@ mod tests {
             StatsEvent::RunStop { ts: 4000 },
         ];
         let anon = anonymize_map(&event_keys(&events));
-        let v: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, Some(&anon), 9999)).unwrap();
+        let names = crate::redact::device_session_map(&display_name_session_order(&events));
+        let v: serde_json::Value = serde_json::from_str(&render_json_events(
+            &events,
+            Some(&anon),
+            Some(&names),
+            9999,
+        ))
+        .unwrap();
         assert_eq!(v["version"], 1);
         assert_eq!(v["exported_at"], 9999);
         let arr = v["events"].as_array().unwrap();
@@ -2447,8 +2499,8 @@ mod tests {
         let m = anon["mouse-2"].clone();
         assert_eq!(arr[0]["physical_key"], k);
         assert_eq!(
-            arr[0]["display_name"], "Name-kbd-1",
-            "display_name 保留真实值"
+            arr[0]["display_name"], "设备1",
+            "display_name 按会话首现顺序映射为 设备N（R3）"
         );
         assert_eq!(arr[0]["source"], SOURCE_POLL);
         assert_eq!(arr[1]["physical_key"], k);
@@ -2456,8 +2508,8 @@ mod tests {
         assert_eq!(arr[2]["devices"][0]["physical_key"], k);
         assert_eq!(arr[2]["devices"][1]["physical_key"], m);
         assert_eq!(arr[3]["event"], "run_stop");
-        let s = render_json_events(&events, Some(&anon), 1);
-        // physical_key 字段值不得为原键（display_name 保留真实值属预期）。
+        let s = render_json_events(&events, Some(&anon), Some(&names), 1);
+        // physical_key 与 display_name 字段值均不得为原值。
         assert!(
             !s.contains("\"physical_key\":\"kbd-1\""),
             "read 事件键未脱敏"
@@ -2466,14 +2518,61 @@ mod tests {
             !s.contains("\"physical_key\":\"mouse-2\""),
             "boundary 设备键未脱敏"
         );
+        assert!(
+            !s.contains("Name-kbd-1"),
+            "display_name 未脱敏（泄露扫描：真实型号命中即红）"
+        );
         // 空态：events: []。
         let empty: serde_json::Value =
-            serde_json::from_str(&render_json_events(&[], None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&[], None, None, 1)).unwrap();
         assert_eq!(empty["events"].as_array().unwrap().len(), 0);
-        // 未开匿名化：原键保留。
+        // 未开匿名化：原键与真实型号保留（U-2C）。
         let plain: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&events, None, None, 1)).unwrap();
         assert_eq!(plain["events"][0]["physical_key"], "kbd-1");
+        assert_eq!(plain["events"][0]["display_name"], "Name-kbd-1");
+    }
+
+    /// 组5 5b（C-3）三件套断言：anonymize=on 时 CSV / JSON /
+    /// volttray-data 同会话内同一设备同名（「设备N」），且全文无真实
+    /// 型号残留（泄露扫描）。
+    #[test]
+    fn anonymized_outputs_share_session_device_names() {
+        let events = vec![
+            ev_poll(1000, "kbd-1", 90),
+            ev_poll(1100, "mouse-2", 80),
+            ev_poll(1200, "kbd-1", 89),
+        ];
+        // 会话收集顺序：Name-kbd-1 首现 → 设备1；Name-mouse-2 → 设备2。
+        let order = display_name_session_order(&events);
+        assert_eq!(order, vec!["Name-kbd-1".to_string(), "Name-mouse-2".to_string()]);
+        let names = crate::redact::device_session_map(&order);
+        assert_eq!(names["Name-kbd-1"], "设备1");
+        assert_eq!(names["Name-mouse-2"], "设备2");
+        let segs = vec![
+            seg("kbd-1", SegmentType::Active, 1000, 2000, 90, 88, &[]),
+            seg("mouse-2", SegmentType::Active, 1100, 2000, 80, 78, &[]),
+        ];
+        let anon = anonymize_map(&event_keys(&events));
+        // CSV：型号列全为 设备N，无真实型号。
+        let csv = render_csv(&segs, Some(&anon), Some(&names), CST, 1_760_000_000);
+        assert!(csv.contains("设备1"), "CSV 缺 设备1: {csv}");
+        assert!(csv.contains("设备2"), "CSV 缺 设备2: {csv}");
+        assert!(!csv.contains("Name-kbd-1") && !csv.contains("Name-mouse-2"));
+        // JSON：同上。
+        let json = render_json_events(&events, Some(&anon), Some(&names), 1);
+        assert!(json.contains("设备1") && json.contains("设备2"));
+        assert!(!json.contains("Name-kbd-1") && !json.contains("Name-mouse-2"));
+        // HTML 数据块：devices 清单与分段明细同为 设备N。
+        let report = build_report_data(&events, &segs, Some(&anon), Some(&names), CST, 9000);
+        let text = report.to_string();
+        assert!(text.contains("设备1") && text.contains("设备2"));
+        assert!(
+            !text.contains("Name-kbd-1") && !text.contains("Name-mouse-2"),
+            "volttray-data 残留真实型号"
+        );
+        // 与诊断面同函数同序号：device_session_map 编号与 redact_text
+        // 互证见 redact.rs device_session_map_numbers_by_collection_order。
     }
 
     // -- 自描述 manifest（组5 N-12② · 5a）------------------------------------
@@ -2483,7 +2582,7 @@ mod tests {
     fn json_export_top_fields_match_manifest_dictionary() {
         let events = vec![ev_poll(1000, "kbd-1", 90)];
         let v: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, None, 42)).unwrap();
+            serde_json::from_str(&render_json_events(&events, None, None, 42)).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
         let mut dict = crate::export_manifest::STATS_JSON_TOP_FIELDS.to_vec();
@@ -2506,7 +2605,7 @@ mod tests {
             ev_poll(9200, "kbd-1", 88),
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 200000);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
         let mut keys: Vec<&str> = report
             .as_object()
             .unwrap()
@@ -2529,7 +2628,7 @@ mod tests {
     /// CSV 结构钉板：BOM → `#` 注释块 → 表头 → 数据行。
     #[test]
     fn csv_manifest_comment_block_precedes_header() {
-        let csv = render_csv(&[], None, CST, 7);
+        let csv = render_csv(&[], None, None, CST, 7);
         assert!(csv.starts_with('\u{feff}'));
         let body = &csv[3..];
         let comments: Vec<&str> = body.lines().take_while(|l| l.starts_with("# ")).collect();
@@ -2567,13 +2666,13 @@ mod tests {
             ev_poll(123400, k, 80),
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 200000);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
         // 分段明细行数 = CSV 数据行数 = 段数。
         let rows = report["segments"].as_array().unwrap();
         assert_eq!(rows.len(), segs.len());
-        let csv_rows = render_csv(&segs, None, CST, 200000)
+        let csv_rows = render_csv(&segs, None, None, CST, 200000)
             .lines()
-            .filter(|l| !l.starts_with("# "))
+            .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
             .count()
             - 1;
         assert_eq!(rows.len(), csv_rows);
@@ -2646,7 +2745,7 @@ mod tests {
         let events = vec![ev_poll(1000, "kbd-1", 90), ev_poll(8200, "kbd-1", 88)];
         let segs = build_segments(&events);
         let anon = anonymize_map(&event_keys(&events));
-        let report = build_report_data(&events, &segs, Some(&anon), CST, 9000);
+        let report = build_report_data(&events, &segs, Some(&anon), None, CST, 9000);
         let s = report.to_string();
         assert!(report["meta"]["anonymized"].as_bool().unwrap());
         assert_eq!(report["segments"][0]["device_key"].as_str().unwrap(), "D1");
@@ -2669,7 +2768,7 @@ mod tests {
             r.display_name = "x</script><script>alert(1)".into();
         }
         let segs = build_segments(&ev2);
-        let report = build_report_data(&ev2, &segs, None, CST, 9000);
+        let report = build_report_data(&ev2, &segs, None, None, CST, 9000);
         let html = render_html(&report);
         // 零外部资源引用（SVG 命名空间 URI 是标识符、不产生请求，不计）。
         for pat in [
@@ -2829,13 +2928,16 @@ mod tests {
                 assert_eq!(w[0].end_ts, w[1].start_ts, "段链断裂: {key}");
             }
         }
-        let csv = render_csv(&segs, None, CST, base + DAYS * 86_400);
+        let csv = render_csv(&segs, None, None, CST, base + DAYS * 86_400);
         assert_eq!(
-            csv.lines().filter(|l| !l.starts_with("# ")).count() - 1,
+            csv.lines()
+                .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
+                .count()
+                - 1,
             segs.len(),
             "CSV 行数 = 段数"
         );
-        let report = build_report_data(&events, &segs, None, CST, base + DAYS * 86_400);
+        let report = build_report_data(&events, &segs, None, None, CST, base + DAYS * 86_400);
         assert_eq!(report["segments"].as_array().unwrap().len(), segs.len());
         let html = render_html(&report);
         assert!(html.contains(r#"<script id="volttray-data" type="application/json">"#));
@@ -2855,7 +2957,7 @@ mod tests {
             ev_poll(9200, k, 88),
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 200000);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
         assert_eq!(report["meta"]["generated_at"].as_i64().unwrap(), 200000);
         assert_eq!(
             report["first_screen_kpis"][k]["current_ts"]
@@ -3046,7 +3148,7 @@ mod filename_tests {
         // 无 activity_buckets 事件 → 缺口卡必然出现。
         let events = vec![ev_poll(1000, "d1", 90), ev_poll(8200, "d1", 88)];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 9000);
+        let report = build_report_data(&events, &segs, None, None, CST, 9000);
         let gap = &report["activity_gap_note"];
         assert!(gap["present"].as_bool().unwrap());
         assert!(gap["text"].as_str().unwrap().contains("尚无静止/活动字段"));
@@ -3066,7 +3168,7 @@ mod filename_tests {
                 days: days7,
             },
         ];
-        let report2 = build_report_data(&ev2, &segs, None, CST, 9000);
+        let report2 = build_report_data(&ev2, &segs, None, None, CST, 9000);
         assert!(!report2["activity_gap_note"]["present"].as_bool().unwrap());
         assert_eq!(report2["meta"]["activity_days"].as_i64().unwrap(), 7);
     }
@@ -3080,7 +3182,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let html = render_html(&report);
         assert!(
             html.contains("app 运行时段"),
@@ -3174,7 +3276,7 @@ mod filename_tests {
             },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 9000);
+        let report = build_report_data(&events, &segs, None, None, CST, 9000);
         assert_eq!(report["meta"]["activity_days"].as_i64().unwrap(), 3);
     }
 
@@ -3189,7 +3291,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let avg = report["first_screen_kpis"]["d1"]["avg"]
             .as_object()
             .unwrap();
@@ -3218,7 +3320,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let html = render_html(&report);
         assert!(!html.contains("距下次充电"));
         assert!(!report.to_string().contains("距下次充电"));
@@ -3234,7 +3336,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         assert!(report.get("chart2").is_none());
         assert!(report["meta"].get("chart2_approx").is_none());
         let html = render_html(&report);

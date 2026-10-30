@@ -59,8 +59,33 @@
 - recheck.py：`check_csv` 跳过 `#` 注释行后字节级对账（同 PR 适配）；
   `check_json` / `check_html` 为键值对账，对新增 manifest 键天然容忍。
 
-## 四、回滚
+## 四、规则三（R3-stats-display-name，组5 5b 落地）
+
+`redact::REDACTION_RULES` 第三条规则：统计面设备型号（`display_name`）
+anonymize=on 时按导出会话收集顺序替换为「设备N」。
+
+| 要点 | 口径 |
+| --- | --- |
+| 映射构造 | `attribution::display_name_session_order`（Read 事件首现顺序去重、空名跳过）→ `redact::device_session_map`（收集序 → 设备N，**两面共用单点函数**，诊断面 R2 同函数同序号） |
+| 稳定性 | 会话内稳定、**不承诺跨导出稳定**（C-3/BvA-7：FNV-1a 低熵可字典反查、稳定伪名助长跨文件关联，编号不承担匿名化职责） |
+| 覆盖面 | CSV `display_name` 列、统计 JSON read 事件 `display_name`、HTML volttray-data `devices` 清单与 `segments` 明细（三件套同会话同设备同名，有钉板测试） |
+| 默认 | 型号默认保留（U-2C）；仅 anonymize=on 且 `experimental_export_redact_display_name=true`（默认）时映射 |
+| 回滚 | `experimental_export_redact_display_name=false` → 保留真实型号，导出对话框强制提示「脱敏修复已回退」（C-2，不可跳过） |
+
+配套闸门（同批配置键，`config.rs`）：
+
+| 键 | 默认 | 口径 |
+| --- | --- | --- |
+| `experimental_export_redact_display_name` | 开 | 上表回滚键 |
+| `experimental_export_tz_utc` | **关** | 导出时间统一 UTC（+00:00 渲染）；实现照做、默认关（BvA-5：覆盖面实测核验前默认值不动，翻转挂 U-2 裁决）；本地 stats.jsonl 落盘侧不动 |
+| `experimental_export_privacy_notice` | 开 | 保存前提示「本文件含设备型号与作息信息」（U-2C）；关闭时强制提示「脱敏修复已回退」 |
+
+泄露扫描（组5 验收项，均有钉板测试）：anonymize=on 三件套全文搜真实
+型号命中即红（`attribution.rs`）；manifest 负面清单（BvA-6）见一。
+
+## 五、回滚
 
 manifest 为纯增量：删除 `export_manifest.rs` 与四处接线即回滚，无配置键
 （BvA 决议）。CSV 注释块随 `render_csv` 接线一并消失；recheck.py 的
-`#` 行跳过对无注释旧文件向后兼容（跳过 0 行）。
+`#` 行跳过对无注释旧文件向后兼容（跳过 0 行）。5b 三项配置键回滚语义
+见第四节表格（C-2 强制提示 + BvA-5 默认关）。

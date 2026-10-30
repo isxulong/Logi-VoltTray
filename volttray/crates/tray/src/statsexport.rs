@@ -43,6 +43,52 @@ pub struct StatsExportRequest {
     /// 融合稿 Phase 1：导出内容是否包含静止/活动分钟统计
     /// （activity_buckets 事件；默认开）。
     pub include_activity: bool,
+    /// 组5 5b（C-2）：anonymize=on 时 display_name → 「设备N」
+    ///（R3 会话映射）；false = 回退保留真实型号。
+    pub redact_display_name: bool,
+    /// 组5 5b（U-2 闸门，BvA-5 默认关）：true → CSV/HTML 时间戳
+    /// 按 UTC（+00:00）渲染；false → 本地时区（现状）。
+    pub tz_utc: bool,
+}
+
+/// 组5 5b 导出脱敏/知情闸门（main 从配置读取注入；C-2 回滚键默认
+/// 开，BvA-5 时区归一默认关）。privacy_notice 只作用于 GUI 线程
+/// 的保存前提示，不随请求进 IO 线程。
+#[derive(Debug, Clone, Copy)]
+pub struct ExportGates {
+    /// anonymize=on 时 display_name 映射「设备N」（R3）；false =
+    /// 回退保留真实型号（强制提示「脱敏修复已回退」）。
+    pub redact_display_name: bool,
+    /// 导出时间统一 UTC（U-2 闸门，BvA-5 默认关）。
+    pub tz_utc: bool,
+    /// 保存前知情提示「本文件含设备型号与作息信息」（U-2C）；
+    /// false = 回退不提示（强制提示「脱敏修复已回退」）。
+    pub privacy_notice: bool,
+}
+
+impl Default for ExportGates {
+    fn default() -> Self {
+        Self {
+            redact_display_name: true,
+            tz_utc: false,
+            privacy_notice: true,
+        }
+    }
+}
+
+/// 组5 5b：模态知情提示（U-2C 保存前提示 / C-2 回退提示共用）。
+fn notice(title: &str, text: &str) {
+    let t = wide(title);
+    let b = wide(text);
+    // SAFETY(E9): 宽字符缓冲 NUL 结尾、调用期间存活；MessageBoxW 同步模态，无指针逃逸。
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(b.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
 }
 
 /// 导出选项（对话框四开关；默认：HTML 开、匿名化关、JSON 关、
@@ -395,13 +441,33 @@ pub fn pick_export_options() -> Option<ExportOptions> {
     }
 }
 
-/// 「导出耗电统计…」菜单编排：选项对话框 → 秒级默认命名（R5-P-02）→
-/// Save-As（CSV 过滤器）→ 派发 IO 线程。任一步取消即零落盘零派发。
-pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
+/// 「导出耗电统计…」菜单编排：选项对话框 →（组5 5b：回退强制提示 /
+/// 保存前知情提示）→ 秒级默认命名（R5-P-02）→ Save-As（CSV 过滤器）
+/// → 派发 IO 线程。任一步取消即零落盘零派发。
+pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>, gates: ExportGates) {
     let Some(opts) = pick_export_options() else {
         crate::bootlog::note("stats export cancelled at options dialog");
         return;
     };
+    // C-2（组5 5b）：回滚键（默认开的脱敏修复项）被关闭时强制提示
+    // 「脱敏修复已回退」——不可跳过、不挂开关。
+    if !gates.redact_display_name || !gates.privacy_notice {
+        let mut items: Vec<&str> = Vec::new();
+        if !gates.redact_display_name {
+            items.push("· 设备型号匿名化（导出将保留真实型号）");
+        }
+        if !gates.privacy_notice {
+            items.push("· 保存前知情提示（本次起不再提示）");
+        }
+        notice(
+            "脱敏修复已回退",
+            &format!(
+                "以下脱敏修复项已通过配置关闭，导出将按回退行为执行：\n{}\n\
+                 如需恢复，请将配置中对应 experimental_export_* 键改回 true 并重启。",
+                items.join("\n")
+            ),
+        );
+    }
     // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
     let local = unsafe { GetLocalTime() };
     let default_name = volttray_app::stats_export_filename_local(LocalTimeParts {
@@ -413,6 +479,14 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
         second: local.wSecond,
         millis: local.wMilliseconds,
     });
+    // U-2C（组5 5b）：保存前知情提示（Save-As 确认前）。
+    if gates.privacy_notice {
+        notice(
+            "导出内容提示",
+            "本文件含设备型号与作息信息（静止/活动分钟位图）。\n\
+             分享给他人前请确认接收方可信；勾选「匿名化设备键」可将设备标识替换为编号。",
+        );
+    }
     let Some(path) = crate::pick_save_path_with_filter(
         &default_name,
         "CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0",
@@ -427,6 +501,8 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
         anonymize: opts.anonymize,
         json: opts.json,
         include_activity: opts.include_activity,
+        redact_display_name: gates.redact_display_name,
+        tz_utc: gates.tz_utc,
     }));
 }
 

@@ -49,17 +49,31 @@ fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
         fixture.file_stem().unwrap().to_string_lossy(),
         anon as u8
     ));
+    // 组5 5b：镜像默认闸门（redact_display_name=开）——anon 在场时
+    // display_name 按会话映射「设备N」，recheck.py 同口径对账。
+    let name_map = anon_map.as_ref().map(|_| {
+        volttray_app::redact::device_session_map(
+            &volttray_app::attribution::display_name_session_order(&events),
+        )
+    });
     let csv_path = dir.join("out.csv");
     std::fs::write(
         &csv_path,
-        render_csv(&segments, anon_map.as_ref(), tz, generated),
+        render_csv(&segments, anon_map.as_ref(), name_map.as_ref(), tz, generated),
     )
     .unwrap();
-    let report = build_report_data(&events, &segments, anon_map.as_ref(), tz, generated);
+    let report = build_report_data(
+        &events,
+        &segments,
+        anon_map.as_ref(),
+        name_map.as_ref(),
+        tz,
+        generated,
+    );
     std::fs::write(dir.join("out.html"), render_html(&report)).unwrap();
     std::fs::write(
         dir.join("out.json"),
-        render_json_events(&events, anon_map.as_ref(), generated),
+        render_json_events(&events, anon_map.as_ref(), name_map.as_ref(), generated),
     )
     .unwrap();
 

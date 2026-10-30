@@ -396,6 +396,23 @@ def display_key(key, anon):
     return anon.get(key, key) if anon else key
 
 
+def display_name_session_map(events):
+    """组5 5b（C-3）：会话内 display_name 首现顺序 → 设备N
+    （attribution::display_name_session_order + redact::device_session_map
+    镜像；空名跳过；编号不承担匿名化职责）。"""
+    order = []
+    for ev in events:
+        if ev[0] == "read":
+            dn = ev[3]
+            if dn and dn not in order:
+                order.append(dn)
+    return {dn: "设备%d" % (i + 1) for i, dn in enumerate(order)}
+
+
+def map_display_name(dn, names):
+    return names.get(dn, dn) if names else dn
+
+
 # ---------------------------------------------------------------- CSV
 
 def csv_field(s):
@@ -408,14 +425,15 @@ CSV_HEADER = ("device_key,display_name,segment_type,start_ts,end_ts,"
               "duration_min,start_pct,end_pct,delta_pct,rate_pct_per_hour,note")
 
 
-def render_csv(segments, anon, off):
+def render_csv(segments, anon, names, off):
     rows = sorted(((display_key(s["device_key"], anon), s) for s in segments),
                   key=lambda x: (x[0], x[1]["start_ts"]))
     out = ["﻿" + CSV_HEADER]
     for key, s in rows:
         r = rate(s)
         out.append(",".join([
-            csv_field(key), csv_field(s["display_name"]), s["seg_type"],
+            csv_field(key), csv_field(map_display_name(s["display_name"], names)),
+            s["seg_type"],
             fmt_rfc3339(s["start_ts"], off), fmt_rfc3339(s["end_ts"], off),
             str(duration_min(s)), str(s["start_pct"]), str(s["end_pct"]),
             str(delta_pct(s)), "" if r is None else "%.2f" % r,
@@ -498,7 +516,7 @@ def detect_anon(keys_present, raw_keys):
     return False
 
 
-def check_csv(ck, path, segments, keys, off):
+def check_csv(ck, path, segments, keys, off, events):
     with open(path, "r", encoding="utf-8") as f:
         body = f.read()
     # 组5 自描述导出（N-12②）：CSV 头部新增 `#` manifest 注释块（BOM
@@ -517,7 +535,10 @@ def check_csv(ck, path, segments, keys, off):
         if line:
             first_col.add(line.split(",", 1)[0].strip('"'))
     anon = anonymize_map(keys) if detect_anon(first_col, keys) else None
-    want = render_csv(segments, anon, off)
+    # 组5 5b：镜像默认闸门（redact_display_name=开）——匿名化在场时
+    # display_name 按会话映射「设备N」。
+    names = display_name_session_map(events) if anon else None
+    want = render_csv(segments, anon, names, off)
     if body_cmp != want:
         gl, wl = body_cmp.splitlines(), want.splitlines()
         ck.eq("csv 行数", len(gl), len(wl))
@@ -542,13 +563,14 @@ def check_json(ck, path, events, keys):
         for d in e.get("devices", []):
             gk.add(d.get("physical_key"))
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
+    names = display_name_session_map(events) if anon else None
     want_events = []
     for ev in events:
         if ev[0] == "read":
             _, ts, pk, dn, pct, chg, src = ev
             want_events.append({"ts": ts, "physical_key": display_key(pk, anon),
-                                "display_name": dn, "percent": pct,
-                                "charging": chg, "source": src})
+                                "display_name": map_display_name(dn, names),
+                                "percent": pct, "charging": chg, "source": src})
         elif ev[0] == "run_start":
             want_events.append({"ts": ev[1], "event": "run_start"})
         elif ev[0] == "run_stop":
@@ -596,11 +618,12 @@ def check_html(ck, path, events, segments, keys, off):
         ck.eq("html 零外链 %s" % pat, len(hits), 0)
     gk = set(k for k, _ in got.get("devices", []))
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
+    names = display_name_session_map(events) if anon else None
     # 设备清单
     name_of = {}
     for ev in events:
         if ev[0] == "read":
-            name_of[display_key(ev[2], anon)] = ev[3]
+            name_of[display_key(ev[2], anon)] = map_display_name(ev[3], names)
     devices = [[k, v] for k, v in sorted(name_of.items())]
     ck.eq("html.devices", got.get("devices"), devices)
     # 段明细（展示键 + 排序）
@@ -611,7 +634,8 @@ def check_html(ck, path, events, segments, keys, off):
         segs.append(c)
     segs.sort(key=lambda s: (s["device_key"], s["start_ts"]))
     want_rows = [{
-        "device_key": s["device_key"], "display_name": s["display_name"],
+        "device_key": s["device_key"],
+        "display_name": map_display_name(s["display_name"], names),
         "segment_type": s["seg_type"], "start_ts": s["start_ts"], "end_ts": s["end_ts"],
         "duration_min": duration_min(s), "start_pct": s["start_pct"],
         "end_pct": s["end_pct"], "delta_pct": delta_pct(s),
@@ -684,7 +708,7 @@ def main():
     keys = event_keys(events)
     ck = Checker()
     if args.csv:
-        check_csv(ck, args.csv, segments, keys, args.tz)
+        check_csv(ck, args.csv, segments, keys, args.tz, events)
     if args.json:
         check_json(ck, args.json, events, keys)
     if args.html:

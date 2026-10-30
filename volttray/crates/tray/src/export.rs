@@ -59,13 +59,35 @@ pub(crate) fn run_stats_export(
     } else {
         None
     };
-    let offset = local_offset_minutes();
+    // 组5 5b（C-3）：anonymize=on 且脱敏闸门开 → display_name 会话
+    // 内映射「设备N」（与诊断面 redact::device_session_map 同函数同
+    // 序号）；闸门回退或 anonymize=off → None（保留真实型号，U-2C）。
+    let name_map = if req.anonymize && req.redact_display_name {
+        Some(volttray_app::redact::device_session_map(
+            &attr::display_name_session_order(&events),
+        ))
+    } else {
+        None
+    };
+    // 组5 5b（U-2 闸门，BvA-5 默认关）：tz_utc=true → 时间戳按 UTC
+    //（+00:00）渲染；false → 本地时区（现状，翻转挂 U-2 裁决）。
+    let offset = if req.tz_utc {
+        0
+    } else {
+        local_offset_minutes()
+    };
     let mut done: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     // E5（P1a）：CSV 主产物同样走 tmp→rename 原子写。
     match write_tmp_rename(
         &req.csv_path,
-        &attr::render_csv(&segments, anon.as_ref(), offset, wall_secs() as i64),
+        &attr::render_csv(
+            &segments,
+            anon.as_ref(),
+            name_map.as_ref(),
+            offset,
+            wall_secs() as i64,
+        ),
     ) {
         Ok(()) => done.push(req.csv_path.display().to_string()),
         Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
@@ -73,7 +95,12 @@ pub(crate) fn run_stats_export(
     let stem = req.csv_path.with_extension("");
     if req.json {
         let p = stem.with_extension("json");
-        let content = attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
+        let content = attr::render_json_events(
+            &events,
+            anon.as_ref(),
+            name_map.as_ref(),
+            wall_secs() as i64,
+        );
         match write_tmp_rename(&p, &content) {
             Ok(()) => done.push(p.display().to_string()),
             Err(e) => failed.push(format!("{}: {e}", p.display())),
@@ -85,6 +112,7 @@ pub(crate) fn run_stats_export(
             &events,
             &segments,
             anon.as_ref(),
+            name_map.as_ref(),
             offset,
             wall_secs() as i64,
         );
