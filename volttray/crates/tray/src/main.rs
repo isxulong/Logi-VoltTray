@@ -1893,8 +1893,7 @@ mod imp {
                         // 生效：探测轮在线设备跳过规则不变，G-36 红线）。
                         let guaranteed_due =
                             !probe_only && !sleeping && core.guaranteed_read_due(&s.id, now);
-                        if !probe_only && !sleeping && !guaranteed_due && !core.is_due(&s.id, now)
-                        {
+                        if !probe_only && !sleeping && !guaranteed_due && !core.is_due(&s.id, now) {
                             i += 1;
                             continue;
                         }
@@ -1926,12 +1925,16 @@ mod imp {
                                     core.begin_wake_probe(&s.id, now);
                                 }
                                 volttray_app::ProbeGate::BackoffSkip => {
-                                    telemetry.probe_backoff_skips.fetch_add(1, Ordering::Relaxed);
+                                    telemetry
+                                        .probe_backoff_skips
+                                        .fetch_add(1, Ordering::Relaxed);
                                     i += 1;
                                     continue;
                                 }
                                 volttray_app::ProbeGate::CapSkip => {
-                                    telemetry.probe_cap_daily_hits.fetch_add(1, Ordering::Relaxed);
+                                    telemetry
+                                        .probe_cap_daily_hits
+                                        .fetch_add(1, Ordering::Relaxed);
                                     i += 1;
                                     continue;
                                 }

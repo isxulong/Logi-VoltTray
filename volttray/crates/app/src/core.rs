@@ -64,7 +64,6 @@ pub enum PollDecision {
     Skip,
 }
 
-
 /// E10（C-5 裁 B 侧：单一额度函数）唤醒试探额度门控裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeGate {
@@ -989,9 +988,10 @@ impl AppCore {
         if entry.probe_window_count >= PROBE_DAILY_CAP {
             return ProbeGate::CapSkip;
         }
-        if let (Some(last), Some(iv)) =
-            (entry.last_wake_probe, backoff_interval(entry.probe_backoff_level))
-        {
+        if let (Some(last), Some(iv)) = (
+            entry.last_wake_probe,
+            backoff_interval(entry.probe_backoff_level),
+        ) {
             if now.duration_since(last) < iv {
                 return ProbeGate::BackoffSkip;
             }
@@ -2685,7 +2685,11 @@ mod tests {
         core.upsert_device(dev("a", 1));
         for i in 0..PROBE_DAILY_CAP {
             let now = t0 + Duration::from_secs(u64::from(i) * 6);
-            assert_eq!(core.probe_quota_gate("a", now), ProbeGate::Allow, "第 {i} 次应放行");
+            assert_eq!(
+                core.probe_quota_gate("a", now),
+                ProbeGate::Allow,
+                "第 {i} 次应放行"
+            );
             core.record_success("a", reading(50, false), now);
         }
         let now = t0 + Duration::from_secs(u64::from(PROBE_DAILY_CAP) * 6);

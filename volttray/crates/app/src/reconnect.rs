@@ -1092,7 +1092,7 @@ mod tests {
         let mut r = Reconnect::new();
         let t0 = Instant::now();
         let _ = r.record_result(t0, 1); // 正常态：有注册槽位
-        // 第 1 轮探测静默：未达阈值不判死，枚举沿用 30s 门控。
+                                        // 第 1 轮探测静默：未达阈值不判死，枚举沿用 30s 门控。
         assert!(!live.note_round(&[], &[SlotOutcome::Timeout]));
         assert_eq!(live.probe_silent_rounds(), 1);
         assert!(

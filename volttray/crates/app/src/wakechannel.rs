@@ -165,7 +165,6 @@ pub fn activity_bucket_key(
     }
 }
 
-
 // ---------------------------------------------------------------------
 // E10（红蓝对抗波二；设计文档 docs/design-e10-wake-attribution.md）：
 // 归因两级匹配（VID/PID+MI 放宽）+ 注册期绑定表 + 单函数门控。
@@ -661,22 +660,12 @@ mod tests {
             WakeBinding {
                 channel_key: "a".to_string(),
                 unit_id: Some("UID-MOUSE-A".to_string()),
-                instance_parts: vec![
-                    "7".into(),
-                    "2F3A1B2C".into(),
-                    "0".into(),
-                    "0001".into(),
-                ],
+                instance_parts: vec!["7".into(), "2F3A1B2C".into(), "0".into(), "0001".into()],
             },
             WakeBinding {
                 channel_key: "b".to_string(),
                 unit_id: Some("UID-MOUSE-B".to_string()),
-                instance_parts: vec![
-                    "6".into(),
-                    "9999CCCC".into(),
-                    "0".into(),
-                    "0001".into(),
-                ],
+                instance_parts: vec!["6".into(), "9999CCCC".into(), "0".into(), "0001".into()],
             },
         ];
         assert_eq!(
