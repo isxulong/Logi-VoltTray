@@ -548,6 +548,16 @@ def check_csv(ck, path, segments, keys, off, events):
         n_comments = len(body.splitlines()) - len(body_cmp.splitlines())
         print("PASS csv：%d 行逐字节一致（匿名化=%s，跳过 manifest 注释行 %d 行）" %
               (len(body_cmp.splitlines()) - 1, "开" if anon else "关", n_comments))
+        # 复核二 P2-3：原始字节比对（不剥 `#` 注释行的旧版工具口径）失败、
+        # 且剥后逐字节一致 → 差异仅在 manifest `#` 注释头。给出明确提示，
+        # 指向注释头与新版工具，避免旧工具用户误判为数据不一致。
+        if n_comments > 0 and body != want:
+            print("提示：本 CSV 在 BOM 与表头之间含 %d 行 manifest `#` 注释头；"
+                  "不剥注释行的旧版复算工具做字节比对会失败——该失败的差异仅在"
+                  " `#` 注释头，数据区已逐字节一致。请使用随 v0.3.26 起发布的新版"
+                  " tools/recheck.py（剥 BOM → 丢 `#` 注释行 → 再字节比对）；"
+                  "注释头各键口径见注释行 manifest.audit / manifest.diag_audit "
+                  "指向的审计文档。" % n_comments)
 
 
 def check_json(ck, path, events, keys):
