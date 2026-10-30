@@ -156,11 +156,13 @@ jobs:
       # E1（2026-10-24 红蓝对抗终审）：src 文本纯净性断言——诊断导出/日志
       # 相关源码若混入 NUL 字节或非法编码字节，会被 grep 判为二进制，
       # 依赖 grep 的下游守卫（见 redline-guard-advisory 注释）将静默漏检。
-      # 勘误（2026-10-24 字节级实测）：此前「tray/src/main.rs 含会被 grep
-      # 误判为二进制的字节序列，不加 -a 会漏 8 处」的说法系当时本地沙箱
-      # 网络盘短读伪影——对 main.rs / settings.rs / core.rs 逐字节扫描
-      # （NUL、控制字符、UTF-8 合法性）均干净且与远端 blob 一致，GNU
-      # grep 对文件内容的判定是确定的，本断言无 flaky 风险。发现判二进制
+      # 勘误（2026-10-24 字节级实测；G-31 统一口径 2026-10-31）：此前
+      # 「tray/src/main.rs 含会被 grep 误判为二进制的字节序列，不加 -a
+      # 会漏 8 处」的说法系当时本地沙箱网络盘 SEEK_HOLE 语义所致的读路径
+      # 伪影——对 main.rs / settings.rs / core.rs 逐字节扫描（NUL、控制
+      # 字符、UTF-8 合法性）均干净，满读 md5 与远端 blob 一致、无短读。
+      # 教训：grep 的二进制判定依赖读路径 / FS 语义，发现判二进制先换
+      # 文件系统复判；本断言跑在 CI 稳定 FS 上、无 flaky 风险，复判一致
       # 即红，防真实字节污染回归。
       - name: src files must not be judged binary (E1)
         working-directory: ${{ github.workspace }}
@@ -354,8 +356,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # grep -a：tray/src/main.rs 含会被 grep 误判为二进制的字节序列，
-      # 不加 -a 会漏 8 处（2026-10-22 实测教训，已计入统计口径）。
+      # grep -a（G-31 统一口径，2026-10-31）：grep 的二进制判定依赖读路径 /
+      # FS 语义——2026-10-22 本地沙箱网络盘 SEEK_HOLE 语义曾致 tray/src/main.rs
+      # 被误判二进制、不加 -a 漏 8 处（事后字节级实测：满读 md5 与远端 blob
+      # 一致、源文件干净）；加 -a 兜住读路径伪影，发现判二进制先换 FS 复判。
       - name: deletion-call static pattern check (report-only)
         shell: bash
         run: |

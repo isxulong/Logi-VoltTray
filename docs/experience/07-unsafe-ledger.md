@@ -11,7 +11,7 @@
 
 - 统计方式：`grep -rna 'unsafe' volttray/crates/*/src/*.rs`，人工剔除非代码命中
   （注释 / 文档中的 "unsafe" 字样，如 `autostart.rs` 内以「实现说明」开头的说明性 doc 注释）。
-  `-a` 不可省：防短读伪影，**与 E1 勘误口径一致**（`ci.yml`「src files must not be judged binary (E1)」2026-10-24 字节级实测：源文件本身干净、GNU grep 对文件内容的判定是确定的；此前「main.rs 含会被 grep 误判为二进制的字节序列」的说法系本地沙箱网络盘短读伪影，须以 `-a` 兜住，不归因于「文件含多字节字符」）。
+  `-a` 不可省：**判定依赖读路径 / FS 语义，先换 FS 复判**（G-31 统一口径，2026-10-31；与 `ci.yml`「src files must not be judged binary (E1)」注释同源）——2026-10-24 字节级实测：源文件本身干净（满读 md5 与远端 blob 一致、无短读），根因为本地沙箱网络盘 **SEEK_HOLE 语义**所致的读路径伪影（grep 探测读命中稀疏空洞段而误判二进制）；此前「main.rs 含会被 grep 误判为二进制的字节序列」的说法即此伪影，不归因于「文件含多字节字符」。发现判二进制先换文件系统复判，复判一致才按真实字节污染处置。
 - 剔除步骤已固化为命令（不靠人工记忆、不靠行号记忆）：
   `grep -rna 'unsafe' volttray/crates/*/src/*.rs | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)' | wc -l`
   —— 过滤掉整行以 `//` 或 `/*` 开头的注释行（SAFETY 注释与说明性 doc 注释）；
