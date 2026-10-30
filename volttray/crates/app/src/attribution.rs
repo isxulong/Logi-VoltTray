@@ -2662,9 +2662,7 @@ mod tests {
                 let arr = json["events"].as_array().unwrap();
                 let bucket_entries: Vec<&serde_json::Value> = arr
                     .iter()
-                    .filter(|e| {
-                        e.get("event").and_then(|v| v.as_str()) == Some("activity_buckets")
-                    })
+                    .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("activity_buckets"))
                     .collect();
                 if bitmap_on {
                     assert_eq!(bucket_entries.len(), 1, "位图开：缺 activity_buckets");
@@ -2699,8 +2697,12 @@ mod tests {
                     "anon={anon_on} bitmap={bitmap_on}"
                 );
                 // 顶层字段集合恒等于 manifest 字典（开关不增删顶层键）。
-                let mut top: Vec<&str> =
-                    report.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                let mut top: Vec<&str> = report
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(|k| k.as_str())
+                    .collect();
                 top.sort_unstable();
                 let mut dict = crate::export_manifest::HTML_DATA_TOP_FIELDS.to_vec();
                 dict.sort_unstable();
