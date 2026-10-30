@@ -2,6 +2,8 @@
 
 **English** | [简体中文](README.md)（中文版为主位版本，内容如有出入以中文版为准）
 
+> **UI quotation convention（G-03）**: the tray UI is Chinese-only. Where this file quotes what the UI literally shows, the quotation follows the「中文字面量（英文意译）」convention — the on-screen Chinese string appears as-is, with an English gloss in parentheses (e.g. 100% shows 「满」 ("full"), not a literal "FULL"). These UI quotations share one source with the semantic ID table in [docs/experience/02-collaboration-playbook.md](docs/experience/02-collaboration-playbook.md) (E44); changes to a UI string update both READMEs and that table in the same change.
+
 Show your Logitech device's battery level right on the Windows tray icon: the live battery percentage of your keyboard / mouse is drawn directly on the system tray icon — no windows to open, ever.
 
 [![GitHub Release](https://img.shields.io/github/v/release/isxulong/Logi-VoltTray)](https://github.com/isxulong/Logi-VoltTray/releases)
@@ -22,9 +24,9 @@ Logitech's official software has no tray battery number — this app fills the g
 
 ## Features
 
-- **Tray battery display**: the battery percentage is drawn directly on the tray icon (100% shows "FULL"; genuinely unknown shows "?"; an offline device with a last-known reading shows that number grayed out, and "--" only appears when no reading was ever obtained). One device is displayed by default; the right-click menu lists one row per device — click to pin which one the tray shows.
+- **Tray battery display**: the battery percentage is drawn directly on the tray icon (100% shows 「满」 ("full"); genuinely unknown shows "?"; an offline device with a last-known reading shows that number grayed out, and "--" only appears when no reading was ever obtained). One device is displayed by default; the right-click menu lists one row per device — click to pin which one the tray shows.
 - **Broad read channels**: devices behind HID++ 2.0 unified receivers (Unifying / Bolt / Lightspeed) and legacy HID++ 1.0 devices (direct register reads) are supported (verified on physical hardware); Bluetooth direct connection and wired connections are experimental channels (not verified on physical hardware) — see the "Experimental features (not verified on hardware)" section below; the battery source falls back automatically level by level (unified battery → battery status → voltage conversion → HID power descriptor).
-- **Real device names**: shows real model names like "MX Keys" (read via the HID++ device-name feature or the receiver pairing-name register); if unreadable it falls back to a clean placeholder like "USB Receiver · Slot 1" — never a bare "?" as a name.
+- **Real device names**: shows real model names like "MX Keys" (read via the HID++ device-name feature or the receiver pairing-name register); if unreadable it falls back to a clean placeholder like 「USB Receiver · 槽位 1」 ("USB Receiver · Slot 1") — never a bare "?" as a name.
 - **Tiered battery colors**: the icon color changes by battery tier — by default ≤20% red, ≤50% yellow, above that green; the number of tiers (2–5), thresholds, and colors are all customizable. Colors are not fixed per device type.
 - **Low-battery blinking alert**: when the battery drops below the threshold the icon blinks at 1 Hz; the threshold is adjusted with a slider between 5%–50% (default 20%, step 5%), and threshold / toggle changes take effect immediately without waiting for the next polling round. Left-click the tray icon to stop the current blinking (right-click opens the menu, it does not stop blinking); the stop persists until the low-battery condition clears and the alert re-arms automatically; flipping the blink toggle from "off" back to "on" resumes blinking immediately; charging devices never blink or notify.
 - **Fully customizable appearance**: icon shape (rounded / square / transparent, no background), background (dark / light / custom color), font, text size (40–160%), background opacity (20–100%) — every change in the settings window applies instantly.
