@@ -75,6 +75,74 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: python -m unittest discover -s tests -v
 
+      # 组7 G-35 / 组8 N-06/N-07/N-13（2026-10-31 红蓝对抗修复波三）：
+      # 文档锚点静态断言 + E18 三件套裸值禁令（pwsh 冒烟——AvB P2-2
+      # 修正落点：实读锚点为 windows-latest 链，不预设 ubuntu job）。
+      # 断言分两层：①硬断言——main 既有锚点（POLL_CHARGING 常量、
+      # E18 三件套标记、N-06/N-07/N-13 文档锚点）缺失即红；
+      # ②在场门控——PR #19（IMPL-CORE）合入后才存在的诊断计数器
+      # 字段，未合入时显式 skip 并打印提示，合入后自动升级为硬校验。
+      - name: docs anchors smoke (G-35/N-06/N-07/N-13, pwsh)
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          $fail = 0
+          function Err($msg) { Write-Host "::error::$msg"; $script:fail = 1 }
+          function Ok($msg) { Write-Host "[ok] $msg" }
+
+          # --- G-35: E18 三件套块在场、锚点齐、不含实测裸值形态 ---
+          $e18 = Get-Content docs/experience/01-engineering-lessons.md -Raw
+          $m = [regex]::Match($e18, '(?s)<!-- G-35 三件套 begin -->(.*?)<!-- G-35 三件套 end -->')
+          if (-not $m.Success) { Err 'E18 三件套标记缺失（G-35）' }
+          else {
+            $blk = $m.Groups[1].Value
+            if ([regex]::IsMatch($blk, '\d+\s*(毫秒|秒|分钟|小时|帧|MB|KB|Hz)')) {
+              Err 'E18 三件套块含实测裸值形态（裸值只进 N-04/N-05 定位记录，不进正文）'
+            } else { Ok 'E18 三件套块无实测裸值形态' }
+            foreach ($a in '32e8367', '93e28a9b', 'POLL_CHARGING', 'poll_rounds_total', '--tier-audit') {
+              if ($blk -notmatch [regex]::Escape($a)) { Err "E18 三件套缺锚点：$a" }
+            }
+            Ok 'E18 三件套锚点齐（口径/取数命令/锚定 commit）'
+          }
+
+          # --- G-35: main 既有常量锚点（硬断言）---
+          if (-not (Select-String -Path volttray/crates/app/src/core.rs -Pattern 'POLL_CHARGING' -Quiet)) {
+            Err 'core.rs 缺 POLL_CHARGING 常量锚点'
+          } else { Ok 'POLL_CHARGING 常量锚点在场' }
+
+          # --- G-35: IMPL-CORE 计数器在场门控（#19 未合入 skip，合入后硬校验）---
+          $diag = 'volttray/crates/app/src/diag_export.rs'
+          if ((Test-Path $diag) -and (Select-String -Path $diag -Pattern 'poll_rounds_total' -Quiet)) {
+            foreach ($c in 'poll_round_last_duration_ms', 'poll_round_max_duration_ms', 'slot_outcome_success', 'slot_outcome_timeout', 'slot_outcome_error', 'slot_query_charging', 'slot_query_normal', 'poll_skipped_ff_cache', 'poll_skipped_dead_slot', 'poll_skipped_sleep') {
+              if (-not (Select-String -Path $diag -Pattern $c -Quiet)) { Err "diag_export.rs 缺计数器字段：$c" }
+            }
+            Ok 'IMPL-CORE 计数器字段全部在场（在场门控升级为硬校验）'
+          } else {
+            Write-Host '[skip] poll_rounds_total 未在场（PR #19 未合入）——IMPL-CORE 计数器校验 deferred，合入后自动生效'
+          }
+
+          # --- N-06: README / 04-onboarding 折叠计数口径锚点 ---
+          foreach ($f in 'README.md', 'docs/experience/04-onboarding.md') {
+            if (-not (Select-String -Path $f -Pattern 'suppressed' -Quiet)) { Err "$f 缺 suppressed 折叠计数口径（N-06）" }
+            elseif (-not (Select-String -Path $f -Pattern '诊断导出.*计数器|诊断计数器' -Quiet)) { Err "$f 缺「以诊断计数器为准」口径（N-06）" }
+            else { Ok "$f N-06 锚点在场" }
+          }
+
+          # --- N-07: 发布检查单双设备实测条目 ---
+          if (-not (Select-String -Path docs/experience/03-release-quality-gate.md -Pattern '双设备' -Quiet)) {
+            Err '03 发布检查单缺双设备实测条目（N-07）'
+          } else { Ok '03 发布检查单双设备条目在场' }
+
+          # --- N-13: decisions.md D-99 定位结论锚点 ---
+          $dec = Get-Content volttray/docs/decisions.md -Raw
+          foreach ($a in 'D-99', '58b1bd23') {
+            if ($dec -notmatch [regex]::Escape($a)) { Err "decisions.md 缺 N-13 锚点：$a" }
+          }
+          Ok 'decisions.md D-99 N-13 定位结论在场'
+
+          if ($fail -ne 0) { exit 1 }
+          Write-Host 'docs anchors smoke 全部通过'
+
       - name: build release
         run: cargo build --release --locked -p volttray-tray
 
