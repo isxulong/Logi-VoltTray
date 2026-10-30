@@ -1,6 +1,6 @@
 # LogiVoltTray
 
-**English** | [简体中文](README.md)（中文版为主位版本，内容如有出入以中文版为准）
+**English** | [简体中文](README.md)（中文版为主位版本；两份 README 如有不一致即为缺陷，请到 [issues](https://github.com/isxulong/Logi-VoltTray/issues) 报告——一致性门禁见 [docs/experience/02-collaboration-playbook.md](docs/experience/02-collaboration-playbook.md) E44）
 
 > **UI quotation convention（G-03）**: the tray UI is Chinese-only. Where this file quotes what the UI literally shows, the quotation follows the「中文字面量（英文意译）」convention — the on-screen Chinese string appears as-is, with an English gloss in parentheses (e.g. 100% shows 「满」 ("full"), not a literal "FULL"). These UI quotations share one source with the semantic ID table in [docs/experience/02-collaboration-playbook.md](docs/experience/02-collaboration-playbook.md) (E44); changes to a UI string update both READMEs and that table in the same change.
 
