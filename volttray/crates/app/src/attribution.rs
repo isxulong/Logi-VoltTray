@@ -2040,7 +2040,9 @@ document.getElementById("mday").textContent=D.meta.days_covered;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::{BoundaryDevice, ReadEvent, SOURCE_POLL, SOURCE_WAKE_FIRST_READ};
+    use crate::stats::{
+        ActivityDay, BoundaryDevice, ReadEvent, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
+    };
 
     pub(super) const CST: i32 = 480; // +08:00
 
