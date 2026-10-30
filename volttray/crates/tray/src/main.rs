@@ -924,6 +924,22 @@ mod imp {
         pub(crate) poll_skipped_dead_slot: AtomicU64,
         /// 组2 N-03：休眠无唤醒资格被 poll_decision 挡下的轮询数。
         pub(crate) poll_skipped_sleep: AtomicU64,
+        /// 组3 N-04/05 打点：整轮轮序号（仅整轮，探测轮不计）。
+        pub(crate) poll_rounds_total: AtomicU64,
+        /// 组3：最近一轮整轮耗时（毫秒，轮起止墙钟差口径，D-98）。
+        pub(crate) poll_round_last_duration_ms: AtomicU64,
+        /// 组3：运行内最大整轮耗时（毫秒，同口径）。
+        pub(crate) poll_round_max_duration_ms: AtomicU64,
+        /// 组3：各槽 outcome 累计——查询成功。
+        pub(crate) slot_outcome_success: AtomicU64,
+        /// 组3：各槽 outcome 累计——超时（休眠路径）。
+        pub(crate) slot_outcome_timeout: AtomicU64,
+        /// 组3：各槽 outcome 累计——错误（DeviceGone / io / 硬失败）。
+        pub(crate) slot_outcome_error: AtomicU64,
+        /// 组3：已执行查询的档位分布——充电 15s 档。
+        pub(crate) slot_query_charging: AtomicU64,
+        /// 组3：已执行查询的档位分布——常规档。
+        pub(crate) slot_query_normal: AtomicU64,
     }
 
     impl Telemetry {
@@ -945,6 +961,14 @@ mod imp {
                 poll_skipped_ff_cache: AtomicU64::new(0),
                 poll_skipped_dead_slot: AtomicU64::new(0),
                 poll_skipped_sleep: AtomicU64::new(0),
+                poll_rounds_total: AtomicU64::new(0),
+                poll_round_last_duration_ms: AtomicU64::new(0),
+                poll_round_max_duration_ms: AtomicU64::new(0),
+                slot_outcome_success: AtomicU64::new(0),
+                slot_outcome_timeout: AtomicU64::new(0),
+                slot_outcome_error: AtomicU64::new(0),
+                slot_query_charging: AtomicU64::new(0),
+                slot_query_normal: AtomicU64::new(0),
                 run_started_at_rfc3339: volttray_app::fmt_rfc3339(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1855,6 +1879,9 @@ mod imp {
             // 零主动查询；唯一裁决点 AppCore::poll_decision，app 层单测覆盖）。
             let now = Instant::now();
             let mut alerts: Vec<(String, String)> = Vec::new();
+            // 组3 N-04/05 打点：本轮槽 outcome / 档位分布计数；整轮
+            // 耗时取轮起（now）至轮末（快照前）墙钟差（D-98 口径）。
+            let mut round_tally = volttray_app::RoundTally::default();
             {
                 let mut core = match core.lock() {
                     Ok(c) => c,
@@ -1993,6 +2020,8 @@ mod imp {
                             Ok(r) => {
                                 s.hard_failures = 0;
                                 outcomes.push(SlotOutcome::Success);
+                                // 组3 N-04/05 打点：成功 + 档位分布。
+                                round_tally.note_success(r.charging);
                                 // R-3/R-11（v0.3.17）：唤醒探测（休眠或装填
                                 // 灰显）成功计数，供诊断导出 summary。
                                 if sleeping || armed_gray {
@@ -2057,6 +2086,8 @@ mod imp {
                                         UnknownReason::NoDeviceAtSlot => SlotOutcome::Responded,
                                         _ => SlotOutcome::Timeout,
                                     });
+                                    // 组3 N-04/05 打点：超时（休眠路径）。
+                                    round_tally.note_timeout();
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason={} (sleep path)",
                                         s.id,
@@ -2100,6 +2131,8 @@ mod imp {
                                 // 接收器回了字节 = 通道句柄活着（Responded）。
                                 UnknownReason::DeviceGone => {
                                     outcomes.push(SlotOutcome::Responded);
+                                    // 组3 N-04/05 打点：设备消失计错误桶。
+                                    round_tally.note_error();
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason=device_gone (deregistered immediately)",
                                         s.id
@@ -2122,6 +2155,8 @@ mod imp {
                                         // 设备回了字节但给不出电量 = 句柄活着。
                                         outcomes.push(SlotOutcome::Responded);
                                     }
+                                    // 组3 N-04/05 打点：其余失败计错误桶。
+                                    round_tally.note_error();
                                     s.hard_failures += 1;
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason={} (hard failure {}/{})",
@@ -2237,6 +2272,35 @@ mod imp {
                         "LogiVoltTray 电量显示已过期".into(),
                         format!("设备 {id} 的电量读数已过期，已灰显最后一次已知电量"),
                     ));
+                }
+                // 组3 N-04/05：整轮观测落账——槽 outcome / 档位分布
+                // 全轮次累计；轮序号与整轮耗时仅整轮（探测轮不计，
+                // D-98 口径：轮起「轮询一轮」至轮末快照前墙钟差）。
+                let round_ms =
+                    volttray_app::RoundTally::round_duration_ms(now, Instant::now());
+                telemetry
+                    .slot_outcome_success
+                    .fetch_add(round_tally.success as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_outcome_timeout
+                    .fetch_add(round_tally.timeout as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_outcome_error
+                    .fetch_add(round_tally.error as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_query_charging
+                    .fetch_add(round_tally.charging as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_query_normal
+                    .fetch_add(round_tally.normal as u64, Ordering::Relaxed);
+                if !probe_only {
+                    telemetry.poll_rounds_total.fetch_add(1, Ordering::Relaxed);
+                    telemetry
+                        .poll_round_last_duration_ms
+                        .store(round_ms, Ordering::Relaxed);
+                    telemetry
+                        .poll_round_max_duration_ms
+                        .fetch_max(round_ms, Ordering::Relaxed);
                 }
                 let snap = core.snapshot(now);
                 gui.send(GuiMsg::Snapshot(Box::new(snap)));

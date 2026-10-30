@@ -696,6 +696,41 @@ def check_html(ck, path, events, segments, keys, off):
               ("开" if anon else "关"))
 
 
+# 组3 N-04/05 档位对账期望档（秒）：与 Rust 侧常量同源口径——
+# POLL_CHARGING=15（充电 15s 档）、DEFAULT_POLL_SECS=1800（常规默认档）。
+TIER_CHARGING_SECS = 15
+TIER_NORMAL_SECS = 1800
+
+
+def tier_audit(events):
+    """组3 N-04/05 档位对账（信息性输出，不判负）：按设备 × 档位
+    （充电 / 常规，由相邻两条读数的 charging 态共同判定）统计相邻
+    读数间隔，给出样本数 / 中位 / 最大 / 跳轮倍数（间隔 ÷ 期望档，
+    四舍五入，≥1）。表观读数间隔 = 轮间隔 + 整轮耗时 + 跳轮叠加，
+    口径见 decisions.md D-98。"""
+    reads = {}
+    for ev in events:
+        if ev[0] == "read":
+            _, ts, pk, _dn, _pct, chg, _src = ev
+            reads.setdefault(pk, []).append((ts, chg))
+    lines = []
+    for pk in sorted(reads):
+        xs = sorted(reads[pk])
+        buckets = {"charging": [], "normal": []}
+        for (t0, c0), (t1, c1) in zip(xs, xs[1:]):
+            buckets["charging" if (c0 and c1) else "normal"].append(t1 - t0)
+        for tier, expect in (("charging", TIER_CHARGING_SECS),
+                             ("normal", TIER_NORMAL_SECS)):
+            iv = sorted(buckets[tier])
+            if not iv:
+                continue
+            med = iv[len(iv) // 2]
+            mult = max(1, int(med / expect + 0.5))
+            lines.append("档位对账 %s [%s]：样本 %d，中位 %ds（≈%d×%ds 档），最大 %ds"
+                         % (pk[:32], tier, len(iv), med, mult, expect, iv[-1]))
+    return lines
+
+
 def main():
     # Windows 控制台/管道默认编码（cp1252/GBK）无法输出中文摘要——
     # 统一把 stdout/stderr 重配为 UTF-8（CI windows-latest 实测 cp1252
@@ -710,7 +745,16 @@ def main():
     ap.add_argument("--html", help="导出的 HTML 报告")
     ap.add_argument("--json", help="导出的 JSON 事件序列")
     ap.add_argument("--tz", type=int, default=480, help="本地时区偏移（分钟，默认 480=+08:00）")
+    ap.add_argument("--tier-audit", action="store_true",
+                    help="组3 N-04/05：只做档位对账（读数间隔 × 期望档），信息性输出不判负")
     args = ap.parse_args()
+    if args.tier_audit:
+        events = load_events(([args.archive] if args.archive else []) + [args.stats])
+        lines = tier_audit(events)
+        for line in lines:
+            print(line)
+        print("档位对账：%d 行（设备 %d 个，口径 D-98）" % (len(lines), len(event_keys(events))))
+        sys.exit(0)
     if not (args.csv or args.html or args.json):
         ap.error("--csv/--html/--json 至少给一个")
 

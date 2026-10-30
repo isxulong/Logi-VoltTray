@@ -64,6 +64,53 @@ pub enum PollDecision {
     Skip,
 }
 
+/// 组3 N-04/05 定位打点：单轮槽 outcome / 档位分布计数与整轮耗时
+/// 口径。整轮耗时 = 轮起止墙钟差（含逐槽查询、轮内晋级裁决与失效
+/// 自愈 I/O），与各槽查询耗时不存在求和关系；表观读数间隔另含
+/// 轮间等待（档位）——N-05「52s」候选解释即「轮间隔 15s
+///（POLL_CHARGING）+ 整轮 I/O」的口径差（D-98）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RoundTally {
+    /// 本轮轮询查询成功槽数。
+    pub success: u32,
+    /// 超时（休眠路径，含 NoDeviceAtSlot 等价语义）槽数。
+    pub timeout: u32,
+    /// 错误（DeviceGone / io / 硬失败）槽数。
+    pub error: u32,
+    /// 已执行查询中设备处于充电档（15s 档）的次数。
+    pub charging: u32,
+    /// 已执行查询中设备处于常规档的次数。
+    pub normal: u32,
+}
+
+impl RoundTally {
+    pub fn note_success(&mut self, charging: bool) {
+        self.success += 1;
+        if charging {
+            self.charging += 1;
+        } else {
+            self.normal += 1;
+        }
+    }
+
+    pub fn note_timeout(&mut self) {
+        self.timeout += 1;
+    }
+
+    pub fn note_error(&mut self) {
+        self.error += 1;
+    }
+
+    pub fn total(&self) -> u32 {
+        self.success + self.timeout + self.error
+    }
+
+    /// 整轮耗时口径：轮起止墙钟差（毫秒），与槽 outcome 无关。
+    pub fn round_duration_ms(round_start: Instant, round_end: Instant) -> u64 {
+        round_end.saturating_duration_since(round_start).as_millis() as u64
+    }
+}
+
 /// E10（C-5 裁 B 侧：单一额度函数）唤醒试探额度门控裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeGate {
@@ -1632,6 +1679,40 @@ mod tests {
         let late = t0 + Duration::from_secs(7200);
         assert_eq!(core.requeue_stalled(late), 0);
         assert_eq!(core.entries()[0].next_due, None);
+    }
+
+    /// 组3 N-04/05：整轮耗时口径钉板——时间注入构造 3 槽 2 超时
+    /// 场景，整轮耗时取轮起止墙钟差，与槽 outcome 组合无关。
+    #[test]
+    fn round_tally_wallclock_not_slot_sum() {
+        let t0 = Instant::now();
+        let mut tally = RoundTally::default();
+        tally.note_success(true);
+        tally.note_timeout();
+        tally.note_timeout();
+        assert_eq!(tally.total(), 3);
+        assert_eq!(tally.timeout, 2);
+        assert_eq!(tally.success, 1);
+        assert_eq!(tally.charging, 1);
+        assert_eq!(tally.normal, 0);
+        let dur = RoundTally::round_duration_ms(t0, t0 + Duration::from_millis(37_000));
+        assert_eq!(dur, 37_000);
+    }
+
+    /// 组3 N-05 钉板：charging 态在线设备 poll_decision 一律 Probe
+    ///（15s 档节奏由 next_due/tier_interval 承担，决策层不拦截）。
+    #[test]
+    fn poll_decision_charging_online_probes() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(55, true), t0);
+        assert_eq!(
+            core.entries()[0].device.battery.as_ref().map(|b| b.charging),
+            Some(true)
+        );
+        let later = t0 + Duration::from_secs(15);
+        assert_eq!(core.poll_decision("a", later), PollDecision::Probe);
     }
 
     #[test]

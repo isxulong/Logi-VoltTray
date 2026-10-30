@@ -177,3 +177,33 @@ fn activity_bitmap_legacy_fixture_matches_recheck_py() {
         }
     }
 }
+
+
+/// 组3 N-04/05：recheck.py 档位对账在 stats_recheck.jsonl 固件上可跑，
+/// exit 0 且充电 / 常规两档输出行齐备（信息性观测集，口径 D-98）。
+#[test]
+fn tier_audit_fixture_runs() {
+    if !python3_available() {
+        eprintln!("python3 不可用，跳过档位对账（stats_recheck 固件）");
+        return;
+    }
+    let script = repo_root().join("tools/recheck.py");
+    let fixture = repo_root().join("fixtures/stats_recheck.jsonl");
+    let out = Command::new("python3")
+        .arg(&script)
+        .arg("--stats")
+        .arg(&fixture)
+        .arg("--tier-audit")
+        .output()
+        .unwrap_or_else(|e| panic!("spawn python3 failed: {e}"));
+    assert!(
+        out.status.success(),
+        "tier-audit exit={:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[charging]"), "缺充电档行：{stdout}");
+    assert!(stdout.contains("[normal]"), "缺常规档行：{stdout}");
+    assert!(stdout.contains("档位对账"), "缺对账标题：{stdout}");
+}
