@@ -152,7 +152,7 @@
 
 **可执行做法**：
 
-1. 改动触及 `cfg(windows)` 代码（含 import、API 签名、结构体构造）时，推送 CI 前先在本地做 Windows target 交叉 check：`rustup target add x86_64-pc-windows-msvc` 后用 zig 作 linker 跑 `cargo check --target x86_64-pc-windows-msvc`（沙箱无 MSVC 也能用）；clippy 同样按 Windows target 跑一遍。
+1. 改动触及 `cfg(windows)` 代码（含 import、API 签名、结构体构造）时，推送 CI 前先在本地做 Windows target 交叉 check：**现行口径与 ci.yml 一致**——`rustup target add x86_64-pc-windows-gnu` 后跑 `cargo check --target x86_64-pc-windows-gnu`（G-32，2026-10-31 红蓝对抗终审修订；zig 作 linker 交叉 `x86_64-pc-windows-msvc` 为 v0.3.15 时期历史路径，沙箱无 MSVC 也可用，本条案例即该路径的实证）；clippy 无自动 windows 覆盖，须**手动加 `--target x86_64-pc-windows-gnu`** 同样跑一遍。
 2. windows crate 的模块路径与 trait 实现**以所用版本的文档 / 源码为准**，不凭记忆写——crate 小版本之间模块会搬家（上例 `Dialogs` 即如此）。
 3. CI 翻车后的修复 commit 里注明「本地交叉验证已过」，让审查者知道这轮不是盲修。
 

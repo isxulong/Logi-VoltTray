@@ -21,7 +21,7 @@
 | B2 | **历史：v0.3.17 前为 fmt 回推核验，已废除**（[RELEASES.md](../../volttray/RELEASES.md) v0.3.17）——原机制（fmt bot 自动回推致构建提交 ≠ main HEAD，须整树 diff 证明语义等价）自 v0.3.17 起改为 `cargo fmt --check` 不一致即失败、由作者本地修复（D-79 / [01 E31](01-engineering-lessons.md)），此后发布不再产生「回推错位」；v0.3.16 及更早版本的放行取证记录见 git 历史 | — | — |
 | B3 | EXE 内嵌版本资源（FileVersion / ProductVersion）与发布版本一致 | 下载产物查文件属性版本 | 版本资源停留旧版（本项目 v0.3.8 起由 `CARGO_PKG_VERSION` 派生，防手工脱节） |
 | B4 | 构建产物来源可追溯 | 记录 CI run / 构建提交 / 下载渠道 | 「本地随手 build 的包」进 Release |
-| B5 | **Windows 专属改动已过本地交叉验证**：触及 `cfg(windows)` 代码的提交，推送 CI 前已按 Windows target 本地 `cargo check` + `clippy`（如 zig 交叉 `x86_64-pc-windows-msvc`） | 看修复 / 提交记录中的交叉验证说明，或自己复跑 | Linux 侧全绿、Windows CI 第一次编译就炸（v0.3.15 首个 CI run 的 clippy 失败，详见 [01 E16](01-engineering-lessons.md#e16-windows-专属代码合并前必须本地交叉验证别把-ci-当第一道编译器)） |
+| B5 | **Windows 专属改动已过本地交叉验证**：触及 `cfg(windows)` 代码的提交，推送 CI 前已按 Windows target 本地 `cargo check` + `clippy`（现行口径＝与 ci.yml 一致的 `x86_64-pc-windows-gnu` 交叉 target；clippy 无自动 windows 覆盖，须手动 `--target x86_64-pc-windows-gnu`。zig 交叉 `x86_64-pc-windows-msvc` 为 v0.3.15 时期历史路径——G-32，2026-10-31） | 看修复 / 提交记录中的交叉验证说明，或自己复跑 | Linux 侧全绿、Windows CI 第一次编译就炸（v0.3.15 首个 CI run 的 clippy 失败，详见 [01 E16](01-engineering-lessons.md#e16-windows-专属代码合并前必须本地交叉验证别把-ci-当第一道编译器)） |
 
 ## C. 产物校验（证据优于自述）
 
