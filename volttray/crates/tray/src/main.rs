@@ -2276,8 +2276,7 @@ mod imp {
                 // 组3 N-04/05：整轮观测落账——槽 outcome / 档位分布
                 // 全轮次累计；轮序号与整轮耗时仅整轮（探测轮不计，
                 // D-98 口径：轮起「轮询一轮」至轮末快照前墙钟差）。
-                let round_ms =
-                    volttray_app::RoundTally::round_duration_ms(now, Instant::now());
+                let round_ms = volttray_app::RoundTally::round_duration_ms(now, Instant::now());
                 telemetry
                     .slot_outcome_success
                     .fetch_add(round_tally.success as u64, Ordering::Relaxed);

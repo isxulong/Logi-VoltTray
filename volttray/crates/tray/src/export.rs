@@ -351,7 +351,9 @@ pub(crate) fn export_diag(
         poll_skipped_dead_slot: telemetry.poll_skipped_dead_slot.load(Ordering::Relaxed),
         poll_skipped_sleep: telemetry.poll_skipped_sleep.load(Ordering::Relaxed),
         poll_rounds_total: telemetry.poll_rounds_total.load(Ordering::Relaxed),
-        poll_round_last_duration_ms: telemetry.poll_round_last_duration_ms.load(Ordering::Relaxed),
+        poll_round_last_duration_ms: telemetry
+            .poll_round_last_duration_ms
+            .load(Ordering::Relaxed),
         poll_round_max_duration_ms: telemetry.poll_round_max_duration_ms.load(Ordering::Relaxed),
         slot_outcome_success: telemetry.slot_outcome_success.load(Ordering::Relaxed),
         slot_outcome_timeout: telemetry.slot_outcome_timeout.load(Ordering::Relaxed),

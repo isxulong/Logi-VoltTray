@@ -1708,7 +1708,11 @@ mod tests {
         core.upsert_device(dev("a", 1));
         core.record_success("a", reading(55, true), t0);
         assert_eq!(
-            core.entries()[0].device.battery.as_ref().map(|b| b.charging),
+            core.entries()[0]
+                .device
+                .battery
+                .as_ref()
+                .map(|b| b.charging),
             Some(true)
         );
         let later = t0 + Duration::from_secs(15);
