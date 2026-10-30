@@ -45,7 +45,7 @@
 
 ### 3.3 常态运行
 
-- nightly 每天约 16:35（北京时间）自动跑；评审步监控治理时钟 T-05（30 晚评审：起算 2026-10-20，due 2026-11-19；时钟单源＝docs/experience/reconciliation-clocks.yaml，解析失败必须响警报，见改进项 E19 / 经验 E39）。
+- nightly 触发时刻以 `.github/workflows/nightly.yml` 的 cron 字段为准（G-16：不写具体时刻，cron 改动即文档失真）；评审步监控治理时钟 T-05（30 晚评审：起算 2026-10-20，due 2026-11-19；时钟单源＝docs/experience/reconciliation-clocks.yaml，解析失败必须响警报，见改进项 E19 / 经验 E39）。
 - 此前由同平台（aily）的连续巡检任务看护（同平台线索，跨平台忽略）。
 - 接管 continuous 周期任务 / 每日首次巡检前，先看任务「周期执行概况」的下次执行时间：显示过去时间＝调度已静默失效，用 `aily-cli task update <id> --next 15m` 重锚并回读确认（详见经验 E43）。
 
