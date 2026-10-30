@@ -2540,7 +2540,7 @@ mod tests {
                 .count()
         );
         assert!(comments[0].starts_with("# manifest.schema_version="));
-        assert!(comments.iter().any(|l| *l == "# manifest.generated_at=7"));
+        assert!(comments.contains(&"# manifest.generated_at=7"));
         // 注释块之后即表头行。
         let after = body.lines().nth(comments.len()).unwrap();
         assert_eq!(after, CSV_HEADER);
