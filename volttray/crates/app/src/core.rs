@@ -37,12 +37,43 @@ pub const GRAY_MIN_POLLS: u32 = 2;
 /// （同 D-72 原豁免 ≥60s 窗口永不触及 15s 档的取舍）。
 pub const NEAR_GRAY_LEEWAY: Duration = Duration::from_secs(30);
 
+/// E10（红蓝对抗波二，设计文档 docs/design-e10-wake-attribution.md §冻结数值）：
+/// 唤醒试探退避间隔初值（C-4 裁 A 侧：专用退避常量，不碰 reconnect.rs
+/// REENUM_INTERVAL=30s 的重枚举防抖语义——两个机制）。
+pub const PROBE_BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// E10：退避间隔封顶（30 min）。稳态推导：86400s ÷ 1800s = 48 < PROBE_DAILY_CAP。
+pub const PROBE_BACKOFF_MAX: Duration = Duration::from_secs(1800);
+/// E10：退避倍率（interval(level) = min(BASE × FACTOR^(level-1), MAX)，level ≥ 1）。
+pub const PROBE_BACKOFF_FACTOR: u32 = 2;
+/// E10：单设备滚动 24h 唤醒试探硬顶（只约束唤醒归因失败产生的试探流量）。
+pub const PROBE_DAILY_CAP: u32 = 96;
+/// E10：每日封顶的滚动窗长（24h，自窗口内首次试探锚定）。
+pub const PROBE_CAP_WINDOW: Duration = Duration::from_secs(86400);
+/// E10（C-1 裁 A 侧）：无条件保底读数周期 N = 4h——判睡不戳、不被
+/// 封顶拦截、不计入额度、不改变退避序列、可穿透 0xFF 缓存每窗仅一次。
+pub const GUARANTEED_READ_INTERVAL: Duration = Duration::from_secs(14400);
+/// E10（N-14 一阶段指标）：零匹配率告警阈值（观测口径；与设计文档
+/// 同源——测试断言文档文本由本常量格式化生成，防双写漂移）。
+pub const ZERO_MATCH_RATIO_MAX: f64 = 0.05;
+
 /// 轮询决策（D-33「休眠期零主动查询」的唯一裁决点：
 /// Skip = 本轮绝不向该设备发出任何 HID++ 查询）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollDecision {
     Probe,
     Skip,
+}
+
+
+/// E10（C-5 裁 B 侧：单一额度函数）唤醒试探额度门控裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeGate {
+    /// 放行本次试探（调用方随后 `begin_wake_probe` 记账探测时刻）。
+    Allow,
+    /// 退避窗口未到期，跳过（遥测计 `probe_backoff_skips`）。
+    BackoffSkip,
+    /// 滚动 24h 窗内已达每日封顶，跳过（遥测计 `probe_cap_daily_hits`）。
+    CapSkip,
 }
 
 /// 充电快档三态（托盘「立即刷新」菜单文案的分态依据；资格口径与
@@ -118,6 +149,17 @@ pub struct DeviceEntry {
     /// 注销（gone）等重枚举；`is_due` 对「在线但从未排程」兜底为
     /// 立即到期（新注册首读 / 状态残留自愈）。
     pub next_due: Option<Instant>,
+    /// E10：24h 滚动窗起点（窗口内首次放行试探时锚定；自然过期后重置）。
+    probe_window_start: Option<Instant>,
+    /// E10：当前滚动窗内已放行的唤醒试探次数（每日封顶计数口径）。
+    probe_window_count: u32,
+    /// E10：退避等级。0 = 无退避下限（仅受 WAKE_PROBE_COOLDOWN 5s
+    /// 冷却约束）；仅在「放行一次试探且上次试探未获成功确认」时升
+    /// 一级；`record_success` 归零。
+    probe_backoff_level: u32,
+    /// E10：最近一次无条件保底读数发出时刻（保底锚 =
+    /// max(last_success, last_guaranteed)）。
+    last_guaranteed: Option<Instant>,
 }
 
 impl DeviceEntry {
@@ -132,6 +174,10 @@ impl DeviceEntry {
             is_virtual: false,
             persisted_last_seen: None,
             next_due: None,
+            probe_window_start: None,
+            probe_window_count: 0,
+            probe_backoff_level: 0,
+            last_guaranteed: None,
         }
     }
 
@@ -613,6 +659,8 @@ impl AppCore {
         entry.timeout_streak = 0;
         entry.wake_armed = false;
         entry.last_wake_probe = None;
+        // E10：一次确认读数即复位退避等级（设计文档 §退避规则）。
+        entry.probe_backoff_level = 0;
         entry.device.state = mark_online(entry.device.state);
         entry.device.battery = Some(reading);
         // WP-C（v3 C-1/C-3）：充/拔切换随本次读数立即重排本设备
@@ -917,6 +965,94 @@ impl AppCore {
             .min()
     }
 
+    /// E10（C-5 裁 B 侧：单一额度函数，封顶与退避统一建模）：唤醒试探
+    /// 额度裁决。判定序：实验开关关 → Allow（v0.3.25 行为）；滚动窗
+    /// 自然过期 → 重置；达每日封顶 → CapSkip；退避间隔未到期 →
+    /// BackoffSkip；否则 Allow 并记账（窗口计数 +1；上次试探未获成功
+    /// 确认 → 退避等级 +1）。**保底读数不走本函数**（不被封顶拦截、
+    /// 不计入额度、不改变退避，C-1 裁 A 侧）。
+    pub fn probe_quota_gate(&mut self, id: &str, now: Instant) -> ProbeGate {
+        if !self.config().experimental_wake_quota {
+            return ProbeGate::Allow;
+        }
+        let Some(entry) = self.entries.iter_mut().find(|e| e.device.id == id) else {
+            return ProbeGate::Allow;
+        };
+        if entry
+            .probe_window_start
+            .is_some_and(|ws| now.duration_since(ws) >= PROBE_CAP_WINDOW)
+        {
+            entry.probe_window_start = None;
+            entry.probe_window_count = 0;
+            entry.probe_backoff_level = 0;
+        }
+        if entry.probe_window_count >= PROBE_DAILY_CAP {
+            return ProbeGate::CapSkip;
+        }
+        if let (Some(last), Some(iv)) =
+            (entry.last_wake_probe, backoff_interval(entry.probe_backoff_level))
+        {
+            if now.duration_since(last) < iv {
+                return ProbeGate::BackoffSkip;
+            }
+        }
+        if entry.probe_window_start.is_none() {
+            entry.probe_window_start = Some(now);
+        }
+        entry.probe_window_count += 1;
+        let unconfirmed = match (entry.last_success, entry.last_wake_probe) {
+            (Some(ls), Some(lw)) => ls < lw,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if unconfirmed {
+            entry.probe_backoff_level = entry.probe_backoff_level.saturating_add(1);
+        }
+        ProbeGate::Allow
+    }
+
+    /// E10（C-1 裁 A 侧）：无条件保底读数是否到期。仅 Online 设备
+    /// （含灰显；判睡不戳——D-33 红线；Disconnected 不戳）；锚 =
+    /// max(last_success, last_guaranteed)，无锚 → 立即到期（新注册
+    /// 首读场景，与 `is_due` 兜底合并、不产生额外流量）。实验开关
+    /// 关闭 → 恒 false（v0.3.25 无保底）。
+    pub fn guaranteed_read_due(&self, id: &str, now: Instant) -> bool {
+        if !self.config().experimental_wake_quota {
+            return false;
+        }
+        self.entries.iter().any(|e| {
+            e.device.id == id
+                && !e.is_virtual
+                && e.device.state == DeviceState::Online
+                && match guaranteed_anchor(e) {
+                    Some(anchor) => now.duration_since(anchor) >= GUARANTEED_READ_INTERVAL,
+                    None => true,
+                }
+        })
+    }
+
+    /// E10：一次保底读数已发出——记账锚点（每窗至多一次的穿透节奏
+    /// 由此控制；成败分别经 `record_success` / `record_timeout` 分记，
+    /// 保底本身不计额度、不影响退避序列）。
+    pub fn begin_guaranteed_read(&mut self, id: &str, now: Instant) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.device.id == id) {
+            e.last_guaranteed = Some(now);
+        }
+    }
+
+    /// E10：最近的保底到期点（睡眠预算折叠输入）。无锚设备由
+    /// `is_due` 兜底立即排程、不参与本最小值；实验开关关 → None。
+    pub fn next_guaranteed_due(&self) -> Option<Instant> {
+        if !self.config().experimental_wake_quota {
+            return None;
+        }
+        self.entries
+            .iter()
+            .filter(|e| !e.is_virtual && e.device.state == DeviceState::Online)
+            .filter_map(|e| guaranteed_anchor(e).map(|a| a + GUARANTEED_READ_INTERVAL))
+            .min()
+    }
+
     /// WP-C：一次查询已发出、结果为「非超时且非 gone 的失败」（错误帧 /
     /// 映射缺失 / 特性缺失等硬失败）时的重排钩子——按本设备当前档位
     /// 推后下次到期，防止到期点滞留形成对故障设备的紧循环查询。
@@ -1016,6 +1152,28 @@ impl AppCore {
                 .collect(),
             default_device,
         }
+    }
+}
+
+/// E10：退避等级 → 最小试探间隔（level 0 = 无退避下限，仅受
+/// WAKE_PROBE_COOLDOWN 5s 冷却约束；level ≥ 1 指数倍增、1800s 封顶）。
+pub fn backoff_interval(level: u32) -> Option<Duration> {
+    if level == 0 {
+        return None;
+    }
+    let secs = PROBE_BACKOFF_BASE
+        .as_secs()
+        .saturating_mul(u64::from(PROBE_BACKOFF_FACTOR).saturating_pow(level - 1));
+    Some(PROBE_BACKOFF_MAX.min(Duration::from_secs(secs)))
+}
+
+/// E10：保底锚 = max(last_success, last_guaranteed)（任一可读数时刻）。
+fn guaranteed_anchor(e: &DeviceEntry) -> Option<Instant> {
+    match (e.last_success, e.last_guaranteed) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -2511,6 +2669,168 @@ mod tests {
                 Disconnected.name(),
                 GrayedOut.name(),
             ]
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // E10 额度函数 + 无条件保底（时间注入；设计文档 §9 验收口径）
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn e10_cap_skips_after_daily_cap() {
+        // 每日 96 次硬顶：96 次 Allow 后第 97 次 CapSkip（record_success
+        // 每轮复位退避等级，隔离封顶单变量）。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        for i in 0..PROBE_DAILY_CAP {
+            let now = t0 + Duration::from_secs(u64::from(i) * 6);
+            assert_eq!(core.probe_quota_gate("a", now), ProbeGate::Allow, "第 {i} 次应放行");
+            core.record_success("a", reading(50, false), now);
+        }
+        let now = t0 + Duration::from_secs(u64::from(PROBE_DAILY_CAP) * 6);
+        assert_eq!(core.probe_quota_gate("a", now), ProbeGate::CapSkip);
+    }
+
+    #[test]
+    fn e10_backoff_escalates_and_clamps() {
+        // 连续未确认试探：下限 30→60→…→1800 封顶；窗口内 BackoffSkip、
+        // 到期放行（时间注入断言）。
+        assert_eq!(backoff_interval(0), None);
+        assert_eq!(backoff_interval(1), Some(Duration::from_secs(30)));
+        assert_eq!(backoff_interval(7), Some(PROBE_BACKOFF_MAX));
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.begin_wake_probe("a", t0); // 试探记账（未确认）
+        let mut now = t0 + Duration::from_secs(6); // 过 5s 冷却
+        let mut floor = 0u64; // 当前退避下限（0 = 无下限）
+        for round in 1..=9u32 {
+            if floor > 0 {
+                let mid = now + Duration::from_secs(floor / 2);
+                assert_eq!(
+                    core.probe_quota_gate("a", mid),
+                    ProbeGate::BackoffSkip,
+                    "round {round} 窗口内应拦截"
+                );
+            }
+            let due = now + Duration::from_secs(floor);
+            assert_eq!(
+                core.probe_quota_gate("a", due),
+                ProbeGate::Allow,
+                "round {round} 到期应放行"
+            );
+            core.begin_wake_probe("a", due);
+            floor = (30u64 << (round - 1)).min(1800);
+            now = due;
+        }
+    }
+
+    #[test]
+    fn e10_guaranteed_read_pierces_cap() {
+        // 保底不被封顶拦截（C-1 裁 A 侧）：额度耗尽后保底到期仍 due；
+        // 记账后每窗仅一次；下一周期再到期。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(60, false), t0);
+        for i in 0..PROBE_DAILY_CAP {
+            let now = t0 + Duration::from_secs(u64::from(i) * 6);
+            assert_eq!(core.probe_quota_gate("a", now), ProbeGate::Allow);
+            core.record_success("a", reading(60, false), now);
+        }
+        let anchor = t0 + Duration::from_secs(u64::from(PROBE_DAILY_CAP - 1) * 6);
+        let t_due = anchor + GUARANTEED_READ_INTERVAL;
+        assert_eq!(
+            core.probe_quota_gate("a", t_due),
+            ProbeGate::CapSkip,
+            "保底前额度仍封顶（同 24h 窗内）"
+        );
+        assert!(core.guaranteed_read_due("a", t_due), "保底不被封顶拦截");
+        assert_eq!(core.next_guaranteed_due(), Some(t_due));
+        core.begin_guaranteed_read("a", t_due);
+        assert!(
+            !core.guaranteed_read_due("a", t_due + Duration::from_secs(3600)),
+            "保底每窗仅一次"
+        );
+        assert!(
+            core.guaranteed_read_due("a", t_due + GUARANTEED_READ_INTERVAL),
+            "下一周期再到期"
+        );
+    }
+
+    #[test]
+    fn e10_guaranteed_never_pokes_sleeping_or_disconnected() {
+        // 判睡不戳（D-33 红线）；Disconnected 不戳——即使远超 4h。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), t0);
+        core.record_success("b", reading(50, false), t0);
+        let _ = core.record_timeout("a", t0);
+        let _ = core.record_timeout("a", t0); // → Sleeping
+        core.record_failure("b", true); // gone → Disconnected
+        let later = t0 + Duration::from_secs(86400 * 2);
+        assert!(!core.guaranteed_read_due("a", later), "判睡不戳");
+        assert!(!core.guaranteed_read_due("b", later), "Disconnected 不戳");
+    }
+
+    #[test]
+    fn e10_steady_state_backoff_below_cap() {
+        // 稳态自洽（设计文档 §数值推导，BvA-1）：连续失败 24h，退避
+        // 1800s 封顶稳态下试探总量 < 96 硬顶——两验收口径不互斥。
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.begin_wake_probe("a", t0);
+        let mut now = t0 + Duration::from_secs(6);
+        let mut allows = 0u32;
+        while now < t0 + PROBE_CAP_WINDOW {
+            match core.probe_quota_gate("a", now) {
+                ProbeGate::Allow => {
+                    allows += 1;
+                    core.begin_wake_probe("a", now);
+                }
+                ProbeGate::BackoffSkip => {}
+                ProbeGate::CapSkip => break,
+            }
+            now += Duration::from_secs(1);
+        }
+        assert!(
+            allows < PROBE_DAILY_CAP,
+            "稳态 {allows} 应 < 硬顶 {PROBE_DAILY_CAP}"
+        );
+    }
+
+    #[test]
+    fn e10_quota_disabled_returns_to_v0325() {
+        // 回滚开关（C-2 裁 A 侧：默认开；关闭即回 v0.3.25 行为）——
+        // 无封顶、无退避、无保底。
+        let mut cfg = Config::default();
+        cfg.experimental_wake_quota = false;
+        let mut core = AppCore::new(Arc::new(RwLock::new(cfg)));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.begin_wake_probe("a", t0);
+        for i in 0..(PROBE_DAILY_CAP + 10) {
+            let now = t0 + Duration::from_secs(u64::from(i) * 6);
+            assert_eq!(core.probe_quota_gate("a", now), ProbeGate::Allow);
+        }
+        assert!(!core.guaranteed_read_due("a", t0 + Duration::from_secs(86400 * 2)));
+        assert_eq!(core.next_guaranteed_due(), None);
+    }
+
+    #[test]
+    fn e10_zero_match_threshold_doc_same_source() {
+        // 阈值与设计文档同源（防双写漂移）：文档必须包含由本常量
+        // 格式化生成的数值串。
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/design-e10-wake-attribution.md");
+        let text = std::fs::read_to_string(&doc).expect("设计文档须存在");
+        assert!(
+            text.contains(&format!("ZERO_MATCH_RATIO_MAX = {ZERO_MATCH_RATIO_MAX}")),
+            "设计文档与常量漂移"
         );
     }
 }

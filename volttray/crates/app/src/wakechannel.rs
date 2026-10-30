@@ -165,6 +165,178 @@ pub fn activity_bucket_key(
     }
 }
 
+
+// ---------------------------------------------------------------------
+// E10（红蓝对抗波二；设计文档 docs/design-e10-wake-attribution.md）：
+// 归因两级匹配（VID/PID+MI 放宽）+ 注册期绑定表 + 单函数门控。
+// ---------------------------------------------------------------------
+
+/// 放宽指纹：VID/PID 对 + 可选 MI（接口号）。接收器 HID 通道路径通常
+/// 不带 MI，Raw Input 鼠标路径常带 MI_01——MI 严格相等会让放宽匹配
+/// 系统性失效，故按「双方都有 MI 且不同才不兼容」裁决。
+fn relaxed_fingerprint(path: &str) -> Option<(String, Option<String>)> {
+    let upper = path.to_uppercase();
+    let mut segs = upper.split('#');
+    segs.next()?; // \\?\HID
+    let ids = segs.next()?;
+    let mut vid = None;
+    let mut pid = None;
+    let mut mi = None;
+    for part in ids.split('&') {
+        if let Some(v) = part.strip_prefix("VID_") {
+            vid = Some(v);
+        } else if let Some(p) = part.strip_prefix("PID_") {
+            pid = Some(p);
+        } else if let Some(m) = part.strip_prefix("MI_") {
+            mi = Some(m);
+        }
+    }
+    let (vid, pid) = (vid?, pid?);
+    Some((format!("VID_{vid}&PID_{pid}"), mi.map(|m| m.to_string())))
+}
+
+/// 设备路径实例段的全部 `&` 分量（注册实例前缀最长公共段消歧用）。
+fn instance_parts(path: &str) -> Vec<String> {
+    let upper = path.to_uppercase();
+    let mut segs = upper.split('#');
+    segs.next();
+    if segs.next().is_none() {
+        return Vec::new();
+    }
+    match segs.next() {
+        Some(inst) => inst.split('&').map(|s| s.to_string()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// E10（BvA-3）：注册期「通道 → 物理身份」绑定——进程内存态、每次
+/// 枚举完成重建、**禁持久化**。`instance_parts` 取自注册时刻观察到
+/// 的设备/通道路径实例段，供放宽级候选 >1 时按最长公共前缀消歧。
+#[derive(Debug, Clone)]
+pub struct WakeBinding {
+    /// 通道标识（与候选列表第 1 分量同口径，如槽位键）。
+    pub channel_key: String,
+    /// 该通道当前注册的物理身份（unitId；未知 → None）。
+    pub unit_id: Option<String>,
+    /// 注册时刻观察到的实例段分量（大写口径，与 `instance_parts` 一致）。
+    pub instance_parts: Vec<String>,
+}
+
+impl WakeBinding {
+    /// 由通道路径构造绑定（unitId 未知场景；消歧输入即通道自身路径）。
+    pub fn from_channel_path(channel_key: String, hid_path: &str) -> Self {
+        WakeBinding {
+            channel_key,
+            unit_id: None,
+            instance_parts: instance_parts(hid_path),
+        }
+    }
+}
+
+/// E10 两级归因结果（N-01/N-02）：区分精确命中与放宽命中——遥测
+/// `wake_success_hit_exact` / `wake_success_hit_relaxed` 的计数口径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwoLevelMatch {
+    /// 完整指纹（VID/PID + 实例段前两分量）唯一命中。
+    HitExact(usize),
+    /// 放宽级（VID/PID + MI 兼容）命中——含单候选 VID/PID 回退与
+    /// 绑定表注册实例前缀消歧后的命中。
+    HitRelaxed(usize),
+    /// raw_path 指纹不可解析（非 HID 路径 / BTHHID 等降级路径）。
+    NoFingerprint,
+    /// 放宽级零候选匹配。
+    ZeroMatch,
+    /// 放宽级多候选且消歧失败——歧义即 miss（调用方走 arm-all）。
+    Ambiguous,
+}
+
+/// E10 单函数门控（C 稿「新旧匹配单函数门控」）：新旧归因行为的
+/// 唯一切换点。**回滚 = 把本函数体替换为对
+/// `channel_for_raw_path_classified` 的直接委托**（代码级回退，
+/// 非配置键，见设计文档 §10 回滚表）。
+///
+/// 匹配顺序：① 精确级（旧规则全等指纹）唯一命中 → HitExact，多
+/// 命中 → Ambiguous；② 放宽级（VID/PID + MI 兼容）：零匹配 →
+/// ZeroMatch，唯一 → HitRelaxed，多候选 → 按绑定表（缺失回退候选
+/// 自身路径）注册实例前缀「最长公共 & 分量段」消歧，唯一最长 →
+/// HitRelaxed，否则 Ambiguous（歧义即 miss，调用方回退 arm-all）。
+pub fn channel_match_gated(
+    raw_path: &str,
+    candidates: &[(String, String)],
+    bindings: &[WakeBinding],
+) -> TwoLevelMatch {
+    let fp = match channel_fingerprint(raw_path) {
+        Some(fp) => fp,
+        None => return TwoLevelMatch::NoFingerprint,
+    };
+    // ① 精确级（与旧规则同一判定：完整指纹全等、唯一命中）。
+    let mut exact = None;
+    for (i, (_, hid_path)) in candidates.iter().enumerate() {
+        if channel_fingerprint(hid_path).as_ref() == Some(&fp) {
+            if exact.is_some() {
+                return TwoLevelMatch::Ambiguous;
+            }
+            exact = Some(i);
+        }
+    }
+    if let Some(i) = exact {
+        return TwoLevelMatch::HitExact(i);
+    }
+    // ② 放宽级：VID/PID 相等且 MI 兼容（双方都有 MI 且不同 → 排除）。
+    let (rvp, raw_mi) = match relaxed_fingerprint(raw_path) {
+        Some(r) => r,
+        None => return TwoLevelMatch::NoFingerprint,
+    };
+    let mut relaxed: Vec<usize> = Vec::new();
+    for (i, (_, hid_path)) in candidates.iter().enumerate() {
+        if let Some((cvp, cmi)) = relaxed_fingerprint(hid_path) {
+            let mi_ok = match (cmi.as_deref(), raw_mi.as_deref()) {
+                (Some(c), Some(r)) => c == r,
+                _ => true,
+            };
+            if cvp == rvp && mi_ok {
+                relaxed.push(i);
+            }
+        }
+    }
+    match relaxed.len() {
+        0 => TwoLevelMatch::ZeroMatch,
+        1 => TwoLevelMatch::HitRelaxed(relaxed[0]),
+        _ => {
+            // 绑定表消歧（BvA-3）：raw 实例段 vs 各候选注册实例段的
+            // 最长公共前缀，唯一最长者胜；等长（含全 0）→ 歧义。
+            let raw_parts = instance_parts(raw_path);
+            let mut best: Option<(usize, usize)> = None; // (候选下标, 公共前缀长)
+            let mut tie = false;
+            for &i in &relaxed {
+                let parts = bindings
+                    .iter()
+                    .find(|b| b.channel_key == candidates[i].0 && !b.instance_parts.is_empty())
+                    .map(|b| b.instance_parts.clone())
+                    .unwrap_or_else(|| instance_parts(&candidates[i].1));
+                let common = raw_parts
+                    .iter()
+                    .zip(parts.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                match best {
+                    None => best = Some((i, common)),
+                    Some((_, bl)) if common > bl => {
+                        best = Some((i, common));
+                        tie = false;
+                    }
+                    Some((_, bl)) if common == bl => tie = true,
+                    _ => {}
+                }
+            }
+            match (best, tie) {
+                (Some((i, _)), false) => TwoLevelMatch::HitRelaxed(i),
+                _ => TwoLevelMatch::Ambiguous,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +574,144 @@ mod tests {
         let (p2, _) =
             activity_bucket_key(None, Some("UID-M2"), r"\\?\hid#vid_046d#p#c532#m2", false);
         assert_ne!(p1, p2);
+    }
+
+    // -----------------------------------------------------------------
+    // E10 两级匹配（N-01/N-02）fixture 回放。注：refs/ 取证原件无真机
+    // 路径样本（39 条报告为 JSON 存根），fixture 由既有真机形态常量 +
+    // 实例漂移场景构造——真机回放属未验证边界，见交付说明。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn e10_exact_hit_preferred_over_relaxed() {
+        // 精确指纹唯一命中 → HitExact（两级中精确优先）。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01&Col02#7&2f3a1b2c&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("bolt".to_string(), BOLT_CHAN.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::HitExact(1)
+        );
+    }
+
+    #[test]
+    fn e10_relaxed_hit_when_instance_drifts() {
+        // 换 USB 口漂移：实例段完全不同，VID/PID 级唯一 → HitRelaxed
+        // （E22 单候选回退在多候选下的推广形态）。
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#9&EEEE0001&0&0001#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        let candidates = vec![
+            ("bolt".to_string(), BOLT_CHAN.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::HitRelaxed(1)
+        );
+    }
+
+    #[test]
+    fn e10_relaxed_zero_match_when_vid_pid_absent() {
+        let raw = r"\\?\HID#VID_046D&PID_9999&MI_01#7&DEADBEEF&0&0001#{g}";
+        let candidates = vec![
+            ("bolt".to_string(), BOLT_CHAN.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::ZeroMatch
+        );
+    }
+
+    #[test]
+    fn e10_mi_mismatch_excludes_candidate() {
+        // 双方都有 MI 且不同 → 不兼容：MI_02 候选被排除，无 MI 的
+        // 接收器通道路径兼容命中。
+        let chan_mi02 = r"\\?\HID#VID_046D&PID_C52B&MI_02#7&2f3a1b2c&0&0000#{g}";
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#9&EEEE0001&0&0001#{g}";
+        let candidates = vec![
+            ("mi02".to_string(), chan_mi02.to_string()),
+            ("unifying".to_string(), UNIFYING_CHAN.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::HitRelaxed(1)
+        );
+    }
+
+    #[test]
+    fn e10_binding_table_disambiguates_same_model_receivers() {
+        // 同型号两台接收器 + 换口重枚举：通道路径实例段已变，Raw
+        // Input 路径仍是注册期旧实例前缀——精确级全 miss、放宽级
+        // 双候选；绑定表（注册期观察到的设备实例段）最长公共前缀
+        // 消歧命中，无绑定表则歧义走 arm-all。
+        let chan_a = r"\\?\HID#VID_046D&PID_C52B#8&aaaa0001&0&0000#{g}";
+        let chan_b = r"\\?\HID#VID_046D&PID_C52B#9&bbbb0002&0&0000#{g}";
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#7&2f3a1b2c&0&0001#{g}";
+        let candidates = vec![
+            ("a".to_string(), chan_a.to_string()),
+            ("b".to_string(), chan_b.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::Ambiguous
+        );
+        let bindings = vec![
+            WakeBinding {
+                channel_key: "a".to_string(),
+                unit_id: Some("UID-MOUSE-A".to_string()),
+                instance_parts: vec![
+                    "7".into(),
+                    "2F3A1B2C".into(),
+                    "0".into(),
+                    "0001".into(),
+                ],
+            },
+            WakeBinding {
+                channel_key: "b".to_string(),
+                unit_id: Some("UID-MOUSE-B".to_string()),
+                instance_parts: vec![
+                    "6".into(),
+                    "9999CCCC".into(),
+                    "0".into(),
+                    "0001".into(),
+                ],
+            },
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &bindings),
+            TwoLevelMatch::HitRelaxed(0)
+        );
+    }
+
+    #[test]
+    fn e10_ambiguous_when_disambiguation_ties() {
+        // 双候选与 raw 公共前缀等长（全 0）→ 歧义即 miss。
+        let chan_a = r"\\?\HID#VID_046D&PID_C52B#7&2f3a1b2c&0&0000#{g}";
+        let chan_b = r"\\?\HID#VID_046D&PID_C52B#8&4444aaaa&0&0000#{g}";
+        let raw = r"\\?\HID#VID_046D&PID_C52B&MI_01#9&eeee0001&0&0001#{g}";
+        let candidates = vec![
+            ("a".to_string(), chan_a.to_string()),
+            ("b".to_string(), chan_b.to_string()),
+        ];
+        assert_eq!(
+            channel_match_gated(raw, &candidates, &[]),
+            TwoLevelMatch::Ambiguous
+        );
+    }
+
+    #[test]
+    fn e10_no_fingerprint_passthrough() {
+        let candidates = vec![("unifying".to_string(), UNIFYING_CHAN.to_string())];
+        let bt = r"\\?\BTHHID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID_b01a#9&1c2d3e4f&0&0000#{g}";
+        assert_eq!(
+            channel_match_gated(bt, &candidates, &[]),
+            TwoLevelMatch::NoFingerprint
+        );
+        assert_eq!(
+            channel_match_gated("", &candidates, &[]),
+            TwoLevelMatch::NoFingerprint
+        );
     }
 }

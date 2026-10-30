@@ -308,6 +308,12 @@ pub(crate) fn export_diag(
         wake_miss_no_fingerprint: telemetry.wake_miss_no_fingerprint.load(Ordering::Relaxed),
         wake_miss_ambiguous: telemetry.wake_miss_ambiguous.load(Ordering::Relaxed),
         wake_recovery_via_reenum: telemetry.wake_recovery_via_reenum.load(Ordering::Relaxed),
+        probe_cap_daily_hits: telemetry.probe_cap_daily_hits.load(Ordering::Relaxed),
+        probe_backoff_skips: telemetry.probe_backoff_skips.load(Ordering::Relaxed),
+        guaranteed_read_attempts: telemetry.guaranteed_read_attempts.load(Ordering::Relaxed),
+        wake_success_hit_exact: telemetry.wake_success_hit_exact.load(Ordering::Relaxed),
+        wake_success_hit_relaxed: telemetry.wake_success_hit_relaxed.load(Ordering::Relaxed),
+        run_started_at: telemetry.run_started_at_rfc3339.clone(),
         exported_at,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }

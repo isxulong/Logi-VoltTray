@@ -174,6 +174,23 @@ pub struct DiagExport {
     /// 已改为 upsert 前捕获 pre-registration 离线态后接线，v0.3.23
     /// 真机「日志两次恢复成功、计数恒 0」的矛盾自此版本代码起消除。
     pub wake_recovery_via_reenum: u64,
+    /// E10（红蓝对抗波二，设计文档 docs/design-e10-wake-attribution.md
+    /// §7）：因每日封顶（96 次硬顶）被抑制的唤醒试探次数。仅追加。
+    pub probe_cap_daily_hits: u64,
+    /// E10：因退避窗口未到期被抑制的唤醒试探次数。
+    pub probe_backoff_skips: u64,
+    /// E10：无条件保底读数尝试次数（C-1 裁 A 侧：不被封顶拦截、
+    /// 不计入额度）。
+    pub guaranteed_read_attempts: u64,
+    /// E10：第一级精确指纹归因成功次数（wake_successes =
+    /// hit_exact + hit_relaxed + arm-all 成功；拆分纯增量、不破坏
+    /// 历史对照）。
+    pub wake_success_hit_exact: u64,
+    /// E10：第二级放宽 / 绑定表消歧归因成功次数。
+    pub wake_success_hit_relaxed: u64,
+    /// E10：运行起点时间戳（ISO 8601 UTC）——frame_tx 速率
+    /// （D-3 补强派生指标）的时间分母。
+    pub run_started_at: String,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,
     /// 导出程序版本（CARGO_PKG_VERSION）。
@@ -309,6 +326,12 @@ mod tests {
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             wake_recovery_via_reenum: 0,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
         }
@@ -454,6 +477,12 @@ mod tests {
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             wake_recovery_via_reenum: 0,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
         }
@@ -508,6 +537,12 @@ mod tests {
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             wake_recovery_via_reenum: 0,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -545,6 +580,12 @@ mod tests {
             wake_miss_no_fingerprint: 2,
             wake_miss_ambiguous: 1,
             wake_recovery_via_reenum: 3,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -632,6 +673,12 @@ mod tests {
             wake_miss_no_fingerprint: 0,
             wake_miss_ambiguous: 0,
             wake_recovery_via_reenum: 0,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-audit".into(),
         };
@@ -644,8 +691,11 @@ mod tests {
         assert!(!json.contains(device_name), "设备名残留：{json}");
         // ③ <USER> 替换生效。
         assert!(json.contains("<USER>"), "规则一未生效：{json}");
-        // ④ 字段名枚举：顶层键与审计文档 18 字段清单严格一致；
-        //    结构体字段集漂移在此失败，强制同步 05 审计文档。
+        // ④ 字段名枚举：顶层键与预期清单严格一致（原锚定 05 审计
+        //    文档；E10 波二新增 6 字段的登记落点因 docs/experience/
+        //    治理冻结改落 design-e10-wake-attribution.md §7 与本测试，
+        //    治理收官后按 05 表格式回迁——不留悬空）；
+        //    结构体字段集漂移在此失败，强制同步登记。
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         keys.sort();
@@ -661,14 +711,20 @@ mod tests {
             "feature_index_tx",
             "frame_rx",
             "frame_tx",
+            "guaranteed_read_attempts",
             "last_enum",
             "last_enum_reason",
             "log_tail",
+            "probe_backoff_skips",
+            "probe_cap_daily_hits",
+            "run_started_at",
             "wake_miss_ambiguous",
             "wake_miss_no_fingerprint",
             "wake_miss_no_path",
             "wake_miss_zero_match",
             "wake_recovery_via_reenum",
+            "wake_success_hit_exact",
+            "wake_success_hit_relaxed",
             "wake_successes",
         ]
         .into();
@@ -744,6 +800,12 @@ mod tests {
             wake_miss_no_fingerprint: 1,
             wake_miss_ambiguous: 1,
             wake_recovery_via_reenum: 4,
+            probe_cap_daily_hits: 0,
+            probe_backoff_skips: 0,
+            guaranteed_read_attempts: 0,
+            wake_success_hit_exact: 0,
+            wake_success_hit_relaxed: 0,
+            run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-e17".into(),
         };
@@ -799,6 +861,13 @@ mod tests {
         assert_eq!(v["wake_miss_ambiguous"], 1);
         assert_eq!(v["wake_recovery_via_reenum"], 4);
         assert_eq!(v["exported_at"], 1_760_000_000u64);
+        // E10（波二）新增字段：逐字段口径钉死。
+        assert_eq!(v["probe_cap_daily_hits"], 0);
+        assert_eq!(v["probe_backoff_skips"], 0);
+        assert_eq!(v["guaranteed_read_attempts"], 0);
+        assert_eq!(v["wake_success_hit_exact"], 0);
+        assert_eq!(v["wake_success_hit_relaxed"], 0);
+        assert_eq!(v["run_started_at"], "2026-01-01T00:00:00+00:00");
         assert_eq!(v["app_version"], "0.0.0-e17");
         assert_eq!(v["last_enum"]["at_ms"], 1_760_000_012_345u64);
         assert_eq!(v["last_enum"]["forced"], true);
