@@ -15,7 +15,7 @@ Logi-VoltTray/
 ├── logi_*.py, red/, tests/   # 早期 Python 参考实现与协议逻辑测试
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
 ├── .github/workflows/        # ci.yml（windows：fmt --check + clippy + 测试 + 构建；
-│                             #   ubuntu：workspace clippy/test 复核 + actionlint 提示模式）
+│                             #   ubuntu：workspace clippy/test 复核 + actionlint 必过（G-17：2026-10-27 起升必过，原为提示模式））
 │                             # nightly.yml（fuzz 烟测 + 失败自动开单 N-2）
 │                             # bootstrap-lock.yml / audit.yml（cargo audit 周检）
 │                             # release.yml（发布产物构建）
