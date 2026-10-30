@@ -530,6 +530,7 @@ mod imp {
     /// 0xFF 电量探测 error_response（写通道级负缓存）与握手无设备应答
     ///（Timeout 或 NoDevice，喂死槽冷却裁决）；借用约束下经 &mut 带出，
     /// 不改返回类型。
+    #[allow(clippy::too_many_arguments)]
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
