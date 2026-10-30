@@ -32,10 +32,10 @@ fn main() {
         None
     };
     let tz: i32 = args[4].parse().expect("tz minutes");
-    let csv = render_csv(&segments, anon.as_ref(), tz);
+    let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
+    let csv = render_csv(&segments, anon.as_ref(), tz, generated);
     std::fs::write(&args[3], &csv).expect("write csv");
     let stem = Path::new(&args[3]).with_extension("");
-    let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
     let report = build_report_data(&events, &segments, anon.as_ref(), tz, generated);
     std::fs::write(stem.with_extension("html"), render_html(&report)).expect("write html");
     let json = render_json_events(&events, anon.as_ref(), generated);

@@ -1246,12 +1246,15 @@ fn csv_row(seg: &Segment, key: &str, offset_minutes: i32) -> String {
     .join(",")
 }
 
-/// 渲染 CSV：BOM + 表头 + 每段一行（行序 = 展示键字典序 + start_ts；
-/// 匿名化后 D1/D2… 顺序即哈希字典序）。
+/// 渲染 CSV：BOM + manifest `#` 注释块（组5 自描述导出落点之一，
+/// recheck.py 跳过 `#` 行后再字节对账）+ 表头 + 每段一行（行序 =
+/// 展示键字典序 + start_ts；匿名化后 D1/D2… 顺序即哈希字典序）。
+/// `generated_at` 为导出时刻 epoch 秒（进 manifest 注释块）。
 pub fn render_csv(
     segments: &[Segment],
     anon: Option<&HashMap<String, String>>,
     offset_minutes: i32,
+    generated_at: i64,
 ) -> String {
     let mut rows: Vec<(String, &Segment)> = segments
         .iter()
@@ -1259,6 +1262,7 @@ pub fn render_csv(
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start_ts.cmp(&b.1.start_ts)));
     let mut out = String::from("\u{feff}");
+    out.push_str(&crate::export_manifest::manifest_csv_comments(generated_at));
     out.push_str(CSV_HEADER);
     out.push('\n');
     for (key, seg) in rows {
@@ -1282,7 +1286,7 @@ pub fn stats_export_filename_local(p: crate::diag_export::LocalTimeParts) -> Str
 // JSON 导出（原始事件序列；匿名化开关覆盖 physical_key 字段，R5-I-07）
 // ---------------------------------------------------------------------------
 
-/// 渲染 JSON 导出：`{version, exported_at, events:[...]}`——events 为
+/// 渲染 JSON 导出：`{version, exported_at, manifest, events:[...]}`——events 为
 /// current+archive 原始事件序列（与 jsonl 行同构）；空态输出空结构
 ///（events: []，R5-P-03）。匿名化开启时 physical_key 字段（读取事件、
 /// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏，
@@ -1339,6 +1343,7 @@ pub fn render_json_events(
     serde_json::json!({
         "version": 1,
         "exported_at": exported_at,
+        "manifest": crate::export_manifest::manifest_json(exported_at),
         "events": arr,
     })
     .to_string()
@@ -1351,7 +1356,9 @@ pub fn render_json_events(
 /// volttray-data 机器可读数据块（AC-B8 复算对账唯一取数源）：分段明细
 ///（与 CSV 同数据同列）+ 图表①③底层数据 + 分日视图日卡 + 首屏 KPI +
 /// 日均耗电双口径对账 + 周环比 + 灰态缺口卡。匿名化开启时仅含匿名化
-/// 后键，不含 physical_key 明文（R5-I-04 并入）。
+/// 后键，不含 physical_key 明文（R5-I-04 并入）。顶层另含 manifest
+/// 自描述块（组5 N-12②：字段字典＋生效脱敏规则 id 集＋schema 版本，
+/// BvA-6 不含采集时区偏移值）。
 pub fn build_report_data(
     events: &[StatsEvent],
     segments: &[Segment],
@@ -1542,6 +1549,7 @@ pub fn build_report_data(
             "device_count": devices.len(),
             "segment_count": segs.len(),
         },
+        "manifest": crate::export_manifest::manifest_json(generated_ts),
         "devices": devices,
         "segments": seg_rows,
         "chart1": chart1_json,
@@ -2345,11 +2353,17 @@ mod tests {
                 &[NOTE_EVIDENCE_MISSING],
             ),
         ];
-        let csv = render_csv(&segs, None, CST);
+        let csv = render_csv(&segs, None, CST, 1_760_000_000);
         let mut lines = csv.lines();
         let first = lines.next().unwrap();
         assert!(first.starts_with('\u{feff}'), "BOM 缺失");
-        assert_eq!(&first[3..], CSV_HEADER);
+        assert!(
+            first[3..].starts_with("# manifest.schema_version="),
+            "BOM 后应为 manifest 注释块: {first}"
+        );
+        // 跳过 `#` 注释续行后应为表头。
+        let header = lines.find(|l| !l.starts_with("# ")).unwrap();
+        assert_eq!(header, CSV_HEADER);
         assert_eq!(
             lines.next().unwrap(),
             "kbd-1,\"My \"\"K380\"\", Keys\",active,1970-01-01T08:33:20+08:00,1970-01-01T10:33:20+08:00,120,90,88,-2,-1.00,"
@@ -2364,8 +2378,14 @@ mod tests {
     #[test]
     fn csv_empty_state_is_header_only_and_rows_sorted_by_display_key() {
         // 空态：BOM + 表头。
-        let csv = render_csv(&[], None, CST);
-        assert_eq!(csv, format!("\u{feff}{CSV_HEADER}\n"));
+        let csv = render_csv(&[], None, CST, 1_760_000_000);
+        assert_eq!(
+            csv,
+            format!(
+                "\u{feff}{}{CSV_HEADER}\n",
+                crate::export_manifest::manifest_csv_comments(1_760_000_000)
+            )
+        );
         // 行序 = 展示键字典序（匿名化后按 D 编号，哈希序 dev-1(D1) 先于 dev-0(D2)）。
         let segs = vec![
             seg("dev-0", SegmentType::Active, 0, 3600, 100, 99, &[]),
@@ -2373,8 +2393,8 @@ mod tests {
         ];
         let keys: BTreeSet<String> = ["dev-0", "dev-1"].iter().map(|s| s.to_string()).collect();
         let anon = anonymize_map(&keys);
-        let csv = render_csv(&segs, Some(&anon), CST);
-        let rows: Vec<&str> = csv.lines().skip(1).collect();
+        let csv = render_csv(&segs, Some(&anon), CST, 1_760_000_000);
+        let rows: Vec<&str> = csv.lines().filter(|l| !l.starts_with("# ")).skip(1).collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].starts_with("D1,"), "row0: {}", rows[0]);
         assert!(rows[1].starts_with("D2,"), "row1: {}", rows[1]);
@@ -2452,6 +2472,74 @@ mod tests {
         assert_eq!(plain["events"][0]["physical_key"], "kbd-1");
     }
 
+    // -- 自描述 manifest（组5 N-12② · 5a）------------------------------------
+
+    /// A 要素防漂移：统计 JSON 顶层键集合 == STATS_JSON_TOP_FIELDS。
+    #[test]
+    fn json_export_top_fields_match_manifest_dictionary() {
+        let events = vec![ev_poll(1000, "kbd-1", 90)];
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json_events(&events, None, 42)).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        let mut dict = crate::export_manifest::STATS_JSON_TOP_FIELDS.to_vec();
+        dict.sort_unstable();
+        assert_eq!(keys, dict);
+        // manifest 透出且生成时刻与导出时刻一致。
+        assert_eq!(v["manifest"]["generated_at"], 42);
+        assert_eq!(
+            v["manifest"]["schema_version"],
+            crate::export_manifest::MANIFEST_SCHEMA_VERSION
+        );
+    }
+
+    /// A 要素防漂移：HTML volttray-data 顶层键集合 == HTML_DATA_TOP_FIELDS。
+    #[test]
+    fn report_data_top_fields_match_manifest_dictionary() {
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "kbd-1", 90),
+            ev_poll(9200, "kbd-1", 88),
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 200000);
+        let mut keys: Vec<&str> = report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        let mut dict = crate::export_manifest::HTML_DATA_TOP_FIELDS.to_vec();
+        dict.sort_unstable();
+        assert_eq!(keys, dict);
+        assert_eq!(report["manifest"]["generated_at"], 200000);
+        // BvA-6：manifest 块不含采集时区偏移值（meta.tz_offset 属既有字段，
+        // 不在本负面清单范围）。
+        let m = report["manifest"].to_string();
+        for bad in ["+08:00", "tz_offset"] {
+            assert!(!m.contains(bad), "manifest 含负面清单值: {bad}");
+        }
+    }
+
+    /// CSV 结构钉板：BOM → `#` 注释块 → 表头 → 数据行。
+    #[test]
+    fn csv_manifest_comment_block_precedes_header() {
+        let csv = render_csv(&[], None, CST, 7);
+        assert!(csv.starts_with('\u{feff}'));
+        let body = &csv[3..];
+        let comments: Vec<&str> = body.lines().take_while(|l| l.starts_with("# ")).collect();
+        assert_eq!(
+            comments.len(),
+            crate::export_manifest::manifest_csv_comments(7).lines().count()
+        );
+        assert!(comments[0].starts_with("# manifest.schema_version="));
+        assert!(comments.iter().any(|l| *l == "# manifest.generated_at=7"));
+        // 注释块之后即表头行。
+        let after = body.lines().nth(comments.len()).unwrap();
+        assert_eq!(after, CSV_HEADER);
+    }
+
     // -- 报告数据块（AC-B8 对账源）--------------------------------------------
 
     #[test]
@@ -2477,7 +2565,11 @@ mod tests {
         // 分段明细行数 = CSV 数据行数 = 段数。
         let rows = report["segments"].as_array().unwrap();
         assert_eq!(rows.len(), segs.len());
-        let csv_rows = render_csv(&segs, None, CST).lines().count() - 1;
+        let csv_rows = render_csv(&segs, None, CST, 200000)
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .count()
+            - 1;
         assert_eq!(rows.len(), csv_rows);
         // 行字段与 Segment 派生值一致。
         for (r, s) in rows.iter().zip(segs.iter()) {
@@ -2731,8 +2823,12 @@ mod tests {
                 assert_eq!(w[0].end_ts, w[1].start_ts, "段链断裂: {key}");
             }
         }
-        let csv = render_csv(&segs, None, CST);
-        assert_eq!(csv.lines().count() - 1, segs.len(), "CSV 行数 = 段数");
+        let csv = render_csv(&segs, None, CST, base + DAYS * 86_400);
+        assert_eq!(
+            csv.lines().filter(|l| !l.starts_with("# ")).count() - 1,
+            segs.len(),
+            "CSV 行数 = 段数"
+        );
         let report = build_report_data(&events, &segs, None, CST, base + DAYS * 86_400);
         assert_eq!(report["segments"].as_array().unwrap().len(), segs.len());
         let html = render_html(&report);

@@ -501,20 +501,32 @@ def detect_anon(keys_present, raw_keys):
 def check_csv(ck, path, segments, keys, off):
     with open(path, "r", encoding="utf-8") as f:
         body = f.read()
+    # 组5 自描述导出（N-12②）：CSV 头部新增 `#` manifest 注释块（BOM
+    # 与表头之间）。对账口径：剥 BOM → 丢弃 `#` 注释行 → 重加 BOM，再
+    # 与 render_csv（不含注释块）逐字节比对。注释块内容本身不在此断言
+    # ——schema_version 等字段以 JSON/HTML manifest 落点的对账为准；
+    # 此处只要求注释行存在且形如 `# ...`（不影响表头与数据行的字节级
+    # 一致性校验）。
+    body_cmp = body
+    if body_cmp.startswith("\ufeff"):
+        body_cmp = body_cmp[1:]
+    kept = [l for l in body_cmp.split("\n") if not l.startswith("#")]
+    body_cmp = "\ufeff" + "\n".join(kept)
     first_col = set()
-    for line in body.splitlines()[1:]:
+    for line in body_cmp.splitlines()[1:]:
         if line:
             first_col.add(line.split(",", 1)[0].strip('"'))
     anon = anonymize_map(keys) if detect_anon(first_col, keys) else None
     want = render_csv(segments, anon, off)
-    if body != want:
-        gl, wl = body.splitlines(), want.splitlines()
+    if body_cmp != want:
+        gl, wl = body_cmp.splitlines(), want.splitlines()
         ck.eq("csv 行数", len(gl), len(wl))
         for i, (g, w) in enumerate(zip(gl, wl)):
             ck.eq("csv 第 %d 行" % (i + 1), g, w)
     else:
-        print("PASS csv：%d 行逐字节一致（匿名化=%s）" %
-              (len(body.splitlines()) - 1, "开" if anon else "关"))
+        n_comments = len(body.splitlines()) - len(body_cmp.splitlines())
+        print("PASS csv：%d 行逐字节一致（匿名化=%s，跳过 manifest 注释行 %d 行）" %
+              (len(body_cmp.splitlines()) - 1, "开" if anon else "关", n_comments))
 
 
 def check_json(ck, path, events, keys):

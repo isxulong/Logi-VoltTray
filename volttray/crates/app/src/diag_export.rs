@@ -191,6 +191,10 @@ pub struct DiagExport {
     /// E10：运行起点时间戳（ISO 8601 UTC）——frame_tx 速率
     /// （D-3 补强派生指标）的时间分母。
     pub run_started_at: String,
+    /// 自描述 manifest（组5 N-12② · 5a）：字段字典＋生效脱敏规则 id
+    /// 集＋schema 版本＋app 版本＋生成时间（BvA-6 不含采集时区偏移值；
+    /// BvA-8 下游按 schema_version 判读，禁止按字段存在性硬解析）。
+    pub manifest: serde_json::Value,
     /// 导出时刻（epoch 秒，与导出文件名后缀一致）。
     pub exported_at: u64,
     /// 导出程序版本（CARGO_PKG_VERSION）。
@@ -332,6 +336,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1_760_000_000),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".to_string(),
         }
@@ -483,6 +488,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1_760_000_000),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-test".into(),
         }
@@ -543,6 +549,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1),
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -586,6 +593,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1),
             exported_at: 1,
             app_version: "0.0.0-test".into(),
         }
@@ -679,6 +687,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1_760_000_000),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-audit".into(),
         };
@@ -715,6 +724,7 @@ mod tests {
             "last_enum",
             "last_enum_reason",
             "log_tail",
+            "manifest",
             "probe_backoff_skips",
             "probe_cap_daily_hits",
             "run_started_at",
@@ -806,6 +816,7 @@ mod tests {
             wake_success_hit_exact: 0,
             wake_success_hit_relaxed: 0,
             run_started_at: "2026-01-01T00:00:00+00:00".to_string(),
+            manifest: crate::export_manifest::manifest_json(1_760_000_000),
             exported_at: 1_760_000_000,
             app_version: "0.0.0-e17".into(),
         };

@@ -65,7 +65,7 @@ pub(crate) fn run_stats_export(
     // E5（P1a）：CSV 主产物同样走 tmp→rename 原子写。
     match write_tmp_rename(
         &req.csv_path,
-        &attr::render_csv(&segments, anon.as_ref(), offset),
+        &attr::render_csv(&segments, anon.as_ref(), offset, wall_secs() as i64),
     ) {
         Ok(()) => done.push(req.csv_path.display().to_string()),
         Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
@@ -314,6 +314,7 @@ pub(crate) fn export_diag(
         wake_success_hit_exact: telemetry.wake_success_hit_exact.load(Ordering::Relaxed),
         wake_success_hit_relaxed: telemetry.wake_success_hit_relaxed.load(Ordering::Relaxed),
         run_started_at: telemetry.run_started_at_rfc3339.clone(),
+        manifest: volttray_app::export_manifest::manifest_json(exported_at as i64),
         exported_at,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }

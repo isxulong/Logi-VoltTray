@@ -12,6 +12,7 @@ pub mod config;
 pub mod core;
 pub mod debounce;
 pub mod diag_export;
+pub mod export_manifest;
 pub mod observer;
 pub mod persist;
 pub mod physkey;
