@@ -643,16 +643,18 @@ mod tests {
     // 会删掉另一测试原子写半途的 .tmp，rename 报 NotFound（PR #19 CI
     // ubuntu job 实测命中）。隔离到独占目录后清理互不可见。
     fn fr1_tmp() -> std::path::PathBuf {
-        std::env::temp_dir()
-            .join(format!(
-                "vt-fr1-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ))
-            .join("last_known.json")
+        let dir = std::env::temp_dir().join(format!(
+            "vt-fr1-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // 目录预建：old_file_compat 用例直接 fs::write 落文件、不经
+        // write_atomic 的 create_dir_all。
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("last_known.json")
     }
 
     #[test]
