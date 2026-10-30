@@ -47,12 +47,16 @@ pub(crate) fn run_stats_export(
         bootlog::note(&format!("stats export: pre-export flush failed: {e}"));
     }
     let mut events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
-    // 融合稿 Phase 1「含活动统计」勾选项（默认开）：取消勾选时从导出
-    // 事件流剔除 activity_buckets 摘要。编排（flush→load→分段→渲染）
-    // 不变，仅此一处数据选择。
-    if !req.include_activity {
-        events.retain(|e| !matches!(e, volttray_app::stats::StatsEvent::ActivityBuckets { .. }));
-    }
+    // 事件流闸门单点谓词（attribution::export_event_allowed，与本
+    // crate golden 测试同口径）：activity_buckets 逐分钟位图须
+    // 融合稿 Phase 1「含活动统计」（include_activity，默认开）与
+    // 组4 N-08② 位图独立开关（export_activity_bitmap，默认关，
+    // 与 anonymize 解耦——作息泄露与是否匿名无关）同时开才放行；
+    // 其余事件恒放行。编排（flush→load→分段→渲染）不变，仅此一处
+    // 数据选择。
+    events.retain(|e| {
+        attr::export_event_allowed(e, req.include_activity, req.export_activity_bitmap)
+    });
     let segments = attr::build_segments(&events);
     let anon = if req.anonymize {
         Some(attr::anonymize_map(&attr::event_keys(&events)))
@@ -99,6 +103,7 @@ pub(crate) fn run_stats_export(
             &events,
             anon.as_ref(),
             name_map.as_ref(),
+            req.export_activity_bitmap,
             wall_secs() as i64,
         );
         match write_tmp_rename(&p, &content) {

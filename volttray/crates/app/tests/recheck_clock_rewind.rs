@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use volttray_app::attribution::{
-    anonymize_map, build_report_data, build_segments, event_keys, render_csv, render_html,
-    render_json_events,
+    anonymize_map, build_report_data, build_segments, event_keys, export_event_allowed, render_csv,
+    render_html, render_json_events,
 };
 use volttray_app::stats::load_events_from;
 
@@ -32,10 +32,16 @@ fn tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// 单个固件 × 匿名化两态对账：Rust 导出 → recheck.py 复算，exit 必须为 0。
-fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
+/// 单个固件 × 匿名化两态 × 位图两态对账：Rust 导出 → recheck.py 复算，exit 必须为 0。
+fn run_recheck(fixture: &Path, anon: bool, bitmap: bool) -> Result<(), String> {
     let events = load_events_from(Path::new("/dev/null"), fixture);
     assert!(!events.is_empty(), "fixture {:?} 无事件", fixture);
+    // 组4 N-08② 位图开关镜像：include_activity 恒开，位图开/关决定是否保留
+    // activity_buckets 事件；recheck.py 对该可选段缺席不判负。
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|e| export_event_allowed(e, true, bitmap))
+        .collect();
     let segments = build_segments(&events);
     let anon_map = if anon {
         Some(anonymize_map(&event_keys(&events)))
@@ -45,9 +51,10 @@ fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
     let tz = 480;
     let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
     let dir = tmpdir(&format!(
-        "{}-anon{}",
+        "{}-anon{}-bmp{}",
         fixture.file_stem().unwrap().to_string_lossy(),
-        anon as u8
+        anon as u8,
+        bitmap as u8
     ));
     // 组5 5b：镜像默认闸门（redact_display_name=开）——anon 在场时
     // display_name 按会话映射「设备N」，recheck.py 同口径对账。
@@ -79,7 +86,13 @@ fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
     std::fs::write(dir.join("out.html"), render_html(&report)).unwrap();
     std::fs::write(
         dir.join("out.json"),
-        render_json_events(&events, anon_map.as_ref(), name_map.as_ref(), generated),
+        render_json_events(
+            &events,
+            anon_map.as_ref(),
+            name_map.as_ref(),
+            bitmap,
+            generated,
+        ),
     )
     .unwrap();
 
@@ -126,8 +139,10 @@ fn clock_rewind_tail_fixture_matches_recheck_py() {
     }
     let fixture = repo_root().join("fixtures/stats_clock_rewind_tail.jsonl");
     for anon in [false, true] {
-        run_recheck(&fixture, anon)
-            .unwrap_or_else(|e| panic!("回拨尾段固件对账失败（anon={anon}）：{e}"));
+        for bitmap in [false, true] {
+            run_recheck(&fixture, anon, bitmap)
+                .unwrap_or_else(|e| panic!("回拨尾段对账失败（anon={anon} bitmap={bitmap}）：{e}"));
+        }
     }
 }
 
@@ -139,7 +154,26 @@ fn adversarial_fixture_matches_recheck_py() {
     }
     let fixture = repo_root().join("fixtures/stats_adversarial.jsonl");
     for anon in [false, true] {
-        run_recheck(&fixture, anon)
-            .unwrap_or_else(|e| panic!("对抗样本固件对账失败（anon={anon}）：{e}"));
+        for bitmap in [false, true] {
+            run_recheck(&fixture, anon, bitmap)
+                .unwrap_or_else(|e| panic!("对抗样本对账失败（anon={anon} bitmap={bitmap}）：{e}"));
+        }
+    }
+}
+
+/// 组4 N-08② / BvA-8 向后兼容：旧样本（已含 activity_buckets 的 stats.jsonl）
+/// 在位图开时逐值严格对账，位图关时该段缺席不判负、主事件流仍全对。
+#[test]
+fn activity_bitmap_legacy_fixture_matches_recheck_py() {
+    if !python3_available() {
+        eprintln!("python3 不可用，跳过 recheck 对账（旧样本活动位图固件）");
+        return;
+    }
+    let fixture = repo_root().join("fixtures/stats_activity_bitmap_legacy.jsonl");
+    for anon in [false, true] {
+        for bitmap in [false, true] {
+            run_recheck(&fixture, anon, bitmap)
+                .unwrap_or_else(|e| panic!("旧位图对账失败（anon={anon} bitmap={bitmap}）：{e}"));
+        }
     }
 }

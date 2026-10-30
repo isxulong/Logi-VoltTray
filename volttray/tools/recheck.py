@@ -565,6 +565,7 @@ def check_json(ck, path, events, keys):
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
     names = display_name_session_map(events) if anon else None
     want_events = []
+    want_buckets = []
     for ev in events:
         if ev[0] == "read":
             _, ts, pk, dn, pct, chg, src = ev
@@ -583,17 +584,30 @@ def check_json(ck, path, events, keys):
             want_events.append({"ts": ev[1], "physical_key": display_key(ev[2], anon),
                                 "event": "sleep_enter"})
         elif ev[0] == "activity_buckets":
-            want_events.append({"ts": ev[1], "event": "activity_buckets",
-                                "physical_key": display_key(ev[2], anon),
-                                "days": ev[3]})
+            want_buckets.append({"ts": ev[1], "event": "activity_buckets",
+                                 "physical_key": display_key(ev[2], anon),
+                                 "days": ev[3]})
     ge = got.get("events", [])
-    if ge != want_events:
-        ck.eq("json.events 条数", len(ge), len(want_events))
-        for i, (g, w) in enumerate(zip(ge, want_events)):
+    # 组4 N-08② 位图开关镜像：activity_buckets 为可选段——导出在
+    # 位（旧样本 / 勾选位图）则逐值严格复算（BvA-8 向后兼容）；
+    # 缺席不判负（新默认 export_activity_bitmap=关，位图不进导出）。
+    ge_buckets = [e for e in ge if e.get("event") == "activity_buckets"]
+    ge_main = [e for e in ge if e.get("event") != "activity_buckets"]
+    if ge_main != want_events:
+        ck.eq("json.events 条数", len(ge_main), len(want_events))
+        for i, (g, w) in enumerate(zip(ge_main, want_events)):
             ck.eq("json.events[%d]" % i, g, w)
     else:
         print("PASS json：%d 条事件逐值一致（匿名化=%s）" %
-              (len(ge), "开" if anon else "关"))
+              (len(ge_main), "开" if anon else "关"))
+    if ge_buckets:
+        if ge_buckets != want_buckets:
+            ck.eq("json.activity_buckets 条数", len(ge_buckets), len(want_buckets))
+            for i, (g, w) in enumerate(zip(ge_buckets, want_buckets)):
+                ck.eq("json.activity_buckets[%d]" % i, g, w)
+        else:
+            print("PASS json.activity_buckets：%d 条位图事件逐值一致" %
+                  len(ge_buckets))
 
 
 def check_html(ck, path, events, segments, keys, off):

@@ -1253,6 +1253,23 @@ fn map_display_name(name: &str, names: Option<&HashMap<String, String>>) -> Stri
         .unwrap_or_else(|| name.to_string())
 }
 
+/// 组4 N-08②：导出事件流闸门单点谓词（tray 导出编排 retain 与
+/// 本 crate golden 测试共用，防两处口径漂移）。ActivityBuckets
+/// （逐分钟活动位图，含作息信息）须 `include_activity` 与
+/// `export_activity_bitmap` 同时开才放行——前者是融合稿 Phase 1
+/// 既有「含活动统计」门控（默认开，可能门控位图以外字段，不动）；
+/// 后者是本组新增独立开关（默认关，与 anonymize 解耦，作息泄露
+/// 与是否匿名无关，BvA-8 与 manifest schema_version 同批合入）。
+/// 其余事件类型恒放行。
+pub fn export_event_allowed(
+    ev: &StatsEvent,
+    include_activity: bool,
+    export_activity_bitmap: bool,
+) -> bool {
+    !matches!(ev, StatsEvent::ActivityBuckets { .. })
+        || (include_activity && export_activity_bitmap)
+}
+
 /// 单行 CSV（unknown 段 rate 留空）。
 fn csv_row(
     seg: &Segment,
@@ -1329,14 +1346,23 @@ pub fn stats_export_filename_local(p: crate::diag_export::LocalTimeParts) -> Str
 /// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏；
 /// display_name 按 `names` 会话映射替换为「设备N」（组5 5b R3，
 /// 与诊断面同函数同序号），names=None 时保留真实型号（U-2C）。
+/// `activity_bitmap=false`（组4 N-08② 默认）时 ActivityBuckets
+/// 分钟位图事件不进 JSON；`true` 时原样并入。
 pub fn render_json_events(
     events: &[StatsEvent],
     anon: Option<&HashMap<String, String>>,
     names: Option<&HashMap<String, String>>,
+    activity_bitmap: bool,
     exported_at: i64,
 ) -> String {
     let mut arr = Vec::with_capacity(events.len());
     for ev in events {
+        // 组4 N-08②：位图开关关 → JSON 事件序列剔除逐分钟活动位图
+        //（与 export_event_allowed 同谓词语义；渲染层独立收口，
+        // 不依赖上游 retain）。
+        if matches!(ev, StatsEvent::ActivityBuckets { .. }) && !activity_bitmap {
+            continue;
+        }
         let v = match ev {
             StatsEvent::Read(e) => serde_json::json!({
                 "ts": e.ts,
@@ -2488,6 +2514,7 @@ mod tests {
             &events,
             Some(&anon),
             Some(&names),
+            true,
             9999,
         ))
         .unwrap();
@@ -2508,7 +2535,7 @@ mod tests {
         assert_eq!(arr[2]["devices"][0]["physical_key"], k);
         assert_eq!(arr[2]["devices"][1]["physical_key"], m);
         assert_eq!(arr[3]["event"], "run_stop");
-        let s = render_json_events(&events, Some(&anon), Some(&names), 1);
+        let s = render_json_events(&events, Some(&anon), Some(&names), true, 1);
         // physical_key 与 display_name 字段值均不得为原值。
         assert!(
             !s.contains("\"physical_key\":\"kbd-1\""),
@@ -2524,11 +2551,11 @@ mod tests {
         );
         // 空态：events: []。
         let empty: serde_json::Value =
-            serde_json::from_str(&render_json_events(&[], None, None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&[], None, None, true, 1)).unwrap();
         assert_eq!(empty["events"].as_array().unwrap().len(), 0);
         // 未开匿名化：原键与真实型号保留（U-2C）。
         let plain: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, None, None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&events, None, None, true, 1)).unwrap();
         assert_eq!(plain["events"][0]["physical_key"], "kbd-1");
         assert_eq!(plain["events"][0]["display_name"], "Name-kbd-1");
     }
@@ -2563,7 +2590,7 @@ mod tests {
         assert!(csv.contains("设备2"), "CSV 缺 设备2: {csv}");
         assert!(!csv.contains("Name-kbd-1") && !csv.contains("Name-mouse-2"));
         // JSON：同上。
-        let json = render_json_events(&events, Some(&anon), Some(&names), 1);
+        let json = render_json_events(&events, Some(&anon), Some(&names), true, 1);
         assert!(json.contains("设备1") && json.contains("设备2"));
         assert!(!json.contains("Name-kbd-1") && !json.contains("Name-mouse-2"));
         // HTML 数据块：devices 清单与分段明细同为 设备N。
@@ -2578,6 +2605,121 @@ mod tests {
         // 互证见 redact.rs device_session_map_numbers_by_collection_order。
     }
 
+    // -- 组4 N-08② 位图独立开关（export_activity_bitmap 默认关）--------------
+
+    /// golden 四组合（anonymize × 位图开关）：JSON / CSV / HTML 三件套
+    /// 字段集合精确匹配（B 要素）。位图关（默认）→ JSON 无
+    /// activity_buckets 事件、HTML meta.activity_days=0 且缺口卡在场；
+    /// 位图开 → JSON 原样并入、HTML 位图天数透出。CSV 列集合两种
+    /// 开关下逐字节一致（位图不进分段归因）。
+    #[test]
+    fn activity_bitmap_switch_golden_four_combos() {
+        let mkday = |d: u8| ActivityDay {
+            date: format!("2026-10-{d:02}"),
+            bitmap_hex: "0".repeat(crate::stats::ACTIVITY_BITMAP_HEX_LEN),
+        };
+        let days7: Vec<ActivityDay> = (18..=24).map(mkday).collect();
+        let base_events = || {
+            vec![
+                ev_poll(1000, "kbd-1", 90),
+                ev_poll(8200, "kbd-1", 88),
+                StatsEvent::ActivityBuckets {
+                    ts: 8300,
+                    physical_key: "kbd-1".into(),
+                    days: days7.clone(),
+                },
+            ]
+        };
+        for anon_on in [false, true] {
+            for bitmap_on in [false, true] {
+                let events = base_events();
+                // 流闸门（export.rs retain 同谓词）：include_activity=开。
+                let filtered: Vec<StatsEvent> = events
+                    .iter()
+                    .filter(|e| export_event_allowed(e, true, bitmap_on))
+                    .cloned()
+                    .collect();
+                assert_eq!(filtered.len(), if bitmap_on { 3 } else { 2 });
+                let segs = build_segments(&filtered);
+                let anon = if anon_on {
+                    Some(anonymize_map(&event_keys(&filtered)))
+                } else {
+                    None
+                };
+                let names = anon.as_ref().map(|_| {
+                    crate::redact::device_session_map(&display_name_session_order(&filtered))
+                });
+                // JSON：渲染层独立收口（不依赖上游 retain，直接喂全量
+                // 事件流）——位图开关决定 activity_buckets 是否出场。
+                let json: serde_json::Value = serde_json::from_str(&render_json_events(
+                    &events,
+                    anon.as_ref(),
+                    names.as_ref(),
+                    bitmap_on,
+                    42,
+                ))
+                .unwrap();
+                let arr = json["events"].as_array().unwrap();
+                let bucket_entries: Vec<&serde_json::Value> = arr
+                    .iter()
+                    .filter(|e| {
+                        e.get("event").and_then(|v| v.as_str()) == Some("activity_buckets")
+                    })
+                    .collect();
+                if bitmap_on {
+                    assert_eq!(bucket_entries.len(), 1, "位图开：缺 activity_buckets");
+                    let b = bucket_entries[0];
+                    let mut keys: Vec<&str> =
+                        b.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                    keys.sort_unstable();
+                    assert_eq!(keys, ["days", "event", "physical_key", "ts"]);
+                    let want_pk = if anon_on { "D1" } else { "kbd-1" };
+                    assert_eq!(b["physical_key"], want_pk);
+                    assert_eq!(b["days"].as_array().unwrap().len(), 7);
+                } else {
+                    assert!(bucket_entries.is_empty(), "位图关：activity_buckets 泄露");
+                    assert_eq!(arr.len(), 2);
+                }
+                // CSV：两种开关逐字节一致（分段归因不采 activity_buckets）。
+                let csv_on = render_csv(&segs, anon.as_ref(), names.as_ref(), CST, 42);
+                let segs_full = build_segments(&events);
+                let csv_full = render_csv(&segs_full, anon.as_ref(), names.as_ref(), CST, 42);
+                assert_eq!(csv_on, csv_full, "位图开关不得改变 CSV");
+                // HTML：位图天数透出与缺口卡随开关翻转。
+                let report =
+                    build_report_data(&filtered, &segs, anon.as_ref(), names.as_ref(), CST, 9000);
+                assert_eq!(
+                    report["meta"]["activity_days"].as_i64().unwrap(),
+                    if bitmap_on { 7 } else { 0 },
+                    "anon={anon_on} bitmap={bitmap_on}"
+                );
+                assert_eq!(
+                    report["activity_gap_note"]["present"].as_bool().unwrap(),
+                    !bitmap_on,
+                    "anon={anon_on} bitmap={bitmap_on}"
+                );
+                // 顶层字段集合恒等于 manifest 字典（开关不增删顶层键）。
+                let mut top: Vec<&str> =
+                    report.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                top.sort_unstable();
+                let mut dict = crate::export_manifest::HTML_DATA_TOP_FIELDS.to_vec();
+                dict.sort_unstable();
+                assert_eq!(top, dict, "anon={anon_on} bitmap={bitmap_on}");
+            }
+        }
+        // 谓词钉板：位图事件须双开才放行，其余事件恒放行。
+        let bucket = StatsEvent::ActivityBuckets {
+            ts: 1,
+            physical_key: "d".into(),
+            days: vec![],
+        };
+        assert!(!export_event_allowed(&bucket, true, false));
+        assert!(!export_event_allowed(&bucket, false, true));
+        assert!(!export_event_allowed(&bucket, false, false));
+        assert!(export_event_allowed(&bucket, true, true));
+        assert!(export_event_allowed(&ev_poll(1, "d", 1), false, false));
+    }
+
     // -- 自描述 manifest（组5 N-12② · 5a）------------------------------------
 
     /// A 要素防漂移：统计 JSON 顶层键集合 == STATS_JSON_TOP_FIELDS。
@@ -2585,7 +2727,7 @@ mod tests {
     fn json_export_top_fields_match_manifest_dictionary() {
         let events = vec![ev_poll(1000, "kbd-1", 90)];
         let v: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, None, None, 42)).unwrap();
+            serde_json::from_str(&render_json_events(&events, None, None, true, 42)).unwrap();
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         keys.sort_unstable();
         let mut dict = crate::export_manifest::STATS_JSON_TOP_FIELDS.to_vec();

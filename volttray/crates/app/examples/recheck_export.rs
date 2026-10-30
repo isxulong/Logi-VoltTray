@@ -52,7 +52,10 @@ fn main() {
         generated,
     );
     std::fs::write(stem.with_extension("html"), render_html(&report)).expect("write html");
-    let json = render_json_events(&events, anon.as_ref(), name_map.as_ref(), generated);
+    // 组4 N-08②：位图开关镜像默认（export_activity_bitmap=关）——
+    // JSON 事件序列不含 activity_buckets；recheck.py 对在位事件
+    // 严格复算、缺席不判负（BvA-8 旧样本向后兼容同口径）。
+    let json = render_json_events(&events, anon.as_ref(), name_map.as_ref(), false, generated);
     std::fs::write(stem.with_extension("json"), json).expect("write json");
     println!(
         "events={} segments={} -> {}(.csv/.html/.json)",

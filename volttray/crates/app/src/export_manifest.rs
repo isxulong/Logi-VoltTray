@@ -67,6 +67,7 @@ pub const MANIFEST_NOTES: &[&str] = &[
     "run_start/run_stop 秒级时间线保留（U-2C 裁决原文：精度不动）",
     "HTML 首末时刻字段保留（G-34 已登记；剥离/降精度挂 U-2 拍板，本批不落地）",
     "display_name 型号默认保留（U-2C）；anonymize=on 时按导出会话映射为设备N（C-3：会话内稳定、不承诺跨导出稳定）",
+    "activity_buckets 逐分钟活动位图默认不导出（组4 N-08② export_activity_bitmap 默认关，与 anonymize 解耦；勾选后随事件流并入）",
     "manifest 只写规则名，不含采集时区偏移值（BvA-6）",
 ];
 
