@@ -538,6 +538,7 @@ mod imp {
         slot: u8,
         edge: &mut SlotScanEdge,
         stats: &mut volttray_app::stats::StatsStore,
+        telemetry: &Telemetry,
     ) -> Result<(SlotState, Option<(String, String)>), SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
@@ -590,6 +591,10 @@ mod imp {
         // E10：缓存命中时的分支条件由 is_hidpp1 改为 ff_cache_applies——
         // 0x01 幽灵槽（Hidpp1Ghost）不再每轮清缓存，负缓存真实生效。
         if ff_probe_suppressed(slot, edge.ff_battery_probe_failed, ff_cache_applies) {
+            // 组2 N-03 断流定位打点：0xFF 负缓存挡下计数（纯增量）。
+            telemetry
+                .poll_skipped_ff_cache
+                .fetch_add(1, Ordering::Relaxed);
             bootlog::note(&format!(
                 "slot scan: {id} battery probe skipped (0xFF failure cached this run)"
             ));
@@ -912,6 +917,12 @@ mod imp {
         /// E10：运行起点（ISO 8601 UTC）——frame_tx 速率（D-3 补强
         /// 派生指标）的时间分母。
         pub(crate) run_started_at_rfc3339: String,
+        /// 组2 N-03 断流定位打点：被 0xFF run 内负缓存挡下的探测数。
+        pub(crate) poll_skipped_ff_cache: AtomicU64,
+        /// 组2 N-03：被死槽冷却跳过的扫槽数。
+        pub(crate) poll_skipped_dead_slot: AtomicU64,
+        /// 组2 N-03：休眠无唤醒资格被 poll_decision 挡下的轮询数。
+        pub(crate) poll_skipped_sleep: AtomicU64,
     }
 
     impl Telemetry {
@@ -930,6 +941,9 @@ mod imp {
                 guaranteed_read_attempts: AtomicU64::new(0),
                 wake_success_hit_exact: AtomicU64::new(0),
                 wake_success_hit_relaxed: AtomicU64::new(0),
+                poll_skipped_ff_cache: AtomicU64::new(0),
+                poll_skipped_dead_slot: AtomicU64::new(0),
+                poll_skipped_sleep: AtomicU64::new(0),
                 run_started_at_rfc3339: volttray_app::fmt_rfc3339(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1384,6 +1398,10 @@ mod imp {
                                         // 复扫（BF-1）；推进后 streak 逢 K 的
                                         // 整数倍放行 1 次，「每 K 轮扫 1 次」
                                         // 与自动发现 ≤5 分钟的披露才成立。
+                                        // 组2 N-03 打点：死槽冷却跳过计数。
+                                        telemetry
+                                            .poll_skipped_dead_slot
+                                            .fetch_add(1, Ordering::Relaxed);
                                         state.dead_slots.note_handshake(slot, true);
                                         continue;
                                     }
@@ -1425,6 +1443,7 @@ mod imp {
                                         slot,
                                         &mut edge,
                                         &mut stats_store,
+                                        &telemetry,
                                     );
                                     // R-1/R-2：边效应回写通道状态（edge 携
                                     // 最终值——HID++1 握手成功时 try_slot
@@ -1595,6 +1614,7 @@ mod imp {
                                     slot,
                                     &mut edge,
                                     &mut stats_store,
+                                    &telemetry,
                                 );
                                 ff_battery_probe_failed = edge.ff_battery_probe_failed;
                                 dead_slots.note_handshake(slot, edge.handshake_no_response);
@@ -1839,6 +1859,15 @@ mod imp {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+                // 组2 N-03：停滞检测重排（experimental_stall_requeue
+                // 默认开；关闭即回「仅 None 兜底」行为）。重排台数 >0
+                // 时留 bootlog——断流定位的修复侧可观测点。
+                let requeued = core.requeue_stalled(now);
+                if requeued > 0 {
+                    bootlog::note(&format!(
+                        "poll: requeued {requeued} stalled online device(s) (N-03)"
+                    ));
+                }
                 // D-67：本轮判定为「句柄已死」的通道 key，循环外统一移除并
                 // 触发重枚举（移除期间不能就地改 channels，先收集）。
                 let mut dead_channels: Vec<String> = Vec::new();
@@ -1904,7 +1933,14 @@ mod imp {
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         // 休眠且无唤醒资格：本轮绝不向该设备发任何 HID++ 查询。
+                        // 组2 N-03 打点：休眠挡下计数（仅 sleeping 分支——
+                        // 非休眠条目的 Skip 仅虚拟条目，真实槽位不会命中）。
                         if core.poll_decision(&s.id, now) == PollDecision::Skip {
+                            if sleeping {
+                                telemetry
+                                    .poll_skipped_sleep
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             i += 1;
                             continue;
                         }

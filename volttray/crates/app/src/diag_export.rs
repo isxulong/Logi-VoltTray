@@ -191,6 +191,17 @@ pub struct DiagExport {
     /// E10：运行起点时间戳（ISO 8601 UTC）——frame_tx 速率
     /// （D-3 补强派生指标）的时间分母。
     pub run_started_at: String,
+    /// 组2 N-03 断流定位打点（纯增量、per-run 清零，口径同
+    /// wake_miss_* 计数器）：轮询/扫槽被 0xFF run 内负缓存挡下的
+    /// 次数——该桶持续增长而 guaranteed_read_attempts 不动，即
+    /// 「负缓存抑制」假设的真机证据（E10 保底穿透应每 4h 收敛）。
+    pub poll_skipped_ff_cache: u64,
+    /// 组2 N-03：扫槽被死槽冷却（连续 K 轮握手无应答）跳过的次数。
+    pub poll_skipped_dead_slot: u64,
+    /// 组2 N-03：轮询因设备休眠且无唤醒资格被 poll_decision 挡下
+    /// 的次数（D-33 零主动查询的常态；与唤醒装填/归因 miss 计数
+    /// 联读可区分「真睡」与「该醒没醒」）。
+    pub poll_skipped_sleep: u64,
     /// 自描述 manifest（组5 N-12② · 5a）：字段字典＋生效脱敏规则 id
     /// 集＋schema 版本＋app 版本＋生成时间（BvA-6 不含采集时区偏移值；
     /// BvA-8 下游按 schema_version 判读，禁止按字段存在性硬解析）。

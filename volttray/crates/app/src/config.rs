@@ -516,6 +516,12 @@ pub struct Config {
     /// 按未知键忽略并原样保留（E6）。数值冻结见
     /// docs/design-e10-wake-attribution.md 第 4/5 节（D-93/D-94）。
     pub experimental_wake_quota: bool,
+    /// 组2 N-03（红蓝对抗波二 C 融合稿）：停滞检测重排总闸——在线
+    /// 设备 next_due=None 且超 max(2×轮询档, 灰显阈值) 无成功读数时
+    /// 重排到期点。默认开；false 回 v0.3.26 行为（仅依赖 is_due 的
+    /// None 兜底）。休眠设备不在此路径（D-33）。显式值按文件，不
+    /// 参与 v0321 迁移（同 E10 口径）。
+    pub experimental_stall_requeue: bool,
     /// 组5 5b（红蓝对抗波二 C 融合稿，N-12②/U-2C，C-2）：统计导出
     /// anonymize=on 时 display_name 按会话内映射替换为「设备N」
     ///（R3，与诊断面同函数同序号）。默认开；false = 回退保留真实
@@ -589,6 +595,8 @@ impl Default for Config {
             experimental_bluetooth_wired: true,
             // E10 波二：唤醒试探额度/保底总闸默认开（C-2 裁 A 侧，D-93）。
             experimental_wake_quota: true,
+            // 组2 N-03：停滞检测重排默认开（融合稿回滚键口径）。
+            experimental_stall_requeue: true,
             // 组5 5b：display_name 脱敏/保存前提示默认开（C-2）；
             // 时区 UTC 归一默认关（BvA-5，翻转挂 U-2）。
             experimental_export_redact_display_name: true,
@@ -879,6 +887,11 @@ impl Config {
                 ("experimental_wake_quota", Value::Bool(b)) => {
                     cfg.experimental_wake_quota = *b;
                 }
+                // 组2 N-03：停滞重排回滚键显式值按文件；不参与 v0321
+                // 迁移（同 E10 口径）。
+                ("experimental_stall_requeue", Value::Bool(b)) => {
+                    cfg.experimental_stall_requeue = *b;
+                }
                 // 组5 5b（C-2/BvA-5）：导出脱敏回滚与时区闸门显式值
                 // 按文件；不参与 v0321 迁移（同 E10 口径）。
                 ("experimental_export_redact_display_name", Value::Bool(b)) => {
@@ -991,6 +1004,7 @@ impl Config {
                     | "experimental_per_device_polling"
                     | "experimental_bluetooth_wired"
                     | "experimental_wake_quota"
+                    | "experimental_stall_requeue"
                     | "experimental_export_redact_display_name"
                     | "experimental_export_tz_utc"
                     | "experimental_export_privacy_notice"
@@ -1145,6 +1159,8 @@ impl Config {
              experimental_bluetooth_wired = {}\n\
              # E10 唤醒试探额度/保底总闸（红蓝对抗波二，D-93）：false 回 v0.3.25 行为。\n\
              experimental_wake_quota = {}\n\
+             # 组2 N-03 停滞检测重排总闸：false 回 v0.3.26 行为（仅 None 兜底）。\n\
+             experimental_stall_requeue = {}\n\
              # 组5 5b 导出脱敏：display_name→设备N（默认开）/时间统一 UTC（默认关,挂 U-2）/保存前提示（默认开）。\n\
              experimental_export_redact_display_name = {}\n\
              experimental_export_tz_utc = {}\n\
@@ -1176,6 +1192,7 @@ impl Config {
             self.experimental_per_device_polling,
             self.experimental_bluetooth_wired,
             self.experimental_wake_quota,
+            self.experimental_stall_requeue,
             self.experimental_export_redact_display_name,
             self.experimental_export_tz_utc,
             self.experimental_export_privacy_notice,

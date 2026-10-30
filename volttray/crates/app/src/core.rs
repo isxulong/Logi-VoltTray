@@ -969,6 +969,43 @@ impl AppCore {
             .min()
     }
 
+    /// 组2 N-03 停滞检测重排（融合稿修复择向①，BvA-9 接受度结论留
+    /// 真机打点窗口）：在线、非虚拟条目 `next_due=None` 且距上次成功
+    /// 读数已超 `max(2×本设备轮询档, 灰显阈值)` 时，把到期点重排为
+    /// 「立即」并返回重排台数。定位期实读表明 `is_due` 对 None 本有
+    /// 「立即到期」兜底，本函数把该兜底物化为显式排程并留下可观测
+    /// 调用点（tray 侧 bootlog），防未来改动破坏 None 兜底语义时无
+    /// 声断流。休眠设备不在此路径（D-33：等唤醒信号重排，零主动查
+    /// 询）；虚拟条目同排除。挂 experimental_stall_requeue（默认开，
+    /// false 回 v0.3.26 行为——仅 None 兜底、无显式重排）。
+    pub fn requeue_stalled(&mut self, now: Instant) -> usize {
+        let cfg = self.config();
+        if !cfg.experimental_stall_requeue {
+            return 0;
+        }
+        let mut requeued = 0usize;
+        for entry in &mut self.entries {
+            if entry.is_virtual
+                || entry.device.state != DeviceState::Online
+                || entry.next_due.is_some()
+            {
+                continue;
+            }
+            let tier = entry
+                .tier_interval(&cfg)
+                .unwrap_or_else(|| Duration::from_secs(cfg.poll_interval_secs));
+            let threshold = gray_threshold_of(entry, &cfg).max(tier * 2);
+            let stalled = entry
+                .last_success
+                .is_some_and(|t| now.duration_since(t) >= threshold);
+            if stalled {
+                entry.next_due = Some(now);
+                requeued += 1;
+            }
+        }
+        requeued
+    }
+
     /// E10（C-5 裁 B 侧：单一额度函数，封顶与退避统一建模）：唤醒试探
     /// 额度裁决。判定序：实验开关关 → Allow（v0.3.25 行为）；滚动窗
     /// 自然过期 → 重置；达每日封顶 → CapSkip；退避间隔未到期 →
@@ -1539,6 +1576,62 @@ mod tests {
             Some(now + POLL_CHARGING),
             "充电读数排到充电档 15s"
         );
+    }
+
+    /// 组2 N-03：在线 next_due=None 且超阈值无读数 → 停滞重排触发；
+    /// 未超阈值（max(2×1800s, 灰显 3600s)=3600s）不重排。
+    #[test]
+    fn requeue_stalled_online_none_due() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), t0);
+        // 模拟探测在途摘除排程（begin_wake_probe 同语义）：next_due=None。
+        core.begin_wake_probe("a", t0);
+        assert_eq!(core.entries()[0].next_due, None);
+        let early = t0 + Duration::from_secs(1800);
+        assert_eq!(core.requeue_stalled(early), 0);
+        assert_eq!(core.entries()[0].next_due, None);
+        // 时钟快进过 3600s 阈值 → 重排为立即到期。
+        let late = t0 + Duration::from_secs(3601);
+        assert_eq!(core.requeue_stalled(late), 1);
+        assert_eq!(core.entries()[0].next_due, Some(late));
+    }
+
+    /// 组2 N-03：休眠设备 next_due=None 不在重排路径（D-33 零排程
+    /// 零查询红线钉板）；非 Online 态新注册条目同排除。
+    #[test]
+    fn requeue_stalled_skips_sleeping_and_non_online() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), t0);
+        core.record_timeout("a", t0);
+        assert_eq!(core.record_timeout("a", t0), TimeoutOutcome::EnteredSleep);
+        assert_eq!(core.entries()[0].next_due, None);
+        let late = t0 + Duration::from_secs(7200);
+        assert_eq!(core.requeue_stalled(late), 0, "休眠设备零排程（D-33）");
+        assert_eq!(core.entries()[0].next_due, None);
+        // 新注册未进 Online 态条目：next_due=None 但不在重排路径。
+        core.upsert_device(dev("b", 2));
+        assert_eq!(core.requeue_stalled(late), 0);
+        assert_eq!(core.entries()[1].next_due, None);
+    }
+
+    /// 组2 N-03：experimental_stall_requeue=false 回滚即零动作。
+    #[test]
+    fn requeue_stalled_disabled_by_config() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config {
+            experimental_stall_requeue: false,
+            ..Config::default()
+        })));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.record_success("a", reading(50, false), t0);
+        core.begin_wake_probe("a", t0);
+        let late = t0 + Duration::from_secs(7200);
+        assert_eq!(core.requeue_stalled(late), 0);
+        assert_eq!(core.entries()[0].next_due, None);
     }
 
     #[test]
