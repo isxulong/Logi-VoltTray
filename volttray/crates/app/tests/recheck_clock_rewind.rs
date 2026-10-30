@@ -59,7 +59,13 @@ fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
     let csv_path = dir.join("out.csv");
     std::fs::write(
         &csv_path,
-        render_csv(&segments, anon_map.as_ref(), name_map.as_ref(), tz, generated),
+        render_csv(
+            &segments,
+            anon_map.as_ref(),
+            name_map.as_ref(),
+            tz,
+            generated,
+        ),
     )
     .unwrap();
     let report = build_report_data(

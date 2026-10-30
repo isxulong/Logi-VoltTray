@@ -2545,7 +2545,10 @@ mod tests {
         ];
         // 会话收集顺序：Name-kbd-1 首现 → 设备1；Name-mouse-2 → 设备2。
         let order = display_name_session_order(&events);
-        assert_eq!(order, vec!["Name-kbd-1".to_string(), "Name-mouse-2".to_string()]);
+        assert_eq!(
+            order,
+            vec!["Name-kbd-1".to_string(), "Name-mouse-2".to_string()]
+        );
         let names = crate::redact::device_session_map(&order);
         assert_eq!(names["Name-kbd-1"], "设备1");
         assert_eq!(names["Name-mouse-2"], "设备2");

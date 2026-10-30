@@ -33,8 +33,8 @@ fn main() {
     };
     let tz: i32 = args[4].parse().expect("tz minutes");
     let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
-    // 组5 5b：镜像默认闸门（redact_display_name=开）——anon 在场时
-    // display_name 按会话映射「设备N」，recheck.py 同口径对账。
+                                      // 组5 5b：镜像默认闸门（redact_display_name=开）——anon 在场时
+                                      // display_name 按会话映射「设备N」，recheck.py 同口径对账。
     let name_map = anon.as_ref().map(|_| {
         volttray_app::redact::device_session_map(
             &volttray_app::attribution::display_name_session_order(&events),
