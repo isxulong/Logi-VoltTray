@@ -41,6 +41,39 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.26
+
+红蓝对抗波二落地批：唤醒归因与省电保护修复（PR #19 核心实现六组）＋治理文档两批（PR #18 批一、PR #20 批二）＋导出脱敏加强。升级零配置迁移：新增 5 个实验开关各有默认值（四个默认开、一个默认关），旧配置文件无需改动；统计与诊断导出只加字段、不改旧字段。
+
+### 用户可见变化
+
+1. **鼠标动一下，电量恢复更快更准**：修复「鼠标从休眠中醒来、电量却长时间不更新或归错设备」的问题。唤醒信号现在按两级匹配认设备（先精确指纹、再放宽一级并用绑定表消歧），认不准就走全量装填兜底、绝不硬猜；醒来后的试探查询有节制——单设备最少隔 5 秒、连续没读到就逐步拉长到 30 分钟，一天最多 96 次；同时每台设备每 4 小时保底补读一次（保底不占用上面的额度）。休眠中的设备依旧零查询，省电红线不变。
+2. **在线设备读数卡住会自动自愈**：设备在线但读数停滞超过「2 倍轮询档或灰显阈值」时，自动把它重排到立即补读；休眠设备不受影响。
+3. **统计页和菜单直接告诉你读数有多旧**：统计页 KPI 卡显示「更新于 X 分钟前」（超过 2 小时没刷新会出现提示徽标），右键菜单的设备读数后也带「（X 分钟前）」后缀，一眼判断数字新不新。
+4. **导出更讲规矩、更保护隐私**：统计导出（JSON / HTML / CSV）与诊断导出现在自带一份「自描述清单」（manifest）——写清各字段含义、生效的脱敏规则与格式版本，拿到文件不用翻代码就能读懂；诊断导出的计数器（wake_miss_* 四类归因失败原因、probe_* 试探抑制、slot_outcome_* 查询结果分布等）逐字段附口径说明。新增「导出逐分钟活动位图」选项（默认关闭，与匿名化互不影响，界面明示其含作息信息）；匿名化开启时设备显示名按「设备1、设备2…」映射（同一次导出内编号稳定）。保存导出文件前会提示本次导出包含哪些信息；若你手动关闭了脱敏修复开关，导出前会强制提示、不可跳过。脱敏本身也更牢靠：用户名路径与设备名的替换改为大小写不敏感匹配（PR #18）。
+5. **复算工具更友好**：新版 tools/recheck.py 会先跳过 CSV 头部的 manifest 注释行再逐字节对账；若用旧版工具比对只差这些注释行，新版会明说差异仅在注释头、数据区一致。
+
+### 工程与质量（开发者向摘要）
+
+- **诊断与统计打点加厚**：新增唤醒归因四分桶、试探封顶/退避抑制、保底读数、整轮耗时、槽位结果分布等计数器（全部 run 内清零），整轮观测打点与 recheck.py 档位对账（信息性、不判负）。
+- **回滚路径完整**：唤醒额度/保底（experimental_wake_quota）与停滞重排（experimental_stall_requeue）默认开、关闭即回回本特性引入前行为；归因新旧匹配收敛于单函数门控，回滚=还原单函数；manifest 纯增量、删除即回滚。
+- **文档治理两批**（PR #18 批一、PR #20 批二）：README 双语口径修正、经验库与发布对账修订、decisions.md 纯追加登记（D-92～D-98），纯文档、零运行时行为变化。
+
+### 升级注意事项
+
+- 本版新增 5 个实验开关（唤醒额度、停滞重排默认开；导出时区 UTC 默认关；脱敏显示名与导出前知情提示默认开），旧配置缺键按默认值处理、无需手改；`config.toml` 格式零变化，退出旧版后启动新版即可。
+- 统计导出 CSV 在表头前新增若干 `#` 开头的 manifest 注释行：自己写脚本解析 CSV 的，请先丢掉 `#` 行（新版 recheck.py 已内置此处理）。
+- 诊断导出 JSON 新增多个计数字段与 manifest 字段，均为追加、旧字段不变；读取方请按 manifest 的 schema_version 判读。
+
+### 验证口径与未验证项
+
+- 全部改动经双复核（文本保真 + 执行可用性）与回归复核；CI 六门禁（fmt / clippy / 全量测试 / fuzz-smoke / microbench / decisions-append-only）全绿后方可合并。
+- 未验证（如实分级）：发布执行环境为 Linux 沙箱，Windows 真机的唤醒归因、保底读数与菜单/统计页年龄显示观感未真机验证，以 CI windows job 与全量单测为准；真机观测窗口（省电收益与误报率）随发版后跟踪。
+
+### English Summary
+
+v0.3.26 lands the second red/blue adversarial wave: wake-attribution and battery-saving fixes (PR #19, six implementation groups) plus two governance doc batches (PR #18, PR #20) and stronger export redaction. User-facing: after the mouse wakes, battery readings recover faster and attach to the right device — two-level matching (exact fingerprint, then relaxed matching with a binding table) with an arm-all fallback, throttled wake probes (≥5 s apart, exponential backoff to 30 min, max 96/day) and an unconditional guaranteed read every 4 hours per device; sleeping devices stay zero-query. Online devices with stalled readings are automatically requeued for an immediate catch-up. The stats page KPI card shows "updated X min ago" (with a stale badge past 2 hours) and the tray menu appends an "(X min ago)" age suffix. Exports now carry a self-describing manifest (field dictionary, active redaction rules, schema version) so a diagnostic or stats file can be understood without reading the source; a new per-minute activity-bitmap export option (off by default, decoupled from anonymization); anonymization maps device display names to "Device 1, Device 2…" within an export session; a pre-save notice states what the export contains, and disabling the redaction fix forces an unskippable warning. Redaction of user paths and device names is now ASCII case-insensitive (PR #18). The bundled recheck.py skips the CSV manifest comment block before byte comparison and explains comment-only diffs. Upgrade: five new experimental keys have defaults (four on, one off), no config migration needed; CSV gains `#` comment lines before the header — drop `#` lines in custom parsers. Not verified on physical Windows machines (Linux build environment); CI (windows job + full unit tests) is the evidence of record.
+
 ## v0.3.25
 
 充电三态「立即刷新」菜单文案（红蓝对抗 E 终审签发方案逐字落地，决策 D-91）＋ tier_interval 注释对齐实际行为（U-2）。本版无配置默认值变化、无新增配置键、无新增迁移标记；零轮询行为变更，菜单固定项数不变（仍 9 项）。
