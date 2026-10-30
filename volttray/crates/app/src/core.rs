@@ -240,6 +240,11 @@ pub struct DeviceSnapshot {
     /// 持久化记录的最后已知时刻（epoch 秒；虚拟条目时间标注用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
+    /// G-28：最后一次成功读数距本次 snapshot 的秒数（菜单
+    /// 「（X 分钟前）」展示用；与 N-03 打点共用 last_success 数据源）。
+    /// None = 自启动以来无成功读数（不渲染年龄后缀）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_age_secs: Option<u64>,
 }
 
 impl DeviceSnapshot {
@@ -1148,6 +1153,10 @@ impl AppCore {
                     },
                     is_virtual: e.is_virtual,
                     last_seen: e.persisted_last_seen,
+                    reading_age_secs: e
+                        .last_success
+                        .and_then(|t| now.checked_duration_since(t))
+                        .map(|d| d.as_secs()),
                 })
                 .collect(),
             default_device,
@@ -1543,6 +1552,20 @@ mod tests {
         assert_eq!(snap.devices.len(), 1);
         assert_eq!(snap.devices[0].percent, Some(66));
         assert_eq!(snap.default_device, Some(0));
+    }
+
+    /// G-28：snapshot 透出读数年龄（last_success → reading_age_secs）；
+    /// 无成功读数的设备为 None（菜单不追加年龄后缀）。
+    #[test]
+    fn g28_snapshot_exposes_reading_age() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let t0 = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(66, false), t0);
+        let snap = core.snapshot(t0 + Duration::from_secs(300));
+        assert_eq!(snap.devices[0].reading_age_secs, Some(300));
+        assert_eq!(snap.devices[1].reading_age_secs, None);
     }
 
     #[test]

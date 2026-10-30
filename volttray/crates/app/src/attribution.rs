@@ -1702,6 +1702,9 @@ function el(tag,attrs,parent){var e=document.createElementNS("http://www.w3.org/
 function offSecs(){var m=D.meta.tz_offset;var sign=m[0]==="-"?-1:1;var p=m.slice(1).split(":");return ((+p[0])*60+(+p[1]))*sign*60;}
 function fmtTs(ts){var d=new Date((ts+offSecs())*1000);function z(n){return (n<10?"0":"")+n;}return d.getUTCFullYear()+"-"+z(d.getUTCMonth()+1)+"-"+z(d.getUTCDate())+" "+z(d.getUTCHours())+":"+z(d.getUTCMinutes());}
 function fmtDur(sec){sec=Math.max(0,Math.round(sec));var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return h>0?h+" 小时 "+m+" 分":m+" 分";}
+// G-28：读数年龄（展示层，基准=meta.generated_at 导出时刻；超 2h 醒目）。
+function ageText(ts){var s=Math.max(0,(D.meta.generated_at||0)-ts);var m=Math.floor(s/60);if(m<1)return "刚刚";if(m<60)return m+" 分钟前";return Math.floor(m/60)+" 小时前";}
+function ageStale(ts){return ts&&(D.meta.generated_at-ts)>7200;}
 function emptyMark(id){var n=document.getElementById(id);if(n)n.outerHTML='<div class="empty">暂无数据</div>';}
 function badge(t,cls){return '<span class="badge '+cls+'">'+esc(t)+'</span>';}
 var segs=D.segments||[];
@@ -1717,8 +1720,8 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
     var k=dv[0],name=dv[1];var kpi=(D.first_screen_kpis||{})[k]||{};
     html+='<div class="card"><div class="k">当前电量 · '+esc(name)+'</div><div class="v">'
       +(kpi.current_pct==null?"—":kpi.current_pct+"%")+'</div><div class="s">'
-      +(kpi.current_ts?fmtTs(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")+'</div>'
-      +badge("实测","b-measure")+'</div>';
+      +(kpi.current_ts?fmtTs(kpi.current_ts)+" · 更新于 "+ageText(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")+'</div>'
+      +badge("实测","b-measure")+(ageStale(kpi.current_ts)?badge("读数超 2h 未刷新","b-warn"):"")+'</div>';
     if(kpi.today_sparse||kpi.today_drain_pct==null){
       html+='<div class="card dim"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">数据不足</div>'
         +'<div class="s">read&lt;3 或覆盖&lt;2h 时不给斜率、只给首末差</div>'
@@ -2737,6 +2740,32 @@ mod tests {
         assert!(html.len() > 10_000);
         // 段数应远小于事件数（coalesce 生效），量级合理。
         assert!(segs.len() < events.len() / 10, "段数 {}", segs.len());
+    }
+
+    /// G-28：HTML 模板含读数年龄渲染钩子（ageText / ageStale / 超 2h 徽标），
+    /// 且年龄基准（generated_at）与读数时刻（current_ts）golden 透出。
+    #[test]
+    fn g28_html_template_has_reading_age_hooks() {
+        let k = "kbd-1";
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, k, 90),
+            ev_poll(9200, k, 88),
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, CST, 200000);
+        assert_eq!(report["meta"]["generated_at"].as_i64().unwrap(), 200000);
+        assert_eq!(
+            report["first_screen_kpis"][k]["current_ts"]
+                .as_i64()
+                .unwrap(),
+            9200
+        );
+        let html = render_html(&report);
+        assert!(html.contains("function ageText("), "缺 ageText 钩子");
+        assert!(html.contains("function ageStale("), "缺 ageStale 钩子");
+        assert!(html.contains("更新于 "), "缺 KPI 卡年龄文案钩子");
+        assert!(html.contains("读数超 2h 未刷新"), "缺超 2h 醒目徽标钩子");
     }
 }
 

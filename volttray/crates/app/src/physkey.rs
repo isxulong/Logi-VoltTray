@@ -95,6 +95,7 @@ mod tests {
             physical_key: key.map(str::to_string),
             is_virtual: false,
             last_seen: None,
+            reading_age_secs: None,
         }
     }
 

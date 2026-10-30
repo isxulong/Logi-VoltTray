@@ -4075,6 +4075,7 @@ mod menu_sig_tests {
             physical_key: None,
             is_virtual: false,
             last_seen: None,
+            reading_age_secs: None,
         }
     }
 
