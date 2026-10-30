@@ -39,7 +39,7 @@ E10 验收加厚三条（终稿原文）：
 
 | 常量 | 冻结值 | 说明 |
 | --- | --- | --- |
-| `WAKE_PROBE_DEBOUNCE` | 5 s | 试探防抖专用常量（C-4 选 A；复用既有 `WAKE_PROBE_COOLDOWN=5s` 语义，**不碰** reconnect.rs `REENUM_INTERVAL=30s`——重枚举防抖与唤醒试探是两个机制） |
+| `WAKE_PROBE_DEBOUNCE` | 5 s | 试探防抖专用常量（C-4 选 A；复用既有 `WAKE_PROBE_COOLDOWN=5s` 语义，**不碰** reconnect.rs `REENUM_INTERVAL=30s`——重枚举防抖与唤醒试探是两个机制）。**注：`WAKE_PROBE_DEBOUNCE` 即既有 `WAKE_PROBE_COOLDOWN`，不新增常量**——按本文档检索常量名时请直接查 `WAKE_PROBE_COOLDOWN` |
 | `PROBE_BACKOFF_BASE` | 30 s | 退避序列最小试探间隔初值 |
 | `PROBE_BACKOFF_MAX` | 1800 s | 退避间隔封顶（30 min） |
 | `PROBE_DAILY_CAP` | 96 次 | 单设备滚动 24h 试探硬顶 |
