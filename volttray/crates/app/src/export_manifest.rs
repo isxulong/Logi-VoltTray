@@ -97,8 +97,13 @@ pub fn manifest_json(generated_at: i64) -> serde_json::Value {
 pub fn manifest_csv_comments(generated_at: i64) -> String {
     let ids: Vec<&str> = REDACTION_RULES.iter().map(|r| r.id).collect();
     let mut out = String::new();
-    out.push_str(&format!("# manifest.schema_version={MANIFEST_SCHEMA_VERSION}\n"));
-    out.push_str(&format!("# manifest.app_version={}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "# manifest.schema_version={MANIFEST_SCHEMA_VERSION}\n"
+    ));
+    out.push_str(&format!(
+        "# manifest.app_version={}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     out.push_str(&format!("# manifest.generated_at={generated_at}\n"));
     out.push_str(&format!("# manifest.redaction_rules={}\n", ids.join(",")));
     out.push_str("# manifest.notes=run_start/run_stop 秒级保留(U-2C);型号默认保留,anonymize=on 映射设备N(C-3);不含采集时区偏移值(BvA-6)\n");
@@ -160,7 +165,9 @@ mod tests {
     #[test]
     fn manifest_avoids_html_external_link_tokens() {
         let s = manifest_json(1).to_string();
-        for bad in ["http://", "https://", "<link", "<img", "src=", "url(", "@import"] {
+        for bad in [
+            "http://", "https://", "<link", "<img", "src=", "url(", "@import",
+        ] {
             assert!(!s.contains(bad), "manifest 含外链 token: {bad}");
         }
     }

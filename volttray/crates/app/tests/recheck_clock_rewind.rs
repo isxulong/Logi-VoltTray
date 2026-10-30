@@ -50,7 +50,11 @@ fn run_recheck(fixture: &Path, anon: bool) -> Result<(), String> {
         anon as u8
     ));
     let csv_path = dir.join("out.csv");
-    std::fs::write(&csv_path, render_csv(&segments, anon_map.as_ref(), tz, generated)).unwrap();
+    std::fs::write(
+        &csv_path,
+        render_csv(&segments, anon_map.as_ref(), tz, generated),
+    )
+    .unwrap();
     let report = build_report_data(&events, &segments, anon_map.as_ref(), tz, generated);
     std::fs::write(dir.join("out.html"), render_html(&report)).unwrap();
     std::fs::write(

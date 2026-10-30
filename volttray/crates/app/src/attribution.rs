@@ -2394,7 +2394,11 @@ mod tests {
         let keys: BTreeSet<String> = ["dev-0", "dev-1"].iter().map(|s| s.to_string()).collect();
         let anon = anonymize_map(&keys);
         let csv = render_csv(&segs, Some(&anon), CST, 1_760_000_000);
-        let rows: Vec<&str> = csv.lines().filter(|l| !l.starts_with("# ")).skip(1).collect();
+        let rows: Vec<&str> = csv
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .skip(1)
+            .collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].starts_with("D1,"), "row0: {}", rows[0]);
         assert!(rows[1].starts_with("D2,"), "row1: {}", rows[1]);
@@ -2531,7 +2535,9 @@ mod tests {
         let comments: Vec<&str> = body.lines().take_while(|l| l.starts_with("# ")).collect();
         assert_eq!(
             comments.len(),
-            crate::export_manifest::manifest_csv_comments(7).lines().count()
+            crate::export_manifest::manifest_csv_comments(7)
+                .lines()
+                .count()
         );
         assert!(comments[0].starts_with("# manifest.schema_version="));
         assert!(comments.iter().any(|l| *l == "# manifest.generated_at=7"));
