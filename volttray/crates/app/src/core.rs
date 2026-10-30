@@ -2811,8 +2811,10 @@ mod tests {
     fn e10_quota_disabled_returns_to_v0325() {
         // 回滚开关（C-2 裁 A 侧：默认开；关闭即回 v0.3.25 行为）——
         // 无封顶、无退避、无保底。
-        let mut cfg = Config::default();
-        cfg.experimental_wake_quota = false;
+        let cfg = Config {
+            experimental_wake_quota: false,
+            ..Default::default()
+        };
         let mut core = AppCore::new(Arc::new(RwLock::new(cfg)));
         let t0 = Instant::now();
         core.upsert_device(dev("a", 1));
