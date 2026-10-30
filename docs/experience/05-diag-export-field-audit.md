@@ -18,7 +18,7 @@
 
 ## 二、DiagExport 逐字段审计
 
-结构体定义以符号引用「`diag_export.rs` `DiagExport` 结构体定义起」为准（行号随重构漂移、不逐版维护；2026-10-26 时点为 L111 起）。20 个序列化字段（含 `skip_serializing_if` 可选字段；E22 新增 `wake_recovery_via_reenum`）。字段数以 `diag_export.rs` 测试 `t02b_all_fields_enumerated_and_no_user_path_leak` 的 expected 数组为准——2026-10-26 实测结构体 pub 字段与该数组均为 20，本文原「19」系漂移，此注即计数修订留痕：
+结构体定义以符号引用「`diag_export.rs` `DiagExport` 结构体定义起」为准（行号随重构漂移、不逐版维护；2026-10-26 时点为 L111 起）。20 个序列化字段（含 `skip_serializing_if` 可选字段；红蓝对抗改进项 E22 新增 `wake_recovery_via_reenum`）。字段数以 `diag_export.rs` 测试 `t02b_all_fields_enumerated_and_no_user_path_leak` 的 expected 数组为准——2026-10-26 实测结构体 pub 字段与该数组均为 20，本文原「19」系漂移，此注即计数修订留痕：
 
 | 字段 | 内容来源 | 泄露面评估 | redact 覆盖 |
 | --- | --- | --- | --- |
@@ -32,7 +32,7 @@
 | `channel_map_miss` / `frame_tx` / `frame_rx` | 原子计数器 | 纯数值 | 无需覆盖 |
 | `avg_tx_interval_ms`（skip） | 帧间隔均值 | 纯数值 | 无需覆盖 |
 | `feature_index_tx` / `feature_index_rx` | `FrameStats`：键为 `format!("0x{f:02X}")`（HID++ 帧第 3 字节格式化；构造点以符号引用「`main.rs` feature 统计格式化处」为准——行号锚点随重构漂移，不逐版维护） | 键是协议功能索引号，非用户数据 | 无需覆盖 |
-| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_zero_match` / `wake_miss_no_fingerprint` / `wake_miss_ambiguous` / `wake_recovery_via_reenum`（E22 新增：唤醒信号窗口内经整轮重枚举恢复注册计数） | 原子计数器 | 纯数值 | 无需覆盖 |
+| `arm_all_fills` / `wake_successes` / `wake_miss_no_path` / `wake_miss_zero_match` / `wake_miss_no_fingerprint` / `wake_miss_ambiguous` / `wake_recovery_via_reenum`（红蓝对抗改进项 E22 新增：唤醒信号窗口内经整轮重枚举恢复注册计数） | 原子计数器 | 纯数值 | 无需覆盖 |
 | `exported_at` | unix 秒 | 时间戳，无个人标识 | 无需覆盖 |
 | `app_version` | `CARGO_PKG_VERSION` | 版本号 | 无需覆盖 |
 
@@ -94,7 +94,7 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 
 真机导出样例复检：**未执行**（本审计基于源码实证，真机导出行为未验证，见 commit 的 Not-Verified trailer）。
 
-## E17 增补（2026-10-24，A-R11 落地）
+## 经验条目 E17 增补（2026-10-24，A-R11 落地；G-13 族名补注 2026-10-31：本节 E17＝经验条目族，即 01 文件 E17「设备身份必须锚定物理设备」的增补段，库索引映射同此）
 
 - **结构化脱敏注册表**：两条全文级规则升格为 `redact.rs` 的编译期常量注册表 `REDACTION_RULES`（稳定 id `R1-user-path` / `R2-device-name`＋口径＋本文档锚点），由测试 `redaction_rules_registry_is_pinned` 钉板——规则删改/重排即测试失败，强制回本表同步。
 - **整值替换优先**：规则二替换执行顺序改为按名字长度降序（编号仍按收集顺序），修复互为子串设备名的半替换失真（原「MX Keys 先于 MX Keys Mini 收集 → 设备1 Mini」残留）；安全性两序等价，仅可读性变化。由 `whole_value_priority_replaces_longest_first` 钉板。
@@ -114,3 +114,20 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 | 5 | 统计 JSON 秒级启停时间线 | 统计 JSON 原始事件序列含秒级 run_start / run_stop 记录（实测样本 42+41 条），等价「坐到电脑前 / 离开」的打卡记录 | 高：精确到秒的在席记录 | 本行即登记；随 U-2 落地口径一并收敛 |
 
 **字段级脱敏清单指针（不预建）**：字段级脱敏清单留「待 U-2 落地后补」。U-2 已拍板选方案 C（字段级默认值：位图默认不导出＋时区归一化默认开＋型号默认保留但导出时提示「本文件含设备型号与作息信息」＋时间精度不动），并带时序闸门——字段覆盖面缺陷（N-12②，「现有匿名化开关只处理路径类字段、管不住型号和作息」）落地并经一次导出实测逐项核验前，默认值不变更。清单补建时须同时对齐 N-11（诊断 / 统计两导出面脱敏口径不一致：诊断侧设备名脱敏为「设备N」、统计侧保留真实型号）。
+
+## 编号族与裸编号歧义映射表（G-13，2026-10-31）
+
+本仓 E 编号存在**两族**，裸编号引用有同形歧义风险，引用时须带族名：
+
+| 族名 | 范围 | 载体与登记位 |
+| --- | --- | --- |
+| 经验条目 E1–E44 | 01 / 02 两文件的经验条目（如 01 E17「设备身份必须锚定物理设备」、02 E22「红蓝对抗编排进阶」） | [01-engineering-lessons.md](01-engineering-lessons.md)、[02-collaboration-playbook.md](02-collaboration-playbook.md)；库索引映射表在本目录 README |
+| 红蓝对抗改进项 E1–E24 | 2026-10-24 首轮红蓝对抗终审的改进项编号（如改进项 E9＝unsafe 台账复核、改进项 E19＝时钟 YAML 单源、改进项 E22＝真机休眠反馈三项修复） | 各文档内带「改进项 E」前缀的引用与 03 / 06 / 07 登记行；RELEASES.md 条目标注 |
+
+裸编号歧义登记（已知清单，逐条消歧）：
+
+- **D-90**（volttray/docs/decisions.md）行内「E10 行为层双缺陷修复 + E11 唤醒 miss 计数拆分」——按内容属**红蓝对抗改进项**族（E11＝唤醒 miss 计数拆分，即 04 §7 T-08 行现行四字段 wake_miss_* 的来源；E10＝行为层双缺陷修复），与 02 文件经验条目 E10（长任务卡壳判定）、E11（进度监控要实质性）编号同形不同义。decisions.md 为只追加冻结台账（改进项 E19），D-90 原文不改，以本表登记消歧。
+- **「E10 独占窗口」**（HANDOVER §3.3、03 D3、06 引用）——指改进项 E10 对应的行为层修复窗口（P0 wake-force 重枚举 / P1 灰显探测），39 条报告口径为「经验库之外的主线工作」，与经验条目 E10 编号同形不同义；引用时以「E10 独占窗口（HANDOVER §3.3）」全称消歧。
+- **本文件**「经验条目 E17 增补」＝经验条目族；「红蓝对抗改进项 E22 新增」＝改进项族——本批 G-13 已逐处补族名。
+
+消歧规则：后续新增 E 编号引用一律带族名；不带族名的裸 E 编号默认按载体文件判定（01/02 标题行＝经验条目族，登记行/RELEASES 标注＝改进项族），仍歧义者以本表登记为准并追加登记行。
