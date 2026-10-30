@@ -4,6 +4,8 @@
 
 > **UI quotation convention（G-03）**: the tray UI is Chinese-only. Where this file quotes what the UI literally shows, the quotation follows the「中文字面量（英文意译）」convention — the on-screen Chinese string appears as-is, with an English gloss in parentheses (e.g. 100% shows 「满」 ("full"), not a literal "FULL"). These UI quotations share one source with the semantic ID table in [docs/experience/02-collaboration-playbook.md](docs/experience/02-collaboration-playbook.md) (E44); changes to a UI string update both READMEs and that table in the same change.
 
+> **Translation scope（G-06，2026-10-31）**: this file is an abridged translation of the Chinese README. User-visible surfaces — features, menu entries, configuration keys, release information — are kept in full sync with the Chinese version under the E44 gate; internal-governance content (experience-base details, reconciliation mechanics, orchestration rules) is summarized or omitted. The acceptance criterion is paragraph-level structural alignment with the Chinese README; mechanical count checks (entry / line counts) are a candidate observation metric only, not a gate.
+
 Show your Logitech device's battery level right on the Windows tray icon: the live battery percentage of your keyboard / mouse is drawn directly on the system tray icon — no windows to open, ever.
 
 [![GitHub Release](https://img.shields.io/github/v/release/isxulong/Logi-VoltTray)](https://github.com/isxulong/Logi-VoltTray/releases)
