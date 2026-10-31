@@ -164,7 +164,7 @@
    - 锚常量（文本路）：`rg -n "POLL_CHARGING" volttray/crates/app/src/core.rs`
    - 诊断导出顶层计数器（随 IMPL-CORE 合入生效）：`jq '.poll_rounds_total, .poll_round_last_duration_ms, .poll_round_max_duration_ms, .slot_outcome_success, .slot_outcome_timeout, .slot_outcome_error, .slot_query_charging, .slot_query_normal, .poll_skipped_ff_cache, .poll_skipped_dead_slot, .poll_skipped_sleep' LogiVoltTray-diag-export-*.json`
    - 档位对账（信息性输出、不判负）：`python volttray/tools/recheck.py --stats <stats.jsonl 路径> --tier-audit`
-3. **锚定 commit**：文档侧锚 `32e8367`（本批开工时 main HEAD）；计数器与 `--tier-audit` 工具侧锚 `93e28a9b`（IMPL-CORE 分支头，随 PR #19 合入后生效——未合入前 jq / recheck 两条命令不可用，CI 在场门控断言待其合入后自动升级为硬校验）。
+3. **锚定 commit**：文档侧锚 `32e8367`（本批开工时 main HEAD）；计数器与 `--tier-audit` 工具侧锚 `93e28a9b`（本批开工时 IMPL-CORE 分支头，随 PR #19 合入后生效——#19 按既定编排 rebase 保 G-33 语义后合入将产生新 sha，届时工具侧锚以 main 上实际合入 commit 为准；未合入前 jq / recheck 两条命令不可用，CI 在场门控断言待其合入后自动升级为硬校验）。
 <!-- G-35 三件套 end -->
 
 **溯源**：`volttray/RELEASES.md` v0.3.15（CI clippy 翻车与修复记录）；`volttray/docs/decisions.md` D-70（T6 前置交叉验证）。
