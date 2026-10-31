@@ -156,6 +156,17 @@
 2. windows crate 的模块路径与 trait 实现**以所用版本的文档 / 源码为准**，不凭记忆写——crate 小版本之间模块会搬家（上例 `Dialogs` 即如此）。
 3. CI 翻车后的修复 commit 里注明「本地交叉验证已过」，让审查者知道这轮不是盲修。
 
+<!-- G-35 三件套 begin -->
+**实测取数三件套（G-35，2026-10-31 红蓝对抗修复波三）**：本条扫描门限误记（v0.3.15 修正）与后续两例显示 / 节拍脱节（检查更新、立即刷新菜单，G-06 登记在册）同属「实测与文档口径漂移」同族。此类问题统一按「口径 → 取数命令 → 锚定 commit」三步处置；实测裸值只进 N-04/N-05 定位记录，不进正文。
+
+1. **口径——三个量必须分开**：**轮间隔**（配置档决定的轮起间隔，锚 `core.rs` 档位常量如 `POLL_CHARGING`）；**整轮耗时**（一轮从起到全部槽位查完的墙钟差，口径见 decisions.md D-98，观测字段 `poll_round_last_duration_ms` / `poll_round_max_duration_ms`）；**表观读数间隔**（用户可见的相邻读数间隔 = 轮间隔 + 整轮耗时 + 跳轮叠加，跳轮即整轮被跳过的倍数，观测字段 `poll_skipped_ff_cache` / `poll_skipped_dead_slot` / `poll_skipped_sleep` 与 `slot_outcome_success` / `slot_outcome_timeout` / `slot_outcome_error` / `slot_query_charging` / `slot_query_normal`）。
+2. **取数命令**：
+   - 锚常量（文本路）：`rg -n "POLL_CHARGING" volttray/crates/app/src/core.rs`
+   - 诊断导出顶层计数器（随 IMPL-CORE 合入生效）：`jq '.poll_rounds_total, .poll_round_last_duration_ms, .poll_round_max_duration_ms, .slot_outcome_success, .slot_outcome_timeout, .slot_outcome_error, .slot_query_charging, .slot_query_normal, .poll_skipped_ff_cache, .poll_skipped_dead_slot, .poll_skipped_sleep' LogiVoltTray-diag-export-*.json`（shell 前提：通配符依赖 shell 展开、jq 不自行 glob——Windows PowerShell / cmd 下 `*` 不展开会报文件不存在，须用 git-bash / WSL 等 bash 类 shell，或将 `*` 替换为实际文件名）
+   - 档位对账（信息性输出、不判负）：`python volttray/tools/recheck.py --stats <stats.jsonl 路径> --tier-audit`
+3. **锚定 commit**：文档侧锚 `32e8367`（本批开工时 main HEAD）；计数器与 `--tier-audit` 工具侧锚 `93e28a9b`（本批开工时 IMPL-CORE 分支头，随 PR #19 合入后生效——#19 按既定编排 rebase 保 G-33 语义后合入将产生新 sha，届时工具侧锚以 main 上实际合入 commit 为准；未合入前 jq / recheck 两条命令不可用，CI 在场门控断言待其合入后自动升级为硬校验）。
+<!-- G-35 三件套 end -->
+
 **溯源**：`volttray/RELEASES.md` v0.3.15（CI clippy 翻车与修复记录）；`volttray/docs/decisions.md` D-70（T6 前置交叉验证）。
 
 **相关条目**：E17（本文件）、[02 E22](02-collaboration-playbook.md)（主题相近，互链检索；不合并、不移册、不改编号）
