@@ -32,13 +32,30 @@ fn main() {
         None
     };
     let tz: i32 = args[4].parse().expect("tz minutes");
-    let csv = render_csv(&segments, anon.as_ref(), tz);
+    let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
+                                      // 组5 5b：镜像默认闸门（redact_display_name=开）——anon 在场时
+                                      // display_name 按会话映射「设备N」，recheck.py 同口径对账。
+    let name_map = anon.as_ref().map(|_| {
+        volttray_app::redact::device_session_map(
+            &volttray_app::attribution::display_name_session_order(&events),
+        )
+    });
+    let csv = render_csv(&segments, anon.as_ref(), name_map.as_ref(), tz, generated);
     std::fs::write(&args[3], &csv).expect("write csv");
     let stem = Path::new(&args[3]).with_extension("");
-    let generated = 1_760_745_600i64; // 固定生成时刻（对账确定性）
-    let report = build_report_data(&events, &segments, anon.as_ref(), tz, generated);
+    let report = build_report_data(
+        &events,
+        &segments,
+        anon.as_ref(),
+        name_map.as_ref(),
+        tz,
+        generated,
+    );
     std::fs::write(stem.with_extension("html"), render_html(&report)).expect("write html");
-    let json = render_json_events(&events, anon.as_ref(), generated);
+    // 组4 N-08②：位图开关镜像默认（export_activity_bitmap=关）——
+    // JSON 事件序列不含 activity_buckets；recheck.py 对在位事件
+    // 严格复算、缺席不判负（BvA-8 旧样本向后兼容同口径）。
+    let json = render_json_events(&events, anon.as_ref(), name_map.as_ref(), false, generated);
     std::fs::write(stem.with_extension("json"), json).expect("write json");
     println!(
         "events={} segments={} -> {}(.csv/.html/.json)",

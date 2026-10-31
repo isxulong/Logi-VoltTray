@@ -638,15 +638,23 @@ fn serialized_len(records: &[PersistedDevice]) -> usize {
 #[cfg(test)]
 mod tests {
     // FR-1（RB2）path_map 验证：往返 / 旧文件兼容 / 上限淘汰 / 空值拒绝
+    // 每次调用独占子目录：path 直接落在共享 temp_dir 根部时，
+    // 并发测试中任一路径的 load（cleanup_orphan_tmps 扫父目录删 *.tmp）
+    // 会删掉另一测试原子写半途的 .tmp，rename 报 NotFound（PR #19 CI
+    // ubuntu job 实测命中）。隔离到独占目录后清理互不可见。
     fn fr1_tmp() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "vt-fr1-{}-{}.json",
+        let dir = std::env::temp_dir().join(format!(
+            "vt-fr1-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ))
+        ));
+        // 目录预建：old_file_compat 用例直接 fs::write 落文件、不经
+        // write_atomic 的 create_dir_all。
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("last_known.json")
     }
 
     #[test]

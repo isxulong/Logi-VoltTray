@@ -12,6 +12,7 @@ pub mod config;
 pub mod core;
 pub mod debounce;
 pub mod diag_export;
+pub mod export_manifest;
 pub mod observer;
 pub mod persist;
 pub mod physkey;
@@ -40,9 +41,11 @@ pub use config::{
     LOW_THRESHOLD_MIN, POLL_MAX_SECS, POLL_MIN_SECS, POLL_TIERS_SECS, TIER_PAD_PALETTE,
 };
 pub use core::{
-    guarded, AppCore, DeviceSnapshot, FastPollState, PollDecision, Snapshot, TimeoutOutcome,
-    UpsertOutcome, GRAY_AFTER, GRAY_MIN_POLLS, NEAR_GRAY_LEEWAY, POLL_CHARGING,
-    SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN,
+    backoff_interval, guarded, AppCore, DeviceSnapshot, FastPollState, PollDecision, ProbeGate,
+    RoundTally, Snapshot, TimeoutOutcome, UpsertOutcome, GRAY_AFTER, GRAY_MIN_POLLS,
+    GUARANTEED_READ_INTERVAL, NEAR_GRAY_LEEWAY, POLL_CHARGING, PROBE_BACKOFF_BASE,
+    PROBE_BACKOFF_FACTOR, PROBE_BACKOFF_MAX, PROBE_CAP_WINDOW, PROBE_DAILY_CAP,
+    SLEEP_AFTER_TIMEOUTS, WAKE_PROBE_COOLDOWN, ZERO_MATCH_RATIO_MAX,
 };
 pub use debounce::{Alert, LowBatteryTracker, DEBOUNCE_COUNT, RELEASE_HYSTERESIS};
 pub use observer::{mask_event, mask_hex, Observer, SharedObserver, DIAG_CAPACITY};
@@ -65,4 +68,7 @@ pub use stats::{
     StatsLoadOutcome, StatsStore, SOURCE_CHARGING_FAST, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
     STATS_ARCHIVE_NAME, STATS_FILE_NAME, STATS_MAX_BYTES,
 };
-pub use wakechannel::{channel_for_raw_path, channel_for_raw_path_classified, ChannelMatch};
+pub use wakechannel::{
+    channel_for_raw_path, channel_for_raw_path_classified, channel_match_gated, ChannelMatch,
+    TwoLevelMatch, WakeBinding,
+};

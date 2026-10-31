@@ -47,25 +47,51 @@ pub(crate) fn run_stats_export(
         bootlog::note(&format!("stats export: pre-export flush failed: {e}"));
     }
     let mut events = volttray_app::stats::load_events_from(store.archive_path(), store.path());
-    // 融合稿 Phase 1「含活动统计」勾选项（默认开）：取消勾选时从导出
-    // 事件流剔除 activity_buckets 摘要。编排（flush→load→分段→渲染）
-    // 不变，仅此一处数据选择。
-    if !req.include_activity {
-        events.retain(|e| !matches!(e, volttray_app::stats::StatsEvent::ActivityBuckets { .. }));
-    }
+    // 事件流闸门单点谓词（attribution::export_event_allowed，与本
+    // crate golden 测试同口径）：activity_buckets 逐分钟位图须
+    // 融合稿 Phase 1「含活动统计」（include_activity，默认开）与
+    // 组4 N-08② 位图独立开关（export_activity_bitmap，默认关，
+    // 与 anonymize 解耦——作息泄露与是否匿名无关）同时开才放行；
+    // 其余事件恒放行。编排（flush→load→分段→渲染）不变，仅此一处
+    // 数据选择。
+    events.retain(|e| {
+        attr::export_event_allowed(e, req.include_activity, req.export_activity_bitmap)
+    });
     let segments = attr::build_segments(&events);
     let anon = if req.anonymize {
         Some(attr::anonymize_map(&attr::event_keys(&events)))
     } else {
         None
     };
-    let offset = local_offset_minutes();
+    // 组5 5b（C-3）：anonymize=on 且脱敏闸门开 → display_name 会话
+    // 内映射「设备N」（与诊断面 redact::device_session_map 同函数同
+    // 序号）；闸门回退或 anonymize=off → None（保留真实型号，U-2C）。
+    let name_map = if req.anonymize && req.redact_display_name {
+        Some(volttray_app::redact::device_session_map(
+            &attr::display_name_session_order(&events),
+        ))
+    } else {
+        None
+    };
+    // 组5 5b（U-2 闸门，BvA-5 默认关）：tz_utc=true → 时间戳按 UTC
+    //（+00:00）渲染；false → 本地时区（现状，翻转挂 U-2 裁决）。
+    let offset = if req.tz_utc {
+        0
+    } else {
+        local_offset_minutes()
+    };
     let mut done: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     // E5（P1a）：CSV 主产物同样走 tmp→rename 原子写。
     match write_tmp_rename(
         &req.csv_path,
-        &attr::render_csv(&segments, anon.as_ref(), offset),
+        &attr::render_csv(
+            &segments,
+            anon.as_ref(),
+            name_map.as_ref(),
+            offset,
+            wall_secs() as i64,
+        ),
     ) {
         Ok(()) => done.push(req.csv_path.display().to_string()),
         Err(e) => failed.push(format!("{}: {e}", req.csv_path.display())),
@@ -73,7 +99,13 @@ pub(crate) fn run_stats_export(
     let stem = req.csv_path.with_extension("");
     if req.json {
         let p = stem.with_extension("json");
-        let content = attr::render_json_events(&events, anon.as_ref(), wall_secs() as i64);
+        let content = attr::render_json_events(
+            &events,
+            anon.as_ref(),
+            name_map.as_ref(),
+            req.export_activity_bitmap,
+            wall_secs() as i64,
+        );
         match write_tmp_rename(&p, &content) {
             Ok(()) => done.push(p.display().to_string()),
             Err(e) => failed.push(format!("{}: {e}", p.display())),
@@ -85,6 +117,7 @@ pub(crate) fn run_stats_export(
             &events,
             &segments,
             anon.as_ref(),
+            name_map.as_ref(),
             offset,
             wall_secs() as i64,
         );
@@ -308,6 +341,26 @@ pub(crate) fn export_diag(
         wake_miss_no_fingerprint: telemetry.wake_miss_no_fingerprint.load(Ordering::Relaxed),
         wake_miss_ambiguous: telemetry.wake_miss_ambiguous.load(Ordering::Relaxed),
         wake_recovery_via_reenum: telemetry.wake_recovery_via_reenum.load(Ordering::Relaxed),
+        probe_cap_daily_hits: telemetry.probe_cap_daily_hits.load(Ordering::Relaxed),
+        probe_backoff_skips: telemetry.probe_backoff_skips.load(Ordering::Relaxed),
+        guaranteed_read_attempts: telemetry.guaranteed_read_attempts.load(Ordering::Relaxed),
+        wake_success_hit_exact: telemetry.wake_success_hit_exact.load(Ordering::Relaxed),
+        wake_success_hit_relaxed: telemetry.wake_success_hit_relaxed.load(Ordering::Relaxed),
+        run_started_at: telemetry.run_started_at_rfc3339.clone(),
+        poll_skipped_ff_cache: telemetry.poll_skipped_ff_cache.load(Ordering::Relaxed),
+        poll_skipped_dead_slot: telemetry.poll_skipped_dead_slot.load(Ordering::Relaxed),
+        poll_skipped_sleep: telemetry.poll_skipped_sleep.load(Ordering::Relaxed),
+        poll_rounds_total: telemetry.poll_rounds_total.load(Ordering::Relaxed),
+        poll_round_last_duration_ms: telemetry
+            .poll_round_last_duration_ms
+            .load(Ordering::Relaxed),
+        poll_round_max_duration_ms: telemetry.poll_round_max_duration_ms.load(Ordering::Relaxed),
+        slot_outcome_success: telemetry.slot_outcome_success.load(Ordering::Relaxed),
+        slot_outcome_timeout: telemetry.slot_outcome_timeout.load(Ordering::Relaxed),
+        slot_outcome_error: telemetry.slot_outcome_error.load(Ordering::Relaxed),
+        slot_query_charging: telemetry.slot_query_charging.load(Ordering::Relaxed),
+        slot_query_normal: telemetry.slot_query_normal.load(Ordering::Relaxed),
+        manifest: volttray_app::export_manifest::manifest_json(exported_at as i64),
         exported_at,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }

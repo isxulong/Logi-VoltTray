@@ -510,6 +510,31 @@ pub struct Config {
     pub experimental_per_device_polling: bool,
     /// 蓝牙直连与有线设备读取（HID++ 0xFF 直连槽扫描）。
     pub experimental_bluetooth_wired: bool,
+    /// E10（红蓝对抗波二 C 融合稿组1，C-2 裁 A 侧）：唤醒试探额度函数
+    /// 与每 4h 保底读数总闸——false 回 v0.3.25 行为（无封顶、无退避、
+    /// 无保底穿透）。默认开；存量配置无此键按默认开生效，旧版本读取
+    /// 按未知键忽略并原样保留（E6）。数值冻结见
+    /// docs/design-e10-wake-attribution.md 第 4/5 节（D-93/D-94）。
+    pub experimental_wake_quota: bool,
+    /// 组2 N-03（红蓝对抗波二 C 融合稿）：停滞检测重排总闸——在线
+    /// 设备 next_due=None 且超 max(2×轮询档, 灰显阈值) 无成功读数时
+    /// 重排到期点。默认开；false 回 v0.3.26 行为（仅依赖 is_due 的
+    /// None 兜底）。休眠设备不在此路径（D-33）。显式值按文件，不
+    /// 参与 v0321 迁移（同 E10 口径）。
+    pub experimental_stall_requeue: bool,
+    /// 组5 5b（红蓝对抗波二 C 融合稿，N-12②/U-2C，C-2）：统计导出
+    /// anonymize=on 时 display_name 按会话内映射替换为「设备N」
+    ///（R3，与诊断面同函数同序号）。默认开；false = 回退保留真实
+    /// 型号，导出对话框强制提示「脱敏修复已回退」。
+    pub experimental_export_redact_display_name: bool,
+    /// 组5 5b（U-2 闸门，BvA-5）：导出时间统一 UTC（CSV/HTML 时间戳
+    /// 按 +00:00 渲染）。实现照做、默认关——覆盖面落地并实测核验前
+    /// 默认值不动，翻转挂 U-2 裁决；本地 stats.jsonl 落盘侧不受影响。
+    pub experimental_export_tz_utc: bool,
+    /// 组5 5b（U-2C，C-2）：统计导出保存前提示「本文件含设备型号与
+    /// 作息信息」。默认开；false = 回退不提示，导出对话框强制提示
+    /// 「脱敏修复已回退」。
+    pub experimental_export_privacy_notice: bool,
     /// v0.3.21 存量迁移标记（先例：icon_text_scale_migrated_v0318）：
     /// 缺失（v0.3.20 及更早配置）→ 四个 experimental_* 缺失键迁 true
     /// 保留原行为 + 警告（显式解析到的键不覆盖，C-09）；标记存在 →
@@ -568,6 +593,15 @@ impl Default for Config {
             experimental_stats: true,
             experimental_per_device_polling: true,
             experimental_bluetooth_wired: true,
+            // E10 波二：唤醒试探额度/保底总闸默认开（C-2 裁 A 侧，D-93）。
+            experimental_wake_quota: true,
+            // 组2 N-03：停滞检测重排默认开（融合稿回滚键口径）。
+            experimental_stall_requeue: true,
+            // 组5 5b：display_name 脱敏/保存前提示默认开（C-2）；
+            // 时区 UTC 归一默认关（BvA-5，翻转挂 U-2）。
+            experimental_export_redact_display_name: true,
+            experimental_export_tz_utc: false,
+            experimental_export_privacy_notice: true,
             experimental_migrated_v0321: true,
             // D-87：精细化设置闸门默认收起（只影响可见性）。
             ui_fine_tune_expanded: false,
@@ -848,6 +882,27 @@ impl Config {
                     saw_experimental_bluetooth = true;
                     cfg.experimental_bluetooth_wired = *b;
                 }
+                // E10 波二（C-2）：回滚键显式值按文件；不参与 v0321 迁移
+                //（该迁移仅补四个原始实验键；本键默认开即新语义，无需迁移）。
+                ("experimental_wake_quota", Value::Bool(b)) => {
+                    cfg.experimental_wake_quota = *b;
+                }
+                // 组2 N-03：停滞重排回滚键显式值按文件；不参与 v0321
+                // 迁移（同 E10 口径）。
+                ("experimental_stall_requeue", Value::Bool(b)) => {
+                    cfg.experimental_stall_requeue = *b;
+                }
+                // 组5 5b（C-2/BvA-5）：导出脱敏回滚与时区闸门显式值
+                // 按文件；不参与 v0321 迁移（同 E10 口径）。
+                ("experimental_export_redact_display_name", Value::Bool(b)) => {
+                    cfg.experimental_export_redact_display_name = *b;
+                }
+                ("experimental_export_tz_utc", Value::Bool(b)) => {
+                    cfg.experimental_export_tz_utc = *b;
+                }
+                ("experimental_export_privacy_notice", Value::Bool(b)) => {
+                    cfg.experimental_export_privacy_notice = *b;
+                }
                 ("experimental_migrated_v0321", Value::Bool(b)) => {
                     saw_experimental_marker = true;
                     cfg.experimental_migrated_v0321 = *b;
@@ -948,6 +1003,11 @@ impl Config {
                     | "experimental_stats"
                     | "experimental_per_device_polling"
                     | "experimental_bluetooth_wired"
+                    | "experimental_wake_quota"
+                    | "experimental_stall_requeue"
+                    | "experimental_export_redact_display_name"
+                    | "experimental_export_tz_utc"
+                    | "experimental_export_privacy_notice"
                     | "experimental_migrated_v0321"
                     | "ui_fine_tune_expanded"
                     | "ui_default_on_notice_v0322",
@@ -1097,6 +1157,14 @@ impl Config {
              experimental_stats = {}\n\
              experimental_per_device_polling = {}\n\
              experimental_bluetooth_wired = {}\n\
+             # E10 唤醒试探额度/保底总闸（红蓝对抗波二，D-93）：false 回 v0.3.25 行为。\n\
+             experimental_wake_quota = {}\n\
+             # 组2 N-03 停滞检测重排总闸：false 回 v0.3.26 行为（仅 None 兜底）。\n\
+             experimental_stall_requeue = {}\n\
+             # 组5 5b 导出脱敏：display_name→设备N（默认开）/时间统一 UTC（默认关,挂 U-2）/保存前提示（默认开）。\n\
+             experimental_export_redact_display_name = {}\n\
+             experimental_export_tz_utc = {}\n\
+             experimental_export_privacy_notice = {}\n\
              experimental_migrated_v0321 = {}\n\
              # 精细化设置闸门展开态（v0.3.22，D-87）：收起=false 仅隐藏选项，不影响使能。\n\
              ui_fine_tune_expanded = {}\n\
@@ -1123,6 +1191,11 @@ impl Config {
             self.experimental_stats,
             self.experimental_per_device_polling,
             self.experimental_bluetooth_wired,
+            self.experimental_wake_quota,
+            self.experimental_stall_requeue,
+            self.experimental_export_redact_display_name,
+            self.experimental_export_tz_utc,
+            self.experimental_export_privacy_notice,
             self.experimental_migrated_v0321,
             self.ui_fine_tune_expanded,
             self.ui_default_on_notice_v0322,

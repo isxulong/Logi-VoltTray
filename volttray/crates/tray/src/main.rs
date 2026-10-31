@@ -150,7 +150,8 @@ mod imp {
     use std::time::{SystemTime, UNIX_EPOCH};
     use volttray_app::persist::{self, FlushTuning, LastKnownStore, LoadOutcome};
     use volttray_app::wakechannel::{
-        activity_bucket_key, channel_for_raw_path_classified, ActivityKeySource, ChannelMatch,
+        activity_bucket_key, channel_for_raw_path_classified, channel_match_gated,
+        ActivityKeySource, ChannelMatch, TwoLevelMatch, WakeBinding,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::HiDpi::{
@@ -420,6 +421,9 @@ mod imp {
         /// 负缓存——本通道句柄存活期内失败过一次即不再重复探测（结构性
         /// 噪声，非设备异常）；force 枚举句柄重开时清零。
         ff_battery_probe_failed: bool,
+        /// E10（C-1 裁 A 侧）：0xFF 负缓存最近一次保底穿透时刻（run
+        /// 内存态；每 4h 窗至多穿透一次，随句柄重开自然重置）。
+        ff_penetration_last: Option<Instant>,
         /// R-2（v0.3.17）：死槽扫描冷却——连续 K 轮握手无设备应答
         ///（Timeout 或 NoDevice，E10 细分口径）的槽位降频为每 K 轮
         /// 扫 1 次；force 枚举清零（手动刷新/动鼠标立即穿透）。
@@ -526,6 +530,7 @@ mod imp {
     /// 0xFF 电量探测 error_response（写通道级负缓存）与握手无设备应答
     ///（Timeout 或 NoDevice，喂死槽冷却裁决）；借用约束下经 &mut 带出，
     /// 不改返回类型。
+    #[allow(clippy::too_many_arguments)]
     fn try_slot(
         core: &Arc<Mutex<AppCore>>,
         observer: &Arc<Mutex<Observer>>,
@@ -534,6 +539,7 @@ mod imp {
         slot: u8,
         edge: &mut SlotScanEdge,
         stats: &mut volttray_app::stats::StatsStore,
+        telemetry: &Telemetry,
     ) -> Result<(SlotState, Option<(String, String)>), SlotScanFailure> {
         let id = format!("{}#{}", info.key(), slot);
         let mut t = Transport::new(shared.clone(), SharedObserver(observer.clone()));
@@ -586,6 +592,10 @@ mod imp {
         // E10：缓存命中时的分支条件由 is_hidpp1 改为 ff_cache_applies——
         // 0x01 幽灵槽（Hidpp1Ghost）不再每轮清缓存，负缓存真实生效。
         if ff_probe_suppressed(slot, edge.ff_battery_probe_failed, ff_cache_applies) {
+            // 组2 N-03 断流定位打点：0xFF 负缓存挡下计数（纯增量）。
+            telemetry
+                .poll_skipped_ff_cache
+                .fetch_add(1, Ordering::Relaxed);
             bootlog::note(&format!(
                 "slot scan: {id} battery probe skipped (0xFF failure cached this run)"
             ));
@@ -894,6 +904,42 @@ mod imp {
         pub(crate) wake_miss_zero_match: AtomicU64,
         pub(crate) wake_miss_no_fingerprint: AtomicU64,
         pub(crate) wake_miss_ambiguous: AtomicU64,
+        /// E10（波二，设计文档 design-e10-wake-attribution.md §7）：
+        /// 每日封顶（96 次硬顶）抑制的唤醒试探数。
+        pub(crate) probe_cap_daily_hits: AtomicU64,
+        /// E10：退避窗口未到期抑制的唤醒试探数。
+        pub(crate) probe_backoff_skips: AtomicU64,
+        /// E10：无条件保底读数尝试数（C-1 裁 A 侧；含 0xFF 穿透）。
+        pub(crate) guaranteed_read_attempts: AtomicU64,
+        /// E10：第一级精确指纹归因成功数。
+        pub(crate) wake_success_hit_exact: AtomicU64,
+        /// E10：第二级放宽 / 绑定表消歧归因成功数。
+        pub(crate) wake_success_hit_relaxed: AtomicU64,
+        /// E10：运行起点（ISO 8601 UTC）——frame_tx 速率（D-3 补强
+        /// 派生指标）的时间分母。
+        pub(crate) run_started_at_rfc3339: String,
+        /// 组2 N-03 断流定位打点：被 0xFF run 内负缓存挡下的探测数。
+        pub(crate) poll_skipped_ff_cache: AtomicU64,
+        /// 组2 N-03：被死槽冷却跳过的扫槽数。
+        pub(crate) poll_skipped_dead_slot: AtomicU64,
+        /// 组2 N-03：休眠无唤醒资格被 poll_decision 挡下的轮询数。
+        pub(crate) poll_skipped_sleep: AtomicU64,
+        /// 组3 N-04/05 打点：整轮轮序号（仅整轮，探测轮不计）。
+        pub(crate) poll_rounds_total: AtomicU64,
+        /// 组3：最近一轮整轮耗时（毫秒，轮起止墙钟差口径，D-98）。
+        pub(crate) poll_round_last_duration_ms: AtomicU64,
+        /// 组3：运行内最大整轮耗时（毫秒，同口径）。
+        pub(crate) poll_round_max_duration_ms: AtomicU64,
+        /// 组3：各槽 outcome 累计——查询成功。
+        pub(crate) slot_outcome_success: AtomicU64,
+        /// 组3：各槽 outcome 累计——超时（休眠路径）。
+        pub(crate) slot_outcome_timeout: AtomicU64,
+        /// 组3：各槽 outcome 累计——错误（DeviceGone / io / 硬失败）。
+        pub(crate) slot_outcome_error: AtomicU64,
+        /// 组3：已执行查询的档位分布——充电 15s 档。
+        pub(crate) slot_query_charging: AtomicU64,
+        /// 组3：已执行查询的档位分布——常规档。
+        pub(crate) slot_query_normal: AtomicU64,
     }
 
     impl Telemetry {
@@ -907,6 +953,29 @@ mod imp {
                 wake_miss_zero_match: AtomicU64::new(0),
                 wake_miss_no_fingerprint: AtomicU64::new(0),
                 wake_miss_ambiguous: AtomicU64::new(0),
+                probe_cap_daily_hits: AtomicU64::new(0),
+                probe_backoff_skips: AtomicU64::new(0),
+                guaranteed_read_attempts: AtomicU64::new(0),
+                wake_success_hit_exact: AtomicU64::new(0),
+                wake_success_hit_relaxed: AtomicU64::new(0),
+                poll_skipped_ff_cache: AtomicU64::new(0),
+                poll_skipped_dead_slot: AtomicU64::new(0),
+                poll_skipped_sleep: AtomicU64::new(0),
+                poll_rounds_total: AtomicU64::new(0),
+                poll_round_last_duration_ms: AtomicU64::new(0),
+                poll_round_max_duration_ms: AtomicU64::new(0),
+                slot_outcome_success: AtomicU64::new(0),
+                slot_outcome_timeout: AtomicU64::new(0),
+                slot_outcome_error: AtomicU64::new(0),
+                slot_query_charging: AtomicU64::new(0),
+                slot_query_normal: AtomicU64::new(0),
+                run_started_at_rfc3339: volttray_app::fmt_rfc3339(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    0,
+                ),
             }
         }
     }
@@ -988,6 +1057,10 @@ mod imp {
         shutdown_ack: mpsc::Sender<()>,
     ) {
         let mut channels: Vec<ChannelState> = Vec::new();
+        // E10（BvA-3）：注册期「通道→物理身份」绑定表——进程内存态、
+        // 每次枚举完成重建、禁持久化；唤醒归因放宽级多候选时按注册
+        // 实例前缀最长公共段消歧（wakechannel::channel_match_gated）。
+        let mut wake_bindings: Vec<WakeBinding> = Vec::new();
         // E22：最近一次唤醒信号时刻——窗口内经整轮重枚举捞回休眠/断开
         // 设备时补记 wake_recovery_via_reenum（遥测，见 try_slot 调用点）。
         let mut last_wake_signal_at: Option<Instant> = None;
@@ -1350,12 +1423,41 @@ mod imp {
                                         // 复扫（BF-1）；推进后 streak 逢 K 的
                                         // 整数倍放行 1 次，「每 K 轮扫 1 次」
                                         // 与自动发现 ≤5 分钟的披露才成立。
+                                        // 组2 N-03 打点：死槽冷却跳过计数。
+                                        telemetry
+                                            .poll_skipped_dead_slot
+                                            .fetch_add(1, Ordering::Relaxed);
                                         state.dead_slots.note_handshake(slot, true);
                                         continue;
                                     }
                                     scanned += 1;
+                                    // E10（C-1 裁 A 侧）：0xFF 负缓存保底
+                                    // 穿透——被结构性负缓存挡住的 0xFF 直连
+                                    // 槽每 4h 无条件放行一次电量探测（每窗
+                                    // 仅一次，计 guaranteed_read_attempts；
+                                    // 实验开关关闭即回 v0.3.25 行为）。
+                                    let ff_penetrated = slot == 0xFF
+                                        && state.ff_battery_probe_failed
+                                        && core
+                                            .lock()
+                                            .map(|c| c.config().experimental_wake_quota)
+                                            .unwrap_or(false)
+                                        && state.ff_penetration_last.is_none_or(|t| {
+                                            Instant::now().duration_since(t)
+                                                >= volttray_app::GUARANTEED_READ_INTERVAL
+                                        });
+                                    if ff_penetrated {
+                                        state.ff_penetration_last = Some(Instant::now());
+                                        telemetry
+                                            .guaranteed_read_attempts
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        bootlog::note(
+                                            "slot scan: 0xFF probe negative-cache penetrated (guaranteed, once per 4h)",
+                                        );
+                                    }
                                     let mut edge = SlotScanEdge {
-                                        ff_battery_probe_failed: state.ff_battery_probe_failed,
+                                        ff_battery_probe_failed: state.ff_battery_probe_failed
+                                            && !ff_penetrated,
                                         ..SlotScanEdge::default()
                                     };
                                     let outcome = try_slot(
@@ -1366,6 +1468,7 @@ mod imp {
                                         slot,
                                         &mut edge,
                                         &mut stats_store,
+                                        &telemetry,
                                     );
                                     // R-1/R-2：边效应回写通道状态（edge 携
                                     // 最终值——HID++1 握手成功时 try_slot
@@ -1536,6 +1639,7 @@ mod imp {
                                     slot,
                                     &mut edge,
                                     &mut stats_store,
+                                    &telemetry,
                                 );
                                 ff_battery_probe_failed = edge.ff_battery_probe_failed;
                                 dead_slots.note_handshake(slot, edge.handshake_no_response);
@@ -1572,9 +1676,25 @@ mod imp {
                                 liveness: ChannelLiveness::new(),
                                 scan_streak: SlotScanStreak::new(),
                                 ff_battery_probe_failed,
+                                ff_penetration_last: None,
                                 dead_slots,
                                 slots,
                             });
+                        }
+                        // E10（BvA-3）：枚举完成重建注册期绑定表——
+                        // 进程内存态、禁持久化；通道移除/重建随下次
+                        // 枚举收敛，期间匹配回退候选自身路径消歧。
+                        wake_bindings.clear();
+                        for ch in &channels {
+                            for p in [&ch.info.short_path, &ch.info.long_path]
+                                .into_iter()
+                                .flatten()
+                            {
+                                wake_bindings.push(WakeBinding::from_channel_path(
+                                    ch.key.clone(),
+                                    &p.to_string_lossy(),
+                                ));
+                            }
                         }
                         // T6：rebind 旧端点统一标记为别名（跳过轮询 /
                         // 不进菜单 / 不 toast；仍留在 slots 中避免重扫抖动）。
@@ -1759,11 +1879,23 @@ mod imp {
             // 零主动查询；唯一裁决点 AppCore::poll_decision，app 层单测覆盖）。
             let now = Instant::now();
             let mut alerts: Vec<(String, String)> = Vec::new();
+            // 组3 N-04/05 打点：本轮槽 outcome / 档位分布计数；整轮
+            // 耗时取轮起（now）至轮末（快照前）墙钟差（D-98 口径）。
+            let mut round_tally = volttray_app::RoundTally::default();
             {
                 let mut core = match core.lock() {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+                // 组2 N-03：停滞检测重排（experimental_stall_requeue
+                // 默认开；关闭即回「仅 None 兜底」行为）。重排台数 >0
+                // 时留 bootlog——断流定位的修复侧可观测点。
+                let requeued = core.requeue_stalled(now);
+                if requeued > 0 {
+                    bootlog::note(&format!(
+                        "poll: requeued {requeued} stalled online device(s) (N-03)"
+                    ));
+                }
                 // D-67：本轮判定为「句柄已死」的通道 key，循环外统一移除并
                 // 触发重枚举（移除期间不能就地改 channels，先收集）。
                 let mut dead_channels: Vec<String> = Vec::new();
@@ -1812,12 +1944,29 @@ mod imp {
                         // 在线设备本轮不查（每台设备自己的 next_due 决定
                         // 自己的查询节奏）；休眠设备不受本门约束，交由
                         // poll_decision 裁决唤醒资格 / 冷却。
-                        if !probe_only && !sleeping && !core.is_due(&s.id, now) {
+                        // E10（C-1 裁 A 侧）：无条件保底读数——判睡
+                        // 不戳（sleeping 由上方独立分支处理）、不被封顶
+                        // 拦截、不计入额度；到期即穿透 is_due 门（仅整轮
+                        // 生效：探测轮在线设备跳过规则不变，G-36 红线）。
+                        let guaranteed_due =
+                            !probe_only && !sleeping && core.guaranteed_read_due(&s.id, now);
+                        if !probe_only && !sleeping && !guaranteed_due && !core.is_due(&s.id, now) {
                             i += 1;
                             continue;
                         }
+                        if guaranteed_due {
+                            core.begin_guaranteed_read(&s.id, now);
+                            telemetry
+                                .guaranteed_read_attempts
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         // 休眠且无唤醒资格：本轮绝不向该设备发任何 HID++ 查询。
+                        // 组2 N-03 打点：休眠挡下计数（仅 sleeping 分支——
+                        // 非休眠条目的 Skip 仅虚拟条目，真实槽位不会命中）。
                         if core.poll_decision(&s.id, now) == PollDecision::Skip {
+                            if sleeping {
+                                telemetry.poll_skipped_sleep.fetch_add(1, Ordering::Relaxed);
+                            }
                             i += 1;
                             continue;
                         }
@@ -1828,8 +1977,30 @@ mod imp {
                         let armed_gray =
                             probe_only && !sleeping && core.wake_armed_gray(&s.id, now);
                         // 唤醒探测开始：消耗唤醒资格并进入冷却（D-33）。
+                        // E10（C-5 裁 B 侧：单一额度函数）：退避窗口 /
+                        // 每日封顶抑制本次试探（资格不消耗，下个唤醒
+                        // 信号再试；抑制分别计 probe_backoff_skips /
+                        // probe_cap_daily_hits）。保底读数不走本门。
                         if sleeping || armed_gray {
-                            core.begin_wake_probe(&s.id, now);
+                            match core.probe_quota_gate(&s.id, now) {
+                                volttray_app::ProbeGate::Allow => {
+                                    core.begin_wake_probe(&s.id, now);
+                                }
+                                volttray_app::ProbeGate::BackoffSkip => {
+                                    telemetry
+                                        .probe_backoff_skips
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    i += 1;
+                                    continue;
+                                }
+                                volttray_app::ProbeGate::CapSkip => {
+                                    telemetry
+                                        .probe_cap_daily_hits
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    i += 1;
+                                    continue;
+                                }
+                            }
                         }
                         let mut t = Transport::new(
                             ch_state.shared.clone(),
@@ -1849,6 +2020,8 @@ mod imp {
                             Ok(r) => {
                                 s.hard_failures = 0;
                                 outcomes.push(SlotOutcome::Success);
+                                // 组3 N-04/05 打点：成功 + 档位分布。
+                                round_tally.note_success(r.charging);
                                 // R-3/R-11（v0.3.17）：唤醒探测（休眠或装填
                                 // 灰显）成功计数，供诊断导出 summary。
                                 if sleeping || armed_gray {
@@ -1913,6 +2086,8 @@ mod imp {
                                         UnknownReason::NoDeviceAtSlot => SlotOutcome::Responded,
                                         _ => SlotOutcome::Timeout,
                                     });
+                                    // 组3 N-04/05 打点：超时（休眠路径）。
+                                    round_tally.note_timeout();
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason={} (sleep path)",
                                         s.id,
@@ -1956,6 +2131,8 @@ mod imp {
                                 // 接收器回了字节 = 通道句柄活着（Responded）。
                                 UnknownReason::DeviceGone => {
                                     outcomes.push(SlotOutcome::Responded);
+                                    // 组3 N-04/05 打点：设备消失计错误桶。
+                                    round_tally.note_error();
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason=device_gone (deregistered immediately)",
                                         s.id
@@ -1978,6 +2155,8 @@ mod imp {
                                         // 设备回了字节但给不出电量 = 句柄活着。
                                         outcomes.push(SlotOutcome::Responded);
                                     }
+                                    // 组3 N-04/05 打点：其余失败计错误桶。
+                                    round_tally.note_error();
                                     s.hard_failures += 1;
                                     bootlog::note(&format!(
                                         "battery query failed id={} reason={} (hard failure {}/{})",
@@ -2094,6 +2273,34 @@ mod imp {
                         format!("设备 {id} 的电量读数已过期，已灰显最后一次已知电量"),
                     ));
                 }
+                // 组3 N-04/05：整轮观测落账——槽 outcome / 档位分布
+                // 全轮次累计；轮序号与整轮耗时仅整轮（探测轮不计，
+                // D-98 口径：轮起「轮询一轮」至轮末快照前墙钟差）。
+                let round_ms = volttray_app::RoundTally::round_duration_ms(now, Instant::now());
+                telemetry
+                    .slot_outcome_success
+                    .fetch_add(round_tally.success as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_outcome_timeout
+                    .fetch_add(round_tally.timeout as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_outcome_error
+                    .fetch_add(round_tally.error as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_query_charging
+                    .fetch_add(round_tally.charging as u64, Ordering::Relaxed);
+                telemetry
+                    .slot_query_normal
+                    .fetch_add(round_tally.normal as u64, Ordering::Relaxed);
+                if !probe_only {
+                    telemetry.poll_rounds_total.fetch_add(1, Ordering::Relaxed);
+                    telemetry
+                        .poll_round_last_duration_ms
+                        .store(round_ms, Ordering::Relaxed);
+                    telemetry
+                        .poll_round_max_duration_ms
+                        .fetch_max(round_ms, Ordering::Relaxed);
+                }
                 let snap = core.snapshot(now);
                 gui.send(GuiMsg::Snapshot(Box::new(snap)));
             }
@@ -2192,7 +2399,14 @@ mod imp {
             let (poll, device_due) = match core.lock() {
                 Ok(c) => (
                     Duration::from_secs(c.config().poll_interval_secs),
-                    c.next_poll_due(),
+                    // E10：保底到期点并入设备侧睡眠预算（取两者较早者，
+                    // 保证 4h 保底不被长睡眠跳过；不新增轮询频率）。
+                    match (c.next_poll_due(), c.next_guaranteed_due()) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    },
                 ),
                 Err(_) => (Duration::from_secs(60), None),
             };
@@ -2368,8 +2582,28 @@ mod imp {
                                             ));
                                         }
                                     }
-                                    match channel_for_raw_path_classified(rp, &candidates) {
-                                        ChannelMatch::Hit(ci) => {
+                                    // E10（N-01/N-02）：两级归因——单函数
+                                    // 门控 channel_match_gated（精确级
+                                    // 优先；放宽级 + 注册期绑定表消歧；
+                                    // 歧义即 miss 走 arm-all）。
+                                    match channel_match_gated(rp, &candidates, &wake_bindings) {
+                                        m @ (TwoLevelMatch::HitExact(_)
+                                        | TwoLevelMatch::HitRelaxed(_)) => {
+                                            let (ci, tag) = match m {
+                                                TwoLevelMatch::HitExact(i) => {
+                                                    telemetry
+                                                        .wake_success_hit_exact
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    (i, "hit-exact")
+                                                }
+                                                TwoLevelMatch::HitRelaxed(i) => {
+                                                    telemetry
+                                                        .wake_success_hit_relaxed
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    (i, "hit-relaxed")
+                                                }
+                                                _ => unreachable!(),
+                                            };
                                             let key = candidates[ci].0.clone();
                                             let on_chan: HashSet<&str> = channels
                                                 .iter()
@@ -2383,9 +2617,9 @@ mod imp {
                                                 &online_gray,
                                                 Some(&on_chan),
                                             );
-                                            (ids, "hit", false)
+                                            (ids, tag, false)
                                         }
-                                        ChannelMatch::Ambiguous => {
+                                        TwoLevelMatch::Ambiguous => {
                                             channel_map_miss.fetch_add(1, Ordering::Relaxed);
                                             // R-4/R-11（v0.3.17）：miss 子
                                             // 分类计数 + 采样日志（每分
@@ -2403,7 +2637,7 @@ mod imp {
                                                 wake_arm_set(&sleeping, &online_gray, None);
                                             (ids, "miss-ambiguous", exempt)
                                         }
-                                        ChannelMatch::ZeroMatch => {
+                                        TwoLevelMatch::ZeroMatch => {
                                             channel_map_miss.fetch_add(1, Ordering::Relaxed);
                                             // E11：零候选匹配（系统性失配：
                                             // BT / 有线 / 他机接收器）与指
@@ -2421,7 +2655,7 @@ mod imp {
                                                 wake_arm_set(&sleeping, &online_gray, None);
                                             (ids, "miss-zero-match", exempt)
                                         }
-                                        ChannelMatch::NoFingerprint => {
+                                        TwoLevelMatch::NoFingerprint => {
                                             channel_map_miss.fetch_add(1, Ordering::Relaxed);
                                             // E11：指纹不可解析（缺失/畸形）
                                             // 独立计数。
@@ -2460,7 +2694,7 @@ mod imp {
                                     "wake arm-all exemption: exactly 1 online-gray device armed",
                                 );
                             }
-                            if attribution != "hit" {
+                            if !attribution.starts_with("hit") {
                                 // R-11：arm-all 装填数（诊断导出）。
                                 telemetry
                                     .wake_arm_all_fills
@@ -3491,7 +3725,17 @@ mod imp {
                 export_diag(observer, enum_snap, channel_map_miss, telemetry);
             } else if e.id == ids.stats_export {
                 // WP-B：导出耗电统计（选项对话框 → Save-As → IO 线程执行）。
-                crate::statsexport::begin_export(cmd_tx);
+                // 组5 5b：脱敏回滚/时区/知情提示闸门从配置读取注入
+                //（读锁失败按默认闸门：脱敏开、UTC 关、提示开）。
+                let gates = cfg_arc
+                    .read()
+                    .map(|c| crate::statsexport::ExportGates {
+                        redact_display_name: c.experimental_export_redact_display_name,
+                        tz_utc: c.experimental_export_tz_utc,
+                        privacy_notice: c.experimental_export_privacy_notice,
+                    })
+                    .unwrap_or_default();
+                crate::statsexport::begin_export(cmd_tx, gates);
             } else if e.id == ids.check_update {
                 // T-07（实施令零网络形态）：手动「检查更新」＝ShellExecuteW
                 // 交系统默认浏览器打开 /releases/latest——无 HTTP 客户端、
@@ -3939,6 +4183,7 @@ mod menu_sig_tests {
             physical_key: None,
             is_virtual: false,
             last_seen: None,
+            reading_age_secs: None,
         }
     }
 

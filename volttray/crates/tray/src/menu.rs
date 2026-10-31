@@ -66,7 +66,25 @@ fn device_row_text(dev: &DeviceSnapshot) -> String {
             None => "电量未知".to_string(),
         }
     };
-    format!("{} — {}{}", dev.name, status, direct_annotation(dev))
+    // G-28：读数年龄后缀（「（X 分钟前）」）。None（无成功读数）不追加；
+    // 虚拟条目走上方 last_seen「更新于 HH:MM」分支、不到这里。
+    let age = dev
+        .reading_age_secs
+        .map(|s| format!("（{}）", fmt_reading_age(s)))
+        .unwrap_or_default();
+    format!("{} — {}{}{}", dev.name, status, age, direct_annotation(dev))
+}
+
+/// G-28：读数年龄人性化（纯函数、三态钉板模式同 menu_refresh_label）：
+/// <60s「刚刚」；<1h「X 分钟前」；否则「X 小时前」（floor）。
+fn fmt_reading_age(secs: u64) -> String {
+    if secs < 60 {
+        "刚刚".to_string()
+    } else if secs < 3600 {
+        format!("{} 分钟前", secs / 60)
+    } else {
+        format!("{} 小时前", secs / 3600)
+    }
 }
 
 /// T-04（C-F1 宽标注）：直连（蓝牙/有线）通道读不到读数（`direct &&
@@ -254,6 +272,7 @@ mod tests {
             physical_key: Some("k".to_string()),
             is_virtual,
             last_seen: None,
+            reading_age_secs: None,
         }
     }
 
@@ -283,6 +302,48 @@ mod tests {
         let text = device_row_text(&dev);
         assert!(!text.contains("未验证"), "已验证通道不标注：{text}");
         assert!(text.contains("55%"), "正常电量照常显示：{text}");
+    }
+
+    /// G-28：读数年龄纯函数钉板（三态：刚刚 / X 分钟前 / X 小时前）。
+    #[test]
+    fn g28_fmt_reading_age_pin() {
+        assert_eq!(fmt_reading_age(0), "刚刚");
+        assert_eq!(fmt_reading_age(59), "刚刚");
+        assert_eq!(fmt_reading_age(60), "1 分钟前");
+        assert_eq!(fmt_reading_age(599), "9 分钟前");
+        assert_eq!(fmt_reading_age(3599), "59 分钟前");
+        assert_eq!(fmt_reading_age(3600), "1 小时前");
+        assert_eq!(fmt_reading_age(225_000), "62 小时前");
+    }
+
+    /// G-28：有年龄的读数行追加「（X 分钟前）」；None 不追加。
+    #[test]
+    fn g28_device_row_appends_reading_age() {
+        let mut dev = snap(
+            "u2",
+            "MX Master 3S",
+            "unifying",
+            Some(55),
+            "active",
+            false,
+            false,
+        );
+        dev.reading_age_secs = Some(300);
+        let text = device_row_text(&dev);
+        assert!(text.contains("（5 分钟前）"), "含年龄后缀：{text}");
+        let dev2 = snap(
+            "u3",
+            "MX Master 3S",
+            "unifying",
+            Some(55),
+            "active",
+            false,
+            false,
+        );
+        assert!(
+            !device_row_text(&dev2).contains("分钟前"),
+            "reading_age_secs=None 不追加后缀"
+        );
     }
 
     /// 断言三：direct + sleeping 含「休眠中」（文案分流，不引导导出）。

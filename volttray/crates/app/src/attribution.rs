@@ -27,9 +27,13 @@
 //!   不早于前段终点）」的同型段——倒置段不参与合并、独立保留，
 //!   coalesce 绝不产出 end_ts < start_ts 的段。
 //! - 匿名化（R5-I-04）：按 physical_key 哈希值（FNV-1a 64，16 字符
-//!   hex）字典序排序后依次编号（D1=最小），不依赖首现顺序；仅
-//!   device_key 列脱敏，display_name 保留真实值；开关覆盖 CSV / JSON
-//!   导出 / HTML 报告三路与 volttray-data 数据块（R5-I-07）。
+//!   hex）字典序排序后依次编号（D1=最小），不依赖首现顺序；开关覆盖
+//!   CSV / JSON 导出 / HTML 报告三路与 volttray-data 数据块（R5-I-07）。
+//!   组5 5b（N-12②/U-2C，C-3）：anonymize=on 且脱敏闸门开时
+//!   display_name 同步按会话内映射替换为「设备N」（R3，与诊断面
+//!   redact::device_session_map 同函数同序号；会话内稳定、不承诺跨
+//!   导出稳定，编号不承担匿名化职责）；闸门关闭（回退）时保留真实
+//!   型号并由 GUI 层强制提示「脱敏修复已回退」。
 //!
 //! 红线：纯主机侧记账回放，不新增任何设备查询。
 
@@ -1224,15 +1228,62 @@ fn display_key(key: &str, anon: Option<&HashMap<String, String>>) -> String {
         .unwrap_or_else(|| key.to_string())
 }
 
+/// 组5 5b（C-3）：导出会话内 display_name 的收集顺序——Read 事件
+/// 首现顺序去重、空名跳过（与 redact 空名跳过同口径）。返回值喂给
+/// `redact::device_session_map` 构造「设备N」映射，统计面与诊断面
+/// 共用同一映射函数（同设备同名）。
+pub fn display_name_session_order(events: &[StatsEvent]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for ev in events {
+        if let StatsEvent::Read(e) = ev {
+            if !e.display_name.is_empty() && !seen.contains(&e.display_name) {
+                seen.push(e.display_name.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// anonymize=on 时 display_name → 「设备N」（names 由
+/// `redact::device_session_map` 从 `display_name_session_order` 构造）；
+/// None（anonymize=off 或闸门回退）原样保留真实型号（U-2C）。
+fn map_display_name(name: &str, names: Option<&HashMap<String, String>>) -> String {
+    names
+        .and_then(|m| m.get(name).cloned())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// 组4 N-08②：导出事件流闸门单点谓词（tray 导出编排 retain 与
+/// 本 crate golden 测试共用，防两处口径漂移）。ActivityBuckets
+/// （逐分钟活动位图，含作息信息）须 `include_activity` 与
+/// `export_activity_bitmap` 同时开才放行——前者是融合稿 Phase 1
+/// 既有「含活动统计」门控（默认开，可能门控位图以外字段，不动）；
+/// 后者是本组新增独立开关（默认关，与 anonymize 解耦，作息泄露
+/// 与是否匿名无关，BvA-8 与 manifest schema_version 同批合入）。
+/// 其余事件类型恒放行。
+pub fn export_event_allowed(
+    ev: &StatsEvent,
+    include_activity: bool,
+    export_activity_bitmap: bool,
+) -> bool {
+    !matches!(ev, StatsEvent::ActivityBuckets { .. })
+        || (include_activity && export_activity_bitmap)
+}
+
 /// 单行 CSV（unknown 段 rate 留空）。
-fn csv_row(seg: &Segment, key: &str, offset_minutes: i32) -> String {
+fn csv_row(
+    seg: &Segment,
+    key: &str,
+    names: Option<&HashMap<String, String>>,
+    offset_minutes: i32,
+) -> String {
     let rate = seg
         .rate_pct_per_hour()
         .map(|r| format!("{r:.2}"))
         .unwrap_or_default();
     [
         csv_field(key),
-        csv_field(&seg.display_name),
+        csv_field(&map_display_name(&seg.display_name, names)),
         seg.seg_type.as_str().to_string(),
         fmt_rfc3339(seg.start_ts, offset_minutes),
         fmt_rfc3339(seg.end_ts, offset_minutes),
@@ -1246,12 +1297,18 @@ fn csv_row(seg: &Segment, key: &str, offset_minutes: i32) -> String {
     .join(",")
 }
 
-/// 渲染 CSV：BOM + 表头 + 每段一行（行序 = 展示键字典序 + start_ts；
-/// 匿名化后 D1/D2… 顺序即哈希字典序）。
+/// 渲染 CSV：BOM + manifest `#` 注释块（组5 自描述导出落点之一，
+/// recheck.py 跳过 `#` 行后再字节对账）+ 表头 + 每段一行（行序 =
+/// 展示键字典序 + start_ts；匿名化后 D1/D2… 顺序即哈希字典序）。
+/// `generated_at` 为导出时刻 epoch 秒（进 manifest 注释块）。
+/// `names`（组5 5b）：anonymize=on 时的 display_name 会话映射
+/// （「设备N」，R3）；None 保留真实型号。
 pub fn render_csv(
     segments: &[Segment],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
     offset_minutes: i32,
+    generated_at: i64,
 ) -> String {
     let mut rows: Vec<(String, &Segment)> = segments
         .iter()
@@ -1259,10 +1316,11 @@ pub fn render_csv(
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.start_ts.cmp(&b.1.start_ts)));
     let mut out = String::from("\u{feff}");
+    out.push_str(&crate::export_manifest::manifest_csv_comments(generated_at));
     out.push_str(CSV_HEADER);
     out.push('\n');
     for (key, seg) in rows {
-        out.push_str(&csv_row(seg, &key, offset_minutes));
+        out.push_str(&csv_row(seg, &key, names, offset_minutes));
         out.push('\n');
     }
     out
@@ -1282,23 +1340,34 @@ pub fn stats_export_filename_local(p: crate::diag_export::LocalTimeParts) -> Str
 // JSON 导出（原始事件序列；匿名化开关覆盖 physical_key 字段，R5-I-07）
 // ---------------------------------------------------------------------------
 
-/// 渲染 JSON 导出：`{version, exported_at, events:[...]}`——events 为
+/// 渲染 JSON 导出：`{version, exported_at, manifest, events:[...]}`——events 为
 /// current+archive 原始事件序列（与 jsonl 行同构）；空态输出空结构
 ///（events: []，R5-P-03）。匿名化开启时 physical_key 字段（读取事件、
-/// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏，
-/// display_name 保留真实值。
+/// sleep_enter、boundary.devices[]）按同一 D1/D2 映射脱敏；
+/// display_name 按 `names` 会话映射替换为「设备N」（组5 5b R3，
+/// 与诊断面同函数同序号），names=None 时保留真实型号（U-2C）。
+/// `activity_bitmap=false`（组4 N-08② 默认）时 ActivityBuckets
+/// 分钟位图事件不进 JSON；`true` 时原样并入。
 pub fn render_json_events(
     events: &[StatsEvent],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
+    activity_bitmap: bool,
     exported_at: i64,
 ) -> String {
     let mut arr = Vec::with_capacity(events.len());
     for ev in events {
+        // 组4 N-08②：位图开关关 → JSON 事件序列剔除逐分钟活动位图
+        //（与 export_event_allowed 同谓词语义；渲染层独立收口，
+        // 不依赖上游 retain）。
+        if matches!(ev, StatsEvent::ActivityBuckets { .. }) && !activity_bitmap {
+            continue;
+        }
         let v = match ev {
             StatsEvent::Read(e) => serde_json::json!({
                 "ts": e.ts,
                 "physical_key": display_key(&e.physical_key, anon),
-                "display_name": e.display_name,
+                "display_name": map_display_name(&e.display_name, names),
                 "percent": e.percent,
                 "charging": e.charging,
                 "source": e.source,
@@ -1339,6 +1408,7 @@ pub fn render_json_events(
     serde_json::json!({
         "version": 1,
         "exported_at": exported_at,
+        "manifest": crate::export_manifest::manifest_json(exported_at),
         "events": arr,
     })
     .to_string()
@@ -1351,23 +1421,30 @@ pub fn render_json_events(
 /// volttray-data 机器可读数据块（AC-B8 复算对账唯一取数源）：分段明细
 ///（与 CSV 同数据同列）+ 图表①③底层数据 + 分日视图日卡 + 首屏 KPI +
 /// 日均耗电双口径对账 + 周环比 + 灰态缺口卡。匿名化开启时仅含匿名化
-/// 后键，不含 physical_key 明文（R5-I-04 并入）。
+/// 后键，不含 physical_key 明文（R5-I-04 并入）。顶层另含 manifest
+/// 自描述块（组5 N-12②：字段字典＋生效脱敏规则 id 集＋schema 版本，
+/// BvA-6 不含采集时区偏移值）。
 pub fn build_report_data(
     events: &[StatsEvent],
     segments: &[Segment],
     anon: Option<&HashMap<String, String>>,
+    names: Option<&HashMap<String, String>>,
     offset_minutes: i32,
     generated_ts: i64,
 ) -> serde_json::Value {
     let anonymized = anon.is_some();
     // 设备清单（展示键 + 显示名；序 = 展示键字典序）；raw_of 为展示键
     // 到原始键的反映射——内部聚合（日卡 / 对账 / 粘滞）在原始键上做，
-    // 透出前统一换展示键。
+    // 透出前统一换展示键。组5 5b：display_name 按 names 会话映射
+    // （「设备N」，R3）；None 保留真实型号（U-2C）。
     let mut name_of: BTreeMap<String, String> = BTreeMap::new();
     let mut raw_of: HashMap<String, String> = HashMap::new();
     for ev in events {
         if let StatsEvent::Read(e) = ev {
-            name_of.insert(display_key(&e.physical_key, anon), e.display_name.clone());
+            name_of.insert(
+                display_key(&e.physical_key, anon),
+                map_display_name(&e.display_name, names),
+            );
             raw_of.insert(display_key(&e.physical_key, anon), e.physical_key.clone());
         }
     }
@@ -1391,7 +1468,7 @@ pub fn build_report_data(
         .map(|s| {
             serde_json::json!({
                 "device_key": s.device_key,
-                "display_name": s.display_name,
+                "display_name": map_display_name(&s.display_name, names),
                 "segment_type": s.seg_type.as_str(),
                 "start_ts": s.start_ts,
                 "end_ts": s.end_ts,
@@ -1542,6 +1619,7 @@ pub fn build_report_data(
             "device_count": devices.len(),
             "segment_count": segs.len(),
         },
+        "manifest": crate::export_manifest::manifest_json(generated_ts),
         "devices": devices,
         "segments": seg_rows,
         "chart1": chart1_json,
@@ -1702,6 +1780,9 @@ function el(tag,attrs,parent){var e=document.createElementNS("http://www.w3.org/
 function offSecs(){var m=D.meta.tz_offset;var sign=m[0]==="-"?-1:1;var p=m.slice(1).split(":");return ((+p[0])*60+(+p[1]))*sign*60;}
 function fmtTs(ts){var d=new Date((ts+offSecs())*1000);function z(n){return (n<10?"0":"")+n;}return d.getUTCFullYear()+"-"+z(d.getUTCMonth()+1)+"-"+z(d.getUTCDate())+" "+z(d.getUTCHours())+":"+z(d.getUTCMinutes());}
 function fmtDur(sec){sec=Math.max(0,Math.round(sec));var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return h>0?h+" 小时 "+m+" 分":m+" 分";}
+// G-28：读数年龄（展示层，基准=meta.generated_at 导出时刻；超 2h 醒目）。
+function ageText(ts){var s=Math.max(0,(D.meta.generated_at||0)-ts);var m=Math.floor(s/60);if(m<1)return "刚刚";if(m<60)return m+" 分钟前";return Math.floor(m/60)+" 小时前";}
+function ageStale(ts){return ts&&(D.meta.generated_at-ts)>7200;}
 function emptyMark(id){var n=document.getElementById(id);if(n)n.outerHTML='<div class="empty">暂无数据</div>';}
 function badge(t,cls){return '<span class="badge '+cls+'">'+esc(t)+'</span>';}
 var segs=D.segments||[];
@@ -1717,8 +1798,8 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
     var k=dv[0],name=dv[1];var kpi=(D.first_screen_kpis||{})[k]||{};
     html+='<div class="card"><div class="k">当前电量 · '+esc(name)+'</div><div class="v">'
       +(kpi.current_pct==null?"—":kpi.current_pct+"%")+'</div><div class="s">'
-      +(kpi.current_ts?fmtTs(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")+'</div>'
-      +badge("实测","b-measure")+'</div>';
+      +(kpi.current_ts?fmtTs(kpi.current_ts)+" · 更新于 "+ageText(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")+'</div>'
+      +badge("实测","b-measure")+(ageStale(kpi.current_ts)?badge("读数超 2h 未刷新","b-warn"):"")+'</div>';
     if(kpi.today_sparse||kpi.today_drain_pct==null){
       html+='<div class="card dim"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">数据不足</div>'
         +'<div class="s">read&lt;3 或覆盖&lt;2h 时不给斜率、只给首末差</div>'
@@ -1959,7 +2040,9 @@ document.getElementById("mday").textContent=D.meta.days_covered;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stats::{BoundaryDevice, ReadEvent, SOURCE_POLL, SOURCE_WAKE_FIRST_READ};
+    use crate::stats::{
+        ActivityDay, BoundaryDevice, ReadEvent, SOURCE_POLL, SOURCE_WAKE_FIRST_READ,
+    };
 
     pub(super) const CST: i32 = 480; // +08:00
 
@@ -2342,11 +2425,17 @@ mod tests {
                 &[NOTE_EVIDENCE_MISSING],
             ),
         ];
-        let csv = render_csv(&segs, None, CST);
+        let csv = render_csv(&segs, None, None, CST, 1_760_000_000);
         let mut lines = csv.lines();
         let first = lines.next().unwrap();
         assert!(first.starts_with('\u{feff}'), "BOM 缺失");
-        assert_eq!(&first[3..], CSV_HEADER);
+        assert!(
+            first[3..].starts_with("# manifest.schema_version="),
+            "BOM 后应为 manifest 注释块: {first}"
+        );
+        // 跳过 `#` 注释续行后应为表头。
+        let header = lines.find(|l| !l.starts_with("# ")).unwrap();
+        assert_eq!(header, CSV_HEADER);
         assert_eq!(
             lines.next().unwrap(),
             "kbd-1,\"My \"\"K380\"\", Keys\",active,1970-01-01T08:33:20+08:00,1970-01-01T10:33:20+08:00,120,90,88,-2,-1.00,"
@@ -2361,8 +2450,14 @@ mod tests {
     #[test]
     fn csv_empty_state_is_header_only_and_rows_sorted_by_display_key() {
         // 空态：BOM + 表头。
-        let csv = render_csv(&[], None, CST);
-        assert_eq!(csv, format!("\u{feff}{CSV_HEADER}\n"));
+        let csv = render_csv(&[], None, None, CST, 1_760_000_000);
+        assert_eq!(
+            csv,
+            format!(
+                "\u{feff}{}{CSV_HEADER}\n",
+                crate::export_manifest::manifest_csv_comments(1_760_000_000)
+            )
+        );
         // 行序 = 展示键字典序（匿名化后按 D 编号，哈希序 dev-1(D1) 先于 dev-0(D2)）。
         let segs = vec![
             seg("dev-0", SegmentType::Active, 0, 3600, 100, 99, &[]),
@@ -2370,8 +2465,12 @@ mod tests {
         ];
         let keys: BTreeSet<String> = ["dev-0", "dev-1"].iter().map(|s| s.to_string()).collect();
         let anon = anonymize_map(&keys);
-        let csv = render_csv(&segs, Some(&anon), CST);
-        let rows: Vec<&str> = csv.lines().skip(1).collect();
+        let csv = render_csv(&segs, Some(&anon), None, CST, 1_760_000_000);
+        let rows: Vec<&str> = csv
+            .lines()
+            .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
+            .skip(1)
+            .collect();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].starts_with("D1,"), "row0: {}", rows[0]);
         assert!(rows[1].starts_with("D2,"), "row1: {}", rows[1]);
@@ -2385,7 +2484,9 @@ mod tests {
     // -- JSON 导出（I-07）-----------------------------------------------------
 
     #[test]
-    fn json_export_anonymizes_physical_key_and_preserves_names() {
+    fn json_export_anonymizes_physical_key_and_maps_display_names() {
+        // 组5 5b 语义翻转：anonymize=on 且 names 会话映射在场时，
+        // display_name 替换为「设备N」（R3）；原「保留真实值」口径作废。
         let events = vec![
             ev_poll(1000, "kbd-1", 90),
             StatsEvent::SleepEnter {
@@ -2410,8 +2511,15 @@ mod tests {
             StatsEvent::RunStop { ts: 4000 },
         ];
         let anon = anonymize_map(&event_keys(&events));
-        let v: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, Some(&anon), 9999)).unwrap();
+        let names = crate::redact::device_session_map(&display_name_session_order(&events));
+        let v: serde_json::Value = serde_json::from_str(&render_json_events(
+            &events,
+            Some(&anon),
+            Some(&names),
+            true,
+            9999,
+        ))
+        .unwrap();
         assert_eq!(v["version"], 1);
         assert_eq!(v["exported_at"], 9999);
         let arr = v["events"].as_array().unwrap();
@@ -2420,8 +2528,8 @@ mod tests {
         let m = anon["mouse-2"].clone();
         assert_eq!(arr[0]["physical_key"], k);
         assert_eq!(
-            arr[0]["display_name"], "Name-kbd-1",
-            "display_name 保留真实值"
+            arr[0]["display_name"], "设备1",
+            "display_name 按会话首现顺序映射为 设备N（R3）"
         );
         assert_eq!(arr[0]["source"], SOURCE_POLL);
         assert_eq!(arr[1]["physical_key"], k);
@@ -2429,8 +2537,8 @@ mod tests {
         assert_eq!(arr[2]["devices"][0]["physical_key"], k);
         assert_eq!(arr[2]["devices"][1]["physical_key"], m);
         assert_eq!(arr[3]["event"], "run_stop");
-        let s = render_json_events(&events, Some(&anon), 1);
-        // physical_key 字段值不得为原键（display_name 保留真实值属预期）。
+        let s = render_json_events(&events, Some(&anon), Some(&names), true, 1);
+        // physical_key 与 display_name 字段值均不得为原值。
         assert!(
             !s.contains("\"physical_key\":\"kbd-1\""),
             "read 事件键未脱敏"
@@ -2439,14 +2547,251 @@ mod tests {
             !s.contains("\"physical_key\":\"mouse-2\""),
             "boundary 设备键未脱敏"
         );
+        assert!(
+            !s.contains("Name-kbd-1"),
+            "display_name 未脱敏（泄露扫描：真实型号命中即红）"
+        );
         // 空态：events: []。
         let empty: serde_json::Value =
-            serde_json::from_str(&render_json_events(&[], None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&[], None, None, true, 1)).unwrap();
         assert_eq!(empty["events"].as_array().unwrap().len(), 0);
-        // 未开匿名化：原键保留。
+        // 未开匿名化：原键与真实型号保留（U-2C）。
         let plain: serde_json::Value =
-            serde_json::from_str(&render_json_events(&events, None, 1)).unwrap();
+            serde_json::from_str(&render_json_events(&events, None, None, true, 1)).unwrap();
         assert_eq!(plain["events"][0]["physical_key"], "kbd-1");
+        assert_eq!(plain["events"][0]["display_name"], "Name-kbd-1");
+    }
+
+    /// 组5 5b（C-3）三件套断言：anonymize=on 时 CSV / JSON /
+    /// volttray-data 同会话内同一设备同名（「设备N」），且全文无真实
+    /// 型号残留（泄露扫描）。
+    #[test]
+    fn anonymized_outputs_share_session_device_names() {
+        let events = vec![
+            ev_poll(1000, "kbd-1", 90),
+            ev_poll(1100, "mouse-2", 80),
+            ev_poll(1200, "kbd-1", 89),
+        ];
+        // 会话收集顺序：Name-kbd-1 首现 → 设备1；Name-mouse-2 → 设备2。
+        let order = display_name_session_order(&events);
+        assert_eq!(
+            order,
+            vec!["Name-kbd-1".to_string(), "Name-mouse-2".to_string()]
+        );
+        let names = crate::redact::device_session_map(&order);
+        assert_eq!(names["Name-kbd-1"], "设备1");
+        assert_eq!(names["Name-mouse-2"], "设备2");
+        let segs = vec![
+            seg("kbd-1", SegmentType::Active, 1000, 2000, 90, 88, &[]),
+            seg("mouse-2", SegmentType::Active, 1100, 2000, 80, 78, &[]),
+        ];
+        let anon = anonymize_map(&event_keys(&events));
+        // CSV：型号列全为 设备N，无真实型号。
+        let csv = render_csv(&segs, Some(&anon), Some(&names), CST, 1_760_000_000);
+        assert!(csv.contains("设备1"), "CSV 缺 设备1: {csv}");
+        assert!(csv.contains("设备2"), "CSV 缺 设备2: {csv}");
+        assert!(!csv.contains("Name-kbd-1") && !csv.contains("Name-mouse-2"));
+        // JSON：同上。
+        let json = render_json_events(&events, Some(&anon), Some(&names), true, 1);
+        assert!(json.contains("设备1") && json.contains("设备2"));
+        assert!(!json.contains("Name-kbd-1") && !json.contains("Name-mouse-2"));
+        // HTML 数据块：devices 清单与分段明细同为 设备N。
+        let report = build_report_data(&events, &segs, Some(&anon), Some(&names), CST, 9000);
+        let text = report.to_string();
+        assert!(text.contains("设备1") && text.contains("设备2"));
+        assert!(
+            !text.contains("Name-kbd-1") && !text.contains("Name-mouse-2"),
+            "volttray-data 残留真实型号"
+        );
+        // 与诊断面同函数同序号：device_session_map 编号与 redact_text
+        // 互证见 redact.rs device_session_map_numbers_by_collection_order。
+    }
+
+    // -- 组4 N-08② 位图独立开关（export_activity_bitmap 默认关）--------------
+
+    /// golden 四组合（anonymize × 位图开关）：JSON / CSV / HTML 三件套
+    /// 字段集合精确匹配（B 要素）。位图关（默认）→ JSON 无
+    /// activity_buckets 事件、HTML meta.activity_days=0 且缺口卡在场；
+    /// 位图开 → JSON 原样并入、HTML 位图天数透出。CSV 列集合两种
+    /// 开关下逐字节一致（位图不进分段归因）。
+    #[test]
+    fn activity_bitmap_switch_golden_four_combos() {
+        let mkday = |d: u8| ActivityDay {
+            date: format!("2026-10-{d:02}"),
+            bitmap_hex: "0".repeat(crate::stats::ACTIVITY_BITMAP_HEX_LEN),
+        };
+        let days7: Vec<ActivityDay> = (18..=24).map(mkday).collect();
+        let base_events = || {
+            vec![
+                ev_poll(1000, "kbd-1", 90),
+                ev_poll(8200, "kbd-1", 88),
+                StatsEvent::ActivityBuckets {
+                    ts: 8300,
+                    physical_key: "kbd-1".into(),
+                    days: days7.clone(),
+                },
+            ]
+        };
+        for anon_on in [false, true] {
+            for bitmap_on in [false, true] {
+                let events = base_events();
+                // 流闸门（export.rs retain 同谓词）：include_activity=开。
+                let filtered: Vec<StatsEvent> = events
+                    .iter()
+                    .filter(|e| export_event_allowed(e, true, bitmap_on))
+                    .cloned()
+                    .collect();
+                assert_eq!(filtered.len(), if bitmap_on { 3 } else { 2 });
+                let segs = build_segments(&filtered);
+                let anon = if anon_on {
+                    Some(anonymize_map(&event_keys(&filtered)))
+                } else {
+                    None
+                };
+                let names = anon.as_ref().map(|_| {
+                    crate::redact::device_session_map(&display_name_session_order(&filtered))
+                });
+                // JSON：渲染层独立收口（不依赖上游 retain，直接喂全量
+                // 事件流）——位图开关决定 activity_buckets 是否出场。
+                let json: serde_json::Value = serde_json::from_str(&render_json_events(
+                    &events,
+                    anon.as_ref(),
+                    names.as_ref(),
+                    bitmap_on,
+                    42,
+                ))
+                .unwrap();
+                let arr = json["events"].as_array().unwrap();
+                let bucket_entries: Vec<&serde_json::Value> = arr
+                    .iter()
+                    .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("activity_buckets"))
+                    .collect();
+                if bitmap_on {
+                    assert_eq!(bucket_entries.len(), 1, "位图开：缺 activity_buckets");
+                    let b = bucket_entries[0];
+                    let mut keys: Vec<&str> =
+                        b.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                    keys.sort_unstable();
+                    assert_eq!(keys, ["days", "event", "physical_key", "ts"]);
+                    let want_pk = if anon_on { "D1" } else { "kbd-1" };
+                    assert_eq!(b["physical_key"], want_pk);
+                    assert_eq!(b["days"].as_array().unwrap().len(), 7);
+                } else {
+                    assert!(bucket_entries.is_empty(), "位图关：activity_buckets 泄露");
+                    assert_eq!(arr.len(), 2);
+                }
+                // CSV：两种开关逐字节一致（分段归因不采 activity_buckets）。
+                let csv_on = render_csv(&segs, anon.as_ref(), names.as_ref(), CST, 42);
+                let segs_full = build_segments(&events);
+                let csv_full = render_csv(&segs_full, anon.as_ref(), names.as_ref(), CST, 42);
+                assert_eq!(csv_on, csv_full, "位图开关不得改变 CSV");
+                // HTML：位图天数透出与缺口卡随开关翻转。
+                let report =
+                    build_report_data(&filtered, &segs, anon.as_ref(), names.as_ref(), CST, 9000);
+                assert_eq!(
+                    report["meta"]["activity_days"].as_i64().unwrap(),
+                    if bitmap_on { 7 } else { 0 },
+                    "anon={anon_on} bitmap={bitmap_on}"
+                );
+                assert_eq!(
+                    report["activity_gap_note"]["present"].as_bool().unwrap(),
+                    !bitmap_on,
+                    "anon={anon_on} bitmap={bitmap_on}"
+                );
+                // 顶层字段集合恒等于 manifest 字典（开关不增删顶层键）。
+                let mut top: Vec<&str> = report
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(|k| k.as_str())
+                    .collect();
+                top.sort_unstable();
+                let mut dict = crate::export_manifest::HTML_DATA_TOP_FIELDS.to_vec();
+                dict.sort_unstable();
+                assert_eq!(top, dict, "anon={anon_on} bitmap={bitmap_on}");
+            }
+        }
+        // 谓词钉板：位图事件须双开才放行，其余事件恒放行。
+        let bucket = StatsEvent::ActivityBuckets {
+            ts: 1,
+            physical_key: "d".into(),
+            days: vec![],
+        };
+        assert!(!export_event_allowed(&bucket, true, false));
+        assert!(!export_event_allowed(&bucket, false, true));
+        assert!(!export_event_allowed(&bucket, false, false));
+        assert!(export_event_allowed(&bucket, true, true));
+        assert!(export_event_allowed(&ev_poll(1, "d", 1), false, false));
+    }
+
+    // -- 自描述 manifest（组5 N-12② · 5a）------------------------------------
+
+    /// A 要素防漂移：统计 JSON 顶层键集合 == STATS_JSON_TOP_FIELDS。
+    #[test]
+    fn json_export_top_fields_match_manifest_dictionary() {
+        let events = vec![ev_poll(1000, "kbd-1", 90)];
+        let v: serde_json::Value =
+            serde_json::from_str(&render_json_events(&events, None, None, true, 42)).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        let mut dict = crate::export_manifest::STATS_JSON_TOP_FIELDS.to_vec();
+        dict.sort_unstable();
+        assert_eq!(keys, dict);
+        // manifest 透出且生成时刻与导出时刻一致。
+        assert_eq!(v["manifest"]["generated_at"], 42);
+        assert_eq!(
+            v["manifest"]["schema_version"],
+            crate::export_manifest::MANIFEST_SCHEMA_VERSION
+        );
+    }
+
+    /// A 要素防漂移：HTML volttray-data 顶层键集合 == HTML_DATA_TOP_FIELDS。
+    #[test]
+    fn report_data_top_fields_match_manifest_dictionary() {
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, "kbd-1", 90),
+            ev_poll(9200, "kbd-1", 88),
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
+        let mut keys: Vec<&str> = report
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        let mut dict = crate::export_manifest::HTML_DATA_TOP_FIELDS.to_vec();
+        dict.sort_unstable();
+        assert_eq!(keys, dict);
+        assert_eq!(report["manifest"]["generated_at"], 200000);
+        // BvA-6：manifest 块不含采集时区偏移值（meta.tz_offset 属既有字段，
+        // 不在本负面清单范围）。
+        let m = report["manifest"].to_string();
+        for bad in ["+08:00", "tz_offset"] {
+            assert!(!m.contains(bad), "manifest 含负面清单值: {bad}");
+        }
+    }
+
+    /// CSV 结构钉板：BOM → `#` 注释块 → 表头 → 数据行。
+    #[test]
+    fn csv_manifest_comment_block_precedes_header() {
+        let csv = render_csv(&[], None, None, CST, 7);
+        assert!(csv.starts_with('\u{feff}'));
+        let body = &csv[3..];
+        let comments: Vec<&str> = body.lines().take_while(|l| l.starts_with("# ")).collect();
+        assert_eq!(
+            comments.len(),
+            crate::export_manifest::manifest_csv_comments(7)
+                .lines()
+                .count()
+        );
+        assert!(comments[0].starts_with("# manifest.schema_version="));
+        assert!(comments.contains(&"# manifest.generated_at=7"));
+        // 注释块之后即表头行。
+        let after = body.lines().nth(comments.len()).unwrap();
+        assert_eq!(after, CSV_HEADER);
     }
 
     // -- 报告数据块（AC-B8 对账源）--------------------------------------------
@@ -2470,11 +2815,15 @@ mod tests {
             ev_poll(123400, k, 80),
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 200000);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
         // 分段明细行数 = CSV 数据行数 = 段数。
         let rows = report["segments"].as_array().unwrap();
         assert_eq!(rows.len(), segs.len());
-        let csv_rows = render_csv(&segs, None, CST).lines().count() - 1;
+        let csv_rows = render_csv(&segs, None, None, CST, 200000)
+            .lines()
+            .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
+            .count()
+            - 1;
         assert_eq!(rows.len(), csv_rows);
         // 行字段与 Segment 派生值一致。
         for (r, s) in rows.iter().zip(segs.iter()) {
@@ -2545,7 +2894,7 @@ mod tests {
         let events = vec![ev_poll(1000, "kbd-1", 90), ev_poll(8200, "kbd-1", 88)];
         let segs = build_segments(&events);
         let anon = anonymize_map(&event_keys(&events));
-        let report = build_report_data(&events, &segs, Some(&anon), CST, 9000);
+        let report = build_report_data(&events, &segs, Some(&anon), None, CST, 9000);
         let s = report.to_string();
         assert!(report["meta"]["anonymized"].as_bool().unwrap());
         assert_eq!(report["segments"][0]["device_key"].as_str().unwrap(), "D1");
@@ -2568,7 +2917,7 @@ mod tests {
             r.display_name = "x</script><script>alert(1)".into();
         }
         let segs = build_segments(&ev2);
-        let report = build_report_data(&ev2, &segs, None, CST, 9000);
+        let report = build_report_data(&ev2, &segs, None, None, CST, 9000);
         let html = render_html(&report);
         // 零外部资源引用（SVG 命名空间 URI 是标识符、不产生请求，不计）。
         for pat in [
@@ -2728,15 +3077,48 @@ mod tests {
                 assert_eq!(w[0].end_ts, w[1].start_ts, "段链断裂: {key}");
             }
         }
-        let csv = render_csv(&segs, None, CST);
-        assert_eq!(csv.lines().count() - 1, segs.len(), "CSV 行数 = 段数");
-        let report = build_report_data(&events, &segs, None, CST, base + DAYS * 86_400);
+        let csv = render_csv(&segs, None, None, CST, base + DAYS * 86_400);
+        assert_eq!(
+            csv.lines()
+                .filter(|l| !l.trim_start_matches('\u{feff}').starts_with("# "))
+                .count()
+                - 1,
+            segs.len(),
+            "CSV 行数 = 段数"
+        );
+        let report = build_report_data(&events, &segs, None, None, CST, base + DAYS * 86_400);
         assert_eq!(report["segments"].as_array().unwrap().len(), segs.len());
         let html = render_html(&report);
         assert!(html.contains(r#"<script id="volttray-data" type="application/json">"#));
         assert!(html.len() > 10_000);
         // 段数应远小于事件数（coalesce 生效），量级合理。
         assert!(segs.len() < events.len() / 10, "段数 {}", segs.len());
+    }
+
+    /// G-28：HTML 模板含读数年龄渲染钩子（ageText / ageStale / 超 2h 徽标），
+    /// 且年龄基准（generated_at）与读数时刻（current_ts）golden 透出。
+    #[test]
+    fn g28_html_template_has_reading_age_hooks() {
+        let k = "kbd-1";
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, k, 90),
+            ev_poll(9200, k, 88),
+        ];
+        let segs = build_segments(&events);
+        let report = build_report_data(&events, &segs, None, None, CST, 200000);
+        assert_eq!(report["meta"]["generated_at"].as_i64().unwrap(), 200000);
+        assert_eq!(
+            report["first_screen_kpis"][k]["current_ts"]
+                .as_i64()
+                .unwrap(),
+            9200
+        );
+        let html = render_html(&report);
+        assert!(html.contains("function ageText("), "缺 ageText 钩子");
+        assert!(html.contains("function ageStale("), "缺 ageStale 钩子");
+        assert!(html.contains("更新于 "), "缺 KPI 卡年龄文案钩子");
+        assert!(html.contains("读数超 2h 未刷新"), "缺超 2h 醒目徽标钩子");
     }
 }
 
@@ -2915,7 +3297,7 @@ mod filename_tests {
         // 无 activity_buckets 事件 → 缺口卡必然出现。
         let events = vec![ev_poll(1000, "d1", 90), ev_poll(8200, "d1", 88)];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 9000);
+        let report = build_report_data(&events, &segs, None, None, CST, 9000);
         let gap = &report["activity_gap_note"];
         assert!(gap["present"].as_bool().unwrap());
         assert!(gap["text"].as_str().unwrap().contains("尚无静止/活动字段"));
@@ -2935,7 +3317,7 @@ mod filename_tests {
                 days: days7,
             },
         ];
-        let report2 = build_report_data(&ev2, &segs, None, CST, 9000);
+        let report2 = build_report_data(&ev2, &segs, None, None, CST, 9000);
         assert!(!report2["activity_gap_note"]["present"].as_bool().unwrap());
         assert_eq!(report2["meta"]["activity_days"].as_i64().unwrap(), 7);
     }
@@ -2949,7 +3331,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let html = render_html(&report);
         assert!(
             html.contains("app 运行时段"),
@@ -3043,7 +3425,7 @@ mod filename_tests {
             },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 9000);
+        let report = build_report_data(&events, &segs, None, None, CST, 9000);
         assert_eq!(report["meta"]["activity_days"].as_i64().unwrap(), 3);
     }
 
@@ -3058,7 +3440,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let avg = report["first_screen_kpis"]["d1"]["avg"]
             .as_object()
             .unwrap();
@@ -3087,7 +3469,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         let html = render_html(&report);
         assert!(!html.contains("距下次充电"));
         assert!(!report.to_string().contains("距下次充电"));
@@ -3103,7 +3485,7 @@ mod filename_tests {
             StatsEvent::RunStop { ts: 10000 },
         ];
         let segs = build_segments(&events);
-        let report = build_report_data(&events, &segs, None, CST, 20000);
+        let report = build_report_data(&events, &segs, None, None, CST, 20000);
         assert!(report.get("chart2").is_none());
         assert!(report["meta"].get("chart2_approx").is_none());
         let html = render_html(&report);

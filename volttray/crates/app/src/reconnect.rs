@@ -1055,4 +1055,64 @@ mod tests {
         assert_eq!(ids, vec!["a".to_string(), "g1".to_string()]);
         assert!(exempt);
     }
+
+    // -----------------------------------------------------------------
+    // E10（设计文档 design-e10-wake-attribution.md §8）：测试态注入
+    // 双用例——重枚举兜底「修得越好越不自然触发」，以注入验收代替
+    // 「真实触发过」口径；一阶段在 windows CI 可证伪。
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn e10_enum_empty_triggers_fallback_reenum() {
+        // 用例① 枚举空路径：模拟设备枚举返回空集（registered_slots=0）
+        // → 唤醒信号到达时兜底重枚举被触发（force 置位、枚举门立即放行）。
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        let _ = r.record_result(t0, 0); // 枚举完成、空集
+        assert!(
+            r.request_wake_enum(t0 + Duration::from_secs(1), 0),
+            "空槽位 + 唤醒信号 → 应触发强制重枚举"
+        );
+        assert!(r.pending_force());
+        assert!(r.should_enumerate(t0 + Duration::from_secs(1), false));
+        // 防抖：5s 内重复唤醒信号不重复置位（枚举风暴红线）。
+        let _ = r.record_result(t0 + Duration::from_secs(2), 0);
+        assert!(
+            !r.request_wake_enum(t0 + Duration::from_secs(2), 0),
+            "WAKE_ENUM_MIN_INTERVAL 内事件合并"
+        );
+    }
+
+    #[test]
+    fn e10_probe_judged_dead_triggers_reenum() {
+        // 用例②（BvA-4）probe 判死路径：模拟连续 2 轮唤醒探测静默判死
+        // → invalidate_handles → 该路径下重枚举可触发（真机断链点是
+        // probe 判死而非枚举空，单用例不可证伪）。
+        let mut live = ChannelLiveness::new();
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        let _ = r.record_result(t0, 1); // 正常态：有注册槽位
+                                        // 第 1 轮探测静默：未达阈值不判死，枚举沿用 30s 门控。
+        assert!(!live.note_round(&[], &[SlotOutcome::Timeout]));
+        assert_eq!(live.probe_silent_rounds(), 1);
+        assert!(
+            !r.should_enumerate(t0 + Duration::from_secs(1), true),
+            "未判死时不得触发强制枚举"
+        );
+        // 第 2 轮探测静默：达阈值判死 → 作废句柄 → 重枚举立即放行。
+        assert!(
+            live.note_round(&[], &[SlotOutcome::Timeout]),
+            "连续 2 轮探测静默 → 判死"
+        );
+        r.invalidate_handles();
+        assert!(
+            r.should_enumerate(t0 + Duration::from_secs(1), true),
+            "判死后重枚举可触发"
+        );
+        // 有字节应答则连击清零、不误判（回归护栏）。
+        let mut live2 = ChannelLiveness::new();
+        assert!(!live2.note_round(&[], &[SlotOutcome::Timeout]));
+        assert!(!live2.note_round(&[], &[SlotOutcome::Success]));
+        assert_eq!(live2.probe_silent_rounds(), 0);
+    }
 }

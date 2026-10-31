@@ -1,0 +1,6 @@
+{"ts": 1761000000, "event": "run_start"}
+{"ts": 1761000060, "physical_key": "kbd-1", "display_name": "K860", "percent": 90, "charging": false, "source": "poll"}
+{"ts": 1761000120, "physical_key": "mouse-2", "display_name": "G304", "percent": 55, "charging": false, "source": "poll"}
+{"ts": 1761086400, "event": "activity_buckets", "physical_key": "kbd-1", "days": [{"date": "2026-10-20", "bitmap_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, {"date": "2026-10-21", "bitmap_hex": "555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"}]}
+{"ts": 1761087000, "physical_key": "kbd-1", "display_name": "K860", "percent": 88, "charging": false, "source": "poll"}
+{"ts": 1761090000, "event": "run_stop"}

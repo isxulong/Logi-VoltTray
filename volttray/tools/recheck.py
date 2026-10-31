@@ -396,6 +396,23 @@ def display_key(key, anon):
     return anon.get(key, key) if anon else key
 
 
+def display_name_session_map(events):
+    """组5 5b（C-3）：会话内 display_name 首现顺序 → 设备N
+    （attribution::display_name_session_order + redact::device_session_map
+    镜像；空名跳过；编号不承担匿名化职责）。"""
+    order = []
+    for ev in events:
+        if ev[0] == "read":
+            dn = ev[3]
+            if dn and dn not in order:
+                order.append(dn)
+    return {dn: "设备%d" % (i + 1) for i, dn in enumerate(order)}
+
+
+def map_display_name(dn, names):
+    return names.get(dn, dn) if names else dn
+
+
 # ---------------------------------------------------------------- CSV
 
 def csv_field(s):
@@ -408,14 +425,15 @@ CSV_HEADER = ("device_key,display_name,segment_type,start_ts,end_ts,"
               "duration_min,start_pct,end_pct,delta_pct,rate_pct_per_hour,note")
 
 
-def render_csv(segments, anon, off):
+def render_csv(segments, anon, names, off):
     rows = sorted(((display_key(s["device_key"], anon), s) for s in segments),
                   key=lambda x: (x[0], x[1]["start_ts"]))
     out = ["﻿" + CSV_HEADER]
     for key, s in rows:
         r = rate(s)
         out.append(",".join([
-            csv_field(key), csv_field(s["display_name"]), s["seg_type"],
+            csv_field(key), csv_field(map_display_name(s["display_name"], names)),
+            s["seg_type"],
             fmt_rfc3339(s["start_ts"], off), fmt_rfc3339(s["end_ts"], off),
             str(duration_min(s)), str(s["start_pct"]), str(s["end_pct"]),
             str(delta_pct(s)), "" if r is None else "%.2f" % r,
@@ -498,23 +516,48 @@ def detect_anon(keys_present, raw_keys):
     return False
 
 
-def check_csv(ck, path, segments, keys, off):
+def check_csv(ck, path, segments, keys, off, events):
     with open(path, "r", encoding="utf-8") as f:
         body = f.read()
+    # 组5 自描述导出（N-12②）：CSV 头部新增 `#` manifest 注释块（BOM
+    # 与表头之间）。对账口径：剥 BOM → 丢弃 `#` 注释行 → 重加 BOM，再
+    # 与 render_csv（不含注释块）逐字节比对。注释块内容本身不在此断言
+    # ——schema_version 等字段以 JSON/HTML manifest 落点的对账为准；
+    # 此处只要求注释行存在且形如 `# ...`（不影响表头与数据行的字节级
+    # 一致性校验）。
+    body_cmp = body
+    if body_cmp.startswith("\ufeff"):
+        body_cmp = body_cmp[1:]
+    kept = [l for l in body_cmp.split("\n") if not l.startswith("#")]
+    body_cmp = "\ufeff" + "\n".join(kept)
     first_col = set()
-    for line in body.splitlines()[1:]:
+    for line in body_cmp.splitlines()[1:]:
         if line:
             first_col.add(line.split(",", 1)[0].strip('"'))
     anon = anonymize_map(keys) if detect_anon(first_col, keys) else None
-    want = render_csv(segments, anon, off)
-    if body != want:
-        gl, wl = body.splitlines(), want.splitlines()
+    # 组5 5b：镜像默认闸门（redact_display_name=开）——匿名化在场时
+    # display_name 按会话映射「设备N」。
+    names = display_name_session_map(events) if anon else None
+    want = render_csv(segments, anon, names, off)
+    if body_cmp != want:
+        gl, wl = body_cmp.splitlines(), want.splitlines()
         ck.eq("csv 行数", len(gl), len(wl))
         for i, (g, w) in enumerate(zip(gl, wl)):
             ck.eq("csv 第 %d 行" % (i + 1), g, w)
     else:
-        print("PASS csv：%d 行逐字节一致（匿名化=%s）" %
-              (len(body.splitlines()) - 1, "开" if anon else "关"))
+        n_comments = len(body.splitlines()) - len(body_cmp.splitlines())
+        print("PASS csv：%d 行逐字节一致（匿名化=%s，跳过 manifest 注释行 %d 行）" %
+              (len(body_cmp.splitlines()) - 1, "开" if anon else "关", n_comments))
+        # 复核二 P2-3：原始字节比对（不剥 `#` 注释行的旧版工具口径）失败、
+        # 且剥后逐字节一致 → 差异仅在 manifest `#` 注释头。给出明确提示，
+        # 指向注释头与新版工具，避免旧工具用户误判为数据不一致。
+        if n_comments > 0 and body != want:
+            print("提示：本 CSV 在 BOM 与表头之间含 %d 行 manifest `#` 注释头；"
+                  "不剥注释行的旧版复算工具做字节比对会失败——该失败的差异仅在"
+                  " `#` 注释头，数据区已逐字节一致。请使用随 v0.3.26 起发布的新版"
+                  " tools/recheck.py（剥 BOM → 丢 `#` 注释行 → 再字节比对）；"
+                  "注释头各键口径见注释行 manifest.audit / manifest.diag_audit "
+                  "指向的审计文档。" % n_comments)
 
 
 def check_json(ck, path, events, keys):
@@ -530,13 +573,15 @@ def check_json(ck, path, events, keys):
         for d in e.get("devices", []):
             gk.add(d.get("physical_key"))
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
+    names = display_name_session_map(events) if anon else None
     want_events = []
+    want_buckets = []
     for ev in events:
         if ev[0] == "read":
             _, ts, pk, dn, pct, chg, src = ev
             want_events.append({"ts": ts, "physical_key": display_key(pk, anon),
-                                "display_name": dn, "percent": pct,
-                                "charging": chg, "source": src})
+                                "display_name": map_display_name(dn, names),
+                                "percent": pct, "charging": chg, "source": src})
         elif ev[0] == "run_start":
             want_events.append({"ts": ev[1], "event": "run_start"})
         elif ev[0] == "run_stop":
@@ -549,17 +594,30 @@ def check_json(ck, path, events, keys):
             want_events.append({"ts": ev[1], "physical_key": display_key(ev[2], anon),
                                 "event": "sleep_enter"})
         elif ev[0] == "activity_buckets":
-            want_events.append({"ts": ev[1], "event": "activity_buckets",
-                                "physical_key": display_key(ev[2], anon),
-                                "days": ev[3]})
+            want_buckets.append({"ts": ev[1], "event": "activity_buckets",
+                                 "physical_key": display_key(ev[2], anon),
+                                 "days": ev[3]})
     ge = got.get("events", [])
-    if ge != want_events:
-        ck.eq("json.events 条数", len(ge), len(want_events))
-        for i, (g, w) in enumerate(zip(ge, want_events)):
+    # 组4 N-08② 位图开关镜像：activity_buckets 为可选段——导出在
+    # 位（旧样本 / 勾选位图）则逐值严格复算（BvA-8 向后兼容）；
+    # 缺席不判负（新默认 export_activity_bitmap=关，位图不进导出）。
+    ge_buckets = [e for e in ge if e.get("event") == "activity_buckets"]
+    ge_main = [e for e in ge if e.get("event") != "activity_buckets"]
+    if ge_main != want_events:
+        ck.eq("json.events 条数", len(ge_main), len(want_events))
+        for i, (g, w) in enumerate(zip(ge_main, want_events)):
             ck.eq("json.events[%d]" % i, g, w)
     else:
         print("PASS json：%d 条事件逐值一致（匿名化=%s）" %
-              (len(ge), "开" if anon else "关"))
+              (len(ge_main), "开" if anon else "关"))
+    if ge_buckets:
+        if ge_buckets != want_buckets:
+            ck.eq("json.activity_buckets 条数", len(ge_buckets), len(want_buckets))
+            for i, (g, w) in enumerate(zip(ge_buckets, want_buckets)):
+                ck.eq("json.activity_buckets[%d]" % i, g, w)
+        else:
+            print("PASS json.activity_buckets：%d 条位图事件逐值一致" %
+                  len(ge_buckets))
 
 
 def check_html(ck, path, events, segments, keys, off):
@@ -584,11 +642,12 @@ def check_html(ck, path, events, segments, keys, off):
         ck.eq("html 零外链 %s" % pat, len(hits), 0)
     gk = set(k for k, _ in got.get("devices", []))
     anon = anonymize_map(keys) if detect_anon(gk, keys) else None
+    names = display_name_session_map(events) if anon else None
     # 设备清单
     name_of = {}
     for ev in events:
         if ev[0] == "read":
-            name_of[display_key(ev[2], anon)] = ev[3]
+            name_of[display_key(ev[2], anon)] = map_display_name(ev[3], names)
     devices = [[k, v] for k, v in sorted(name_of.items())]
     ck.eq("html.devices", got.get("devices"), devices)
     # 段明细（展示键 + 排序）
@@ -599,7 +658,8 @@ def check_html(ck, path, events, segments, keys, off):
         segs.append(c)
     segs.sort(key=lambda s: (s["device_key"], s["start_ts"]))
     want_rows = [{
-        "device_key": s["device_key"], "display_name": s["display_name"],
+        "device_key": s["device_key"],
+        "display_name": map_display_name(s["display_name"], names),
         "segment_type": s["seg_type"], "start_ts": s["start_ts"], "end_ts": s["end_ts"],
         "duration_min": duration_min(s), "start_pct": s["start_pct"],
         "end_pct": s["end_pct"], "delta_pct": delta_pct(s),
@@ -646,6 +706,41 @@ def check_html(ck, path, events, segments, keys, off):
               ("开" if anon else "关"))
 
 
+# 组3 N-04/05 档位对账期望档（秒）：与 Rust 侧常量同源口径——
+# POLL_CHARGING=15（充电 15s 档）、DEFAULT_POLL_SECS=1800（常规默认档）。
+TIER_CHARGING_SECS = 15
+TIER_NORMAL_SECS = 1800
+
+
+def tier_audit(events):
+    """组3 N-04/05 档位对账（信息性输出，不判负）：按设备 × 档位
+    （充电 / 常规，由相邻两条读数的 charging 态共同判定）统计相邻
+    读数间隔，给出样本数 / 中位 / 最大 / 跳轮倍数（间隔 ÷ 期望档，
+    四舍五入，≥1）。表观读数间隔 = 轮间隔 + 整轮耗时 + 跳轮叠加，
+    口径见 decisions.md D-98。"""
+    reads = {}
+    for ev in events:
+        if ev[0] == "read":
+            _, ts, pk, _dn, _pct, chg, _src = ev
+            reads.setdefault(pk, []).append((ts, chg))
+    lines = []
+    for pk in sorted(reads):
+        xs = sorted(reads[pk])
+        buckets = {"charging": [], "normal": []}
+        for (t0, c0), (t1, c1) in zip(xs, xs[1:]):
+            buckets["charging" if (c0 and c1) else "normal"].append(t1 - t0)
+        for tier, expect in (("charging", TIER_CHARGING_SECS),
+                             ("normal", TIER_NORMAL_SECS)):
+            iv = sorted(buckets[tier])
+            if not iv:
+                continue
+            med = iv[len(iv) // 2]
+            mult = max(1, int(med / expect + 0.5))
+            lines.append("档位对账 %s [%s]：样本 %d，中位 %ds（≈%d×%ds 档），最大 %ds"
+                         % (pk[:32], tier, len(iv), med, mult, expect, iv[-1]))
+    return lines
+
+
 def main():
     # Windows 控制台/管道默认编码（cp1252/GBK）无法输出中文摘要——
     # 统一把 stdout/stderr 重配为 UTF-8（CI windows-latest 实测 cp1252
@@ -660,7 +755,16 @@ def main():
     ap.add_argument("--html", help="导出的 HTML 报告")
     ap.add_argument("--json", help="导出的 JSON 事件序列")
     ap.add_argument("--tz", type=int, default=480, help="本地时区偏移（分钟，默认 480=+08:00）")
+    ap.add_argument("--tier-audit", action="store_true",
+                    help="组3 N-04/05：只做档位对账（读数间隔 × 期望档），信息性输出不判负")
     args = ap.parse_args()
+    if args.tier_audit:
+        events = load_events(([args.archive] if args.archive else []) + [args.stats])
+        lines = tier_audit(events)
+        for line in lines:
+            print(line)
+        print("档位对账：%d 行（设备 %d 个，口径 D-98）" % (len(lines), len(event_keys(events))))
+        sys.exit(0)
     if not (args.csv or args.html or args.json):
         ap.error("--csv/--html/--json 至少给一个")
 
@@ -672,7 +776,7 @@ def main():
     keys = event_keys(events)
     ck = Checker()
     if args.csv:
-        check_csv(ck, args.csv, segments, keys, args.tz)
+        check_csv(ck, args.csv, segments, keys, args.tz, events)
     if args.json:
         check_json(ck, args.json, events, keys)
     if args.html:

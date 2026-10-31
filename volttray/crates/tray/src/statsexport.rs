@@ -43,18 +43,72 @@ pub struct StatsExportRequest {
     /// 融合稿 Phase 1：导出内容是否包含静止/活动分钟统计
     /// （activity_buckets 事件；默认开）。
     pub include_activity: bool,
+    /// 组5 5b（C-2）：anonymize=on 时 display_name → 「设备N」
+    ///（R3 会话映射）；false = 回退保留真实型号。
+    pub redact_display_name: bool,
+    /// 组5 5b（U-2 闸门，BvA-5 默认关）：true → CSV/HTML 时间戳
+    /// 按 UTC（+00:00）渲染；false → 本地时区（现状）。
+    pub tz_utc: bool,
+    /// 组4 N-08②：逐分钟活动位图独立开关（默认关，与 anonymize
+    /// 解耦——作息泄露与是否匿名无关；对话框勾选文案明示
+    /// 「含作息信息」）。false → 三件套不含 activity_buckets
+    ///（BvA-8：与 manifest schema_version 同批合入，下游按
+    /// schema_version 判读、禁止按字段存在性硬解析）。
+    pub export_activity_bitmap: bool,
 }
 
-/// 导出选项（对话框四开关；默认：HTML 开、匿名化关、JSON 关、
-/// 含活动统计开——physical_key 默认保留（本机自用口径，v3 文档标注
-/// 敏感级），HTML 报告为本期拍板特性默认随导出生成；含活动统计
-/// 默认开（融合稿 §6 statsexport.rs 行）。
+/// 组5 5b 导出脱敏/知情闸门（main 从配置读取注入；C-2 回滚键默认
+/// 开，BvA-5 时区归一默认关）。privacy_notice 只作用于 GUI 线程
+/// 的保存前提示，不随请求进 IO 线程。
+#[derive(Debug, Clone, Copy)]
+pub struct ExportGates {
+    /// anonymize=on 时 display_name 映射「设备N」（R3）；false =
+    /// 回退保留真实型号（强制提示「脱敏修复已回退」）。
+    pub redact_display_name: bool,
+    /// 导出时间统一 UTC（U-2 闸门，BvA-5 默认关）。
+    pub tz_utc: bool,
+    /// 保存前知情提示「本文件含设备型号与作息信息」（U-2C）；
+    /// false = 回退不提示（强制提示「脱敏修复已回退」）。
+    pub privacy_notice: bool,
+}
+
+impl Default for ExportGates {
+    fn default() -> Self {
+        Self {
+            redact_display_name: true,
+            tz_utc: false,
+            privacy_notice: true,
+        }
+    }
+}
+
+/// 组5 5b：模态知情提示（U-2C 保存前提示 / C-2 回退提示共用）。
+fn notice(title: &str, text: &str) {
+    let t = wide(title);
+    let b = wide(text);
+    // SAFETY(E9): 宽字符缓冲 NUL 结尾、调用期间存活；MessageBoxW 同步模态，无指针逃逸。
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(b.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// 导出选项（对话框五开关；默认：HTML 开、匿名化关、JSON 关、
+/// 含活动统计开、逐分钟活动位图关——physical_key 默认保留（本机
+/// 自用口径，v3 文档标注敏感级），HTML 报告为本期拍板特性默认随
+/// 导出生成；含活动统计默认开（融合稿 §6 statsexport.rs 行）；
+/// 位图默认关（组4 N-08②：作息泄露面独立收口，与匿名化解耦）。
 #[derive(Debug, Clone, Copy)]
 pub struct ExportOptions {
     pub html: bool,
     pub anonymize: bool,
     pub json: bool,
     pub include_activity: bool,
+    pub export_activity_bitmap: bool,
 }
 
 // —— R-5/R-6（v0.3.17 真机终审修复）：UI 字体回退栈 + 复选框宽度实测 ——
@@ -161,6 +215,7 @@ const IDC_HTML: u32 = 1001;
 const IDC_ANON: u32 = 1002;
 const IDC_JSON: u32 = 1003;
 const IDC_ACTIVITY: u32 = 1004;
+const IDC_BITMAP: u32 = 1005;
 const ID_EXPORT_OK: u32 = 1101;
 const ID_EXPORT_CANCEL: u32 = 1102;
 
@@ -195,6 +250,7 @@ unsafe extern "system" fn export_dlg_wndproc(
                         anonymize: check(IDC_ANON),
                         json: check(IDC_JSON),
                         include_activity: check(IDC_ACTIVITY),
+                        export_activity_bitmap: check(IDC_BITMAP),
                     });
                 }
                 let _ = DestroyWindow(hwnd);
@@ -210,7 +266,7 @@ unsafe extern "system" fn export_dlg_wndproc(
     }
 }
 
-/// 导出选项对话框（模态）：三个勾选 + 确定/取消。取消返回 None
+/// 导出选项对话框（模态）：五个勾选 + 确定/取消。取消返回 None
 /// （零落盘、零派发）。进度提示（v3 P2-③）：对话框内静态文案告知
 /// 「后台执行、完成弹窗」，渲染期间 UI 不被阻塞（派往 IO 线程）。
 pub fn pick_export_options() -> Option<ExportOptions> {
@@ -250,7 +306,8 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             "同时生成可视化报告（HTML，同名主干 .html）",
             "匿名化设备键（device_key 显示为 D1、D2…）",
             "同时导出原始事件序列（JSON，同名主干 .json）",
-            "含活动统计（静止/活动分钟位图，随事件流并入）",
+            "含活动统计（静止/活动摘要，随事件流并入）",
+            "逐分钟活动位图（含作息信息）",
         ];
         let widest = cb_texts
             .iter()
@@ -260,7 +317,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
         let cb_w = widest + widest / 5 + CHECKBOX_GLYPH_W;
         let win_w = (DLG_SIDE_MARGIN + cb_w + DLG_RIGHT_MARGIN).max(200);
         let x = (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - 266) / 2;
+        let y = (GetSystemMetrics(SM_CYSCREEN) - 292) / 2;
         let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class.as_ptr()),
@@ -269,7 +326,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             x.max(0),
             y.max(0),
             win_w,
-            266,
+            292,
             None,
             None,
             Some(hinst),
@@ -282,7 +339,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             }
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut DialogState as isize);
-        // 控件：说明 + 四勾选 + 确定/取消（子窗口随父窗口销毁，无需显式释放）。
+        // 控件：说明 + 五勾选 + 确定/取消（子窗口随父窗口销毁，无需显式释放）。
         // R-5：每个控件创建成功后逐控件 WM_SETFONT（lParam=1 立即重绘）。
         let mk = |cls: &str,
                   text: &str,
@@ -330,11 +387,11 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             32,
             0,
         );
-        // R-6：四个复选框共用实测行宽（文本数组与上面宽度实测同一份）。
+        // R-6：五个复选框共用实测行宽（文本数组与上面宽度实测同一份）。
         let mut h_html = HWND::default();
         let mut h_activity = HWND::default();
         for (i, text) in cb_texts.iter().enumerate() {
-            let id = [IDC_HTML, IDC_ANON, IDC_JSON, IDC_ACTIVITY][i];
+            let id = [IDC_HTML, IDC_ANON, IDC_JSON, IDC_ACTIVITY, IDC_BITMAP][i];
             let h = mk(
                 "BUTTON",
                 text,
@@ -359,7 +416,7 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             "选择保存位置…",
             WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_DEFPUSHBUTTON as u32),
             win_w / 2 - 120,
-            176,
+            202,
             110,
             28,
             ID_EXPORT_OK,
@@ -369,13 +426,15 @@ pub fn pick_export_options() -> Option<ExportOptions> {
             "取消",
             WS_GROUP | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
             win_w / 2 + 10,
-            176,
+            202,
             110,
             28,
             ID_EXPORT_CANCEL,
         );
         // 默认勾选 HTML 报告（本期拍板特性）与含活动统计（融合稿
-        // Phase 1：「含活动统计」勾选项默认开）。
+        // Phase 1：「含活动统计」勾选项默认开）；逐分钟活动位图
+        // 默认不勾（组4 N-08②：作息泄露面默认收口，用户显式勾选
+        // 才导出，文案已明示「含作息信息」）。
         for h in [h_html, h_activity] {
             SendMessageW(h, BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), None);
         }
@@ -395,13 +454,33 @@ pub fn pick_export_options() -> Option<ExportOptions> {
     }
 }
 
-/// 「导出耗电统计…」菜单编排：选项对话框 → 秒级默认命名（R5-P-02）→
-/// Save-As（CSV 过滤器）→ 派发 IO 线程。任一步取消即零落盘零派发。
-pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
+/// 「导出耗电统计…」菜单编排：选项对话框 →（组5 5b：回退强制提示 /
+/// 保存前知情提示）→ 秒级默认命名（R5-P-02）→ Save-As（CSV 过滤器）
+/// → 派发 IO 线程。任一步取消即零落盘零派发。
+pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>, gates: ExportGates) {
     let Some(opts) = pick_export_options() else {
         crate::bootlog::note("stats export cancelled at options dialog");
         return;
     };
+    // C-2（组5 5b）：回滚键（默认开的脱敏修复项）被关闭时强制提示
+    // 「脱敏修复已回退」——不可跳过、不挂开关。
+    if !gates.redact_display_name || !gates.privacy_notice {
+        let mut items: Vec<&str> = Vec::new();
+        if !gates.redact_display_name {
+            items.push("· 设备型号匿名化（导出将保留真实型号）");
+        }
+        if !gates.privacy_notice {
+            items.push("· 保存前知情提示（本次起不再提示）");
+        }
+        notice(
+            "脱敏修复已回退",
+            &format!(
+                "以下脱敏修复项已通过配置关闭，导出将按回退行为执行：\n{}\n\
+                 如需恢复，请将配置中对应 experimental_export_* 键改回 true 并重启。",
+                items.join("\n")
+            ),
+        );
+    }
     // SAFETY(E9): GetLocalTime 无参、返回 POD SYSTEMTIME 值，无指针契约。
     let local = unsafe { GetLocalTime() };
     let default_name = volttray_app::stats_export_filename_local(LocalTimeParts {
@@ -413,6 +492,19 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
         second: local.wSecond,
         millis: local.wMilliseconds,
     });
+    // U-2C（组5 5b）：保存前知情提示（Save-As 确认前）。文案随
+    // 组4 N-08② 位图开关实配——位图默认关，未勾选时导出不含作息
+    // 信息，提示不得虚报内容。
+    if gates.privacy_notice {
+        let body = if opts.export_activity_bitmap {
+            "本文件含设备型号与作息信息（逐分钟活动位图）。\n\
+             分享给他人前请确认接收方可信；勾选「匿名化设备键」可将设备标识替换为编号。"
+        } else {
+            "本文件含设备型号。\n\
+             分享给他人前请确认接收方可信；勾选「匿名化设备键」可将设备标识替换为编号。"
+        };
+        notice("导出内容提示", body);
+    }
     let Some(path) = crate::pick_save_path_with_filter(
         &default_name,
         "CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0",
@@ -427,6 +519,9 @@ pub fn begin_export(cmd_tx: &mpsc::Sender<IoCmd>) {
         anonymize: opts.anonymize,
         json: opts.json,
         include_activity: opts.include_activity,
+        redact_display_name: gates.redact_display_name,
+        tz_utc: gates.tz_utc,
+        export_activity_bitmap: opts.export_activity_bitmap,
     }));
 }
 
