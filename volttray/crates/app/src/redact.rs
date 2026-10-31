@@ -11,7 +11,9 @@
 //! 单一形态覆盖 USERPROFILE / APPDATA / LOCALAPPDATA 三前缀（三者均含
 //! `C:\Users\<名>` 主干）；用户名从路径文本解析，零环境变量依赖。
 //! 输入是最终 JSON 文本，因此 JSON 转义形态（`C:\\Users\\`）与原始
-//! 形态（`C:\Users\`）都识别。
+//! 形态（`C:\Users\`）都识别。**G-33 起前缀匹配为 ASCII 大小写不
+//! 敏感**（`c:\users\` / `C:\USERS\` 等变体同样命中），命中段保留原始
+//! 大小写逐字回写、只替换用户名段。
 //!
 //! 规则二（R2-device-name）：设备名按收集顺序编号为「设备N」。
 //! 设备名由调用方（tray 侧 export_diag）从诊断事件流 DeviceFound
@@ -22,7 +24,9 @@
 //! （「设备N」的 N 与收集序号一致，不随替换执行顺序变化），因此
 //! 既有导出里同一设备跨字段的编号对应关系不变；改变的只是互为
 //! 子串场景下不再出现半替换残留。脱敏安全性两序等价（所有设备名
-//! 均被覆盖），整值优先只影响可读性。
+//! 均被覆盖），整值优先只影响可读性。**G-33 起设备名匹配同为
+//! ASCII 大小写不敏感**（如收集名 "MX Audit Pro" 与日志文本
+//! "mx audit pro" 互相命中）。
 
 /// 脱敏规则注册表条目（E17）。字段全部为静态文本，注册表是
 /// 编译期常量——审计与测试可枚举全部规则而无需执行脱敏。
@@ -40,22 +44,23 @@ pub struct RedactionRule {
 pub const REDACTION_RULES: &[RedactionRule] = &[
     RedactionRule {
         id: "R1-user-path",
-        summary: "C:\\Users\\<段>（含 JSON 转义形态）的 <段> → <USER>",
+        summary: "C:\\Users\\<段>（含 JSON 转义形态，ASCII 大小写不敏感）的 <段> → <USER>",
         doc_anchor: "05 文档第一节规则一",
     },
     RedactionRule {
         id: "R2-device-name",
-        summary: "设备名按收集顺序 → 设备N；整值替换优先（长名先替换）",
+        summary: "设备名按收集顺序 → 设备N；整值替换优先（长名先替换）；ASCII 大小写不敏感匹配",
         doc_anchor: "05 文档第一节规则二",
     },
 ];
 
 /// 对文本执行注册表全部规则（当前：规则一＋规则二）的完整脱敏。
 ///
-/// - `C:\Users\<段>`（含 JSON 转义形态 `C:\\Users\\<段>`）的 `<段>`
-///   替换为 `<USER>`；
-/// - `device_names` 中收集序第 i 个名字替换为「设备i+1」；替换执行
-///   按名字长度降序（E17 整值替换优先），等长保持收集顺序；
+/// - `C:\Users\<段>`（含 JSON 转义形态 `C:\\Users\\<段>`，ASCII 大小写
+///   不敏感，G-33）的 `<段>` 替换为 `<USER>`；
+/// - `device_names` 中收集序第 i 个名字（ASCII 大小写不敏感，G-33）
+///   替换为「设备i+1」；替换执行按名字长度降序（E17 整值替换优先），
+///   等长保持收集顺序；
 /// - 其余字符逐字保留；空设备名跳过（避免空串替换把全文打碎）。
 pub fn redact_text(input: &str, device_names: &[String]) -> String {
     let mut out = redact_user_paths(input);
@@ -69,10 +74,50 @@ pub fn redact_text(input: &str, device_names: &[String]) -> String {
             continue;
         }
         let repl = format!("设备{}", idx + 1);
-        if out.contains(name.as_str()) {
-            out = out.replace(name.as_str(), &repl);
+        // G-33：ASCII 大小写不敏感命中——导出文本里设备名的大小写
+        // 变体（日志模板与收集名不一致时）同样必须脱敏。
+        if find_ascii_ci(&out, name).is_some() {
+            out = replace_ascii_ci(&out, name, &repl);
         }
     }
+    out
+}
+
+/// G-33：ASCII 大小写不敏感子串查找，返回首个命中处的字节下标。
+///
+/// 逐字节比较：ASCII 字母按 `eq_ignore_ascii_case` 折叠，非 ASCII
+/// 字节要求完全相等。返回值必落在 char 边界上——needle 非空且双方
+/// 均为合法 UTF-8 时，首字节匹配不可能落在多字节序列内部（ASCII
+/// 字节与多字节续字节 0x80–0xBF 互不折叠，非 ASCII 首字节亦然），
+/// 末字节同理，故切片安全。
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    (0..=haystack.len() - needle.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
+/// G-33：ASCII 大小写不敏感的全量替换。命中段（无论原始大小写）
+/// 被 `to` 整体替换；非命中字符逐字保留。`from` 为空时恒等返回。
+fn replace_ascii_ci(input: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(i) = find_ascii_ci(rest, from) {
+        out.push_str(&rest[..i]);
+        out.push_str(to);
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -85,20 +130,22 @@ fn redact_user_paths(input: &str) -> String {
     redact_with_prefix(&escaped, "C:\\Users\\")
 }
 
-/// 以 `prefix` 定位，替换其后直到下一道反斜杠或引号之间的非空段为 `<USER>`。
-/// 段为空（前缀后直接是分隔符）视为无用户名，原样保留。
+/// 以 `prefix` 定位（G-33 起 ASCII 大小写不敏感），替换其后直到下一道
+/// 反斜杠或引号之间的非空段为 `<USER>`。段为空（前缀后直接是分隔符）
+/// 视为无用户名，原样保留。命中前缀保留原文大小写逐字回写——只改
+/// 用户名段，不归一化路径前缀形态。
 fn redact_with_prefix(input: &str, prefix: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     loop {
-        match rest.find(prefix) {
+        match find_ascii_ci(rest, prefix) {
             None => {
                 out.push_str(rest);
                 return out;
             }
             Some(i) => {
                 out.push_str(&rest[..i]);
-                out.push_str(prefix);
+                out.push_str(&rest[i..i + prefix.len()]);
                 let after = &rest[i + prefix.len()..];
                 // 段终止：下一道反斜杠（路径分隔）或引号（字符串结束）。
                 let seg_end = after
@@ -218,6 +265,77 @@ mod tests {
             concat!(
                 r#"{"seq":7,"layer":"transport","type":"io_error","#,
                 r#""message":"hid open failed: C:\Users\<USER>\AppData\Roaming\LogiVoltTray\x.log (设备1)"}"#
+            )
+        );
+    }
+
+    /// G-33 规则一：原始形态路径前缀的大小写变体（小写盘符 / 全大写
+    /// USERS / 混合）同样脱敏；命中前缀保留原文大小写，只换用户名段。
+    #[test]
+    fn redacts_username_case_variants_in_raw_paths() {
+        for path in [
+            r"c:\users\zhangsan\AppData\x.log",
+            r"C:\USERS\zhangsan\AppData\x.log",
+            r"c:\Users\zhangsan\AppData\x.log",
+            r"C:\users\zhangsan\AppData\x.log",
+        ] {
+            let out = redact_text(path, &[]);
+            assert!(
+                !out.contains("zhangsan"),
+                "大小写变体不得残留用户名：{path} -> {out}"
+            );
+            assert!(out.contains("<USER>"), "变体必须替换为 <USER>：{out}");
+            assert!(
+                out.ends_with(r"\AppData\x.log"),
+                "用户名段之后逐字保留：{out}"
+            );
+        }
+        // 前缀原文大小写保留（不归一化）：只改用户名段。
+        let out = redact_text(r"c:\USERS\zhangsan\x", &[]);
+        assert_eq!(out, r"c:\USERS\<USER>\x");
+    }
+
+    /// G-33 规则一：JSON 转义形态（双反斜杠）的大小写变体同样脱敏。
+    #[test]
+    fn redacts_username_case_variants_in_json_escaped_paths() {
+        let input = r#"{"path":"C:\\USERS\\zhangsan\\AppData\\x.log"}"#;
+        let out = redact_text(input, &[]);
+        assert!(!out.contains("zhangsan"), "转义变体不得残留用户名：{out}");
+        assert!(
+            out.contains(r#"C:\\USERS\\<USER>\\"#),
+            "转义形态前缀原文保留、用户名段替换：{out}"
+        );
+    }
+
+    /// G-33 规则二：设备名大小写变体（日志文本与收集名大小写不一致）
+    /// 同样替换为「设备N」；其余字符逐字保留。
+    #[test]
+    fn redacts_device_names_case_variants() {
+        let names = vec!["MX Audit Pro".to_string()];
+        let input = "open failed for mx audit pro (slot #2); MX AUDIT PRO retry";
+        let out = redact_text(input, &names);
+        assert_eq!(out, "open failed for 设备1 (slot #2); 设备1 retry");
+        assert!(
+            !out.to_ascii_lowercase().contains("mx audit pro"),
+            "任何大小写变体都不得残留：{out}"
+        );
+    }
+
+    /// G-33 golden：大小写变体错误帧全文比对（同 E17 golden 形态，
+    /// 路径前缀与设备名均取大小写变体）——固定输入 → 固定输出逐字
+    /// 相等，大小写不敏感匹配失效（退化为精确匹配）即打破 golden。
+    #[test]
+    fn golden_error_frame_case_variants() {
+        let input = concat!(
+            r#"{"seq":8,"layer":"transport","type":"io_error","#,
+            r#""message":"hid open failed: c:\USERS\audit_tok\AppData\Roaming\LogiVoltTray\x.log (mx AUDIT pro)"}"#
+        );
+        let out = redact_text(input, &["MX Audit Pro".to_string()]);
+        assert_eq!(
+            out,
+            concat!(
+                r#"{"seq":8,"layer":"transport","type":"io_error","#,
+                r#""message":"hid open failed: c:\USERS\<USER>\AppData\Roaming\LogiVoltTray\x.log (设备1)"}"#
             )
         );
     }

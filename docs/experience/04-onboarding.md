@@ -15,7 +15,7 @@ Logi-VoltTray/
 ├── logi_*.py, red/, tests/   # 早期 Python 参考实现与协议逻辑测试
 │                             # （decisions 中多次以其为「参考实现」实证协议细节）
 ├── .github/workflows/        # ci.yml（windows：fmt --check + clippy + 测试 + 构建；
-│                             #   ubuntu：workspace clippy/test 复核 + actionlint 提示模式）
+│                             #   ubuntu：workspace clippy/test 复核 + actionlint 必过（G-17：2026-10-27 起升必过，原为提示模式））
 │                             # nightly.yml（fuzz 烟测 + 失败自动开单 N-2）
 │                             # bootstrap-lock.yml / audit.yml（cargo audit 周检）
 │                             # release.yml（发布产物构建）
@@ -55,6 +55,7 @@ cargo build --release --locked -p volttray-tray
 - 关键依赖速览：tray-icon 0.26 / muda（托盘与菜单）、windows crate（Win32 API）、hidapi（HID 通道），均只在 `cfg(windows)` 目标下启用。
 - release profile：体积优先（`opt-level="z"` + LTO + 单 codegen unit + strip，单文件 EXE ≤ 5MB 目标）；**`panic = "unwind"` 是有意选择**（PRD 要求 GUI 边界用 `catch_unwind`，不能开 abort——这也是 E1 中「线程 panic 进程不死」的制度背景）。
 - 无本地 Rust 环境时：fork 后 push 触发 CI，从云端 artifact 取 EXE。
+- **Linux 宿主前置（G-30 写明）**：在 Linux 上跑 workspace `cargo test` / `clippy`（含 verify.sh 与 CI ubuntu job）需 libudev 开发库——transport 默认特性把 hidapi 拉入全平台构建；缺 libudev 是**编译失败、不是跳过**。Debian/Ubuntu 前置命令：`sudo apt install libudev-dev`（CI ubuntu job 同此前置）。
 - 非 Windows 环境预检：用 zig 交叉 check 路径（交叉目标 `cargo check`，详见 [01 E16](01-engineering-lessons.md) 与 [03 门禁 B5](03-release-quality-gate.md)）。「fork 后 push 触发 CI」仅适用于你自己 fork 的仓库——向本仓库 push 默认一律禁止，须维护者当轮明确指令（边界见 [AGENTS.md §4](../../AGENTS.md)）。
 
 ### 本地与 CI 工具导读
@@ -75,7 +76,7 @@ cargo build --release --locked -p volttray-tray
 
 - 全量测试计数（**口径 + 取数命令**形态，D3 修复：数字随时点漂移，引用前重取、不落历史定值）：
   - **源码静态口径**：`grep -rc '#\[test\]' volttray/crates --include='*.rs' | awk -F: '{s+=$2} END {print s}'` —— 2026-10-22 实测 **390**（含 `cfg(windows)` 专属与各平台条件编译项；静态计数 ≠ 任何单一平台的运行时测试数）；
-  - **最近实测 476（2026-10-28 红蓝对抗局复核）**，引用前重取、以最新实跑为准；
+  - **历史复核值不落本文（G-14）**：裸数随时点漂移即失真（原「最近实测 476（2026-10-28 红蓝对抗局复核）」裸值已删）；引用测试数一律按「口径＋取数命令＋锚定 commit」三要素现场重取——形如「Windows CI 全量口径＝锚定 commit `<hash>` 上 `cargo test --workspace --locked` 实跑计数」，以最新实跑为准；
   - **平台实测口径**：目标平台实跑 `cargo test --workspace --locked` 计数——Windows CI（windows-latest）为全量，Linux 侧因 `cfg(windows)` 条件编译而少于全量；引用时写明平台与取数日期；
   - 每个关键数字须**两条独立取数路径且结果一致**（跨口径换算见 [02 E22](02-collaboration-playbook.md#e22-红蓝对抗编排进阶裁决注入断点防御时序核对取数口径) 取数口径段；门禁 C2：测试数从产物 / 源码实测读取，不从汇报抄）。
 - 测试文化：每个真机事故的修复都伴随「能区分旧行为」的回归测试（例：D-64 的红态证据测试——分档模式 map 无 Default 键，正是真机日志卡点）。

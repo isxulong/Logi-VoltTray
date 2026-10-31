@@ -143,9 +143,12 @@ run "fmt --check" cargo fmt --all -- --check
 run "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # ③ test（门禁三，对齐 ci.yml：--locked）
-# 注（R2-F3 后半）：workspace 测试在 Linux 宿主编译 hidapi 需 libudev
-# 开发库；沙箱/精简 Linux 环境缺 libudev 时本步预期跳过（真实门禁以
-# windows-gnu 交叉目标的 fmt/clippy/check 三件套为准）。
+# 注（G-30 更正，2026-10-31）：workspace 测试在 Linux 宿主编译 hidapi 需
+# libudev 开发库；**缺 libudev 时本步是编译失败、不是「预期跳过」**（原注释
+# 口径不实，已删）。前置：Debian/Ubuntu `sudo apt install libudev-dev`
+# （CI ubuntu job 同此前置，见 ci.yml）。verify.sh 的真实跳过分支（A4 双算
+# python3 缺席、交叉 check --quick / zig 缺席）已登记 docs/HANDOVER.md §3.1
+# 代码维护窗口，期限与阻塞披露见该处。
 run "test" cargo test --workspace --locked
 
 # ④ commit trailer 契约（N-1 裁决：lint-only 只读提示，缺项不阻断）
