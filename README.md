@@ -1,6 +1,6 @@
 # LogiVoltTray
 
-**简体中文**（主位版本，内容如有出入以本版为准） | [English](README.en-US.md)
+**简体中文**（主位版本；两份 README 如有不一致即为缺陷，请到 [issues](https://github.com/isxulong/Logi-VoltTray/issues) 报告——一致性门禁见 [docs/experience/02-collaboration-playbook.md](docs/experience/02-collaboration-playbook.md) E44） | [English](README.en-US.md)
 
 Windows 托盘直显罗技设备电量：在系统托盘图标上直接画出键盘 / 鼠标的实时电量数字，不用打开任何窗口。
 
@@ -51,7 +51,7 @@ minisign -V -p minisign.pub -m volttray-tray.exe -x volttray-tray.exe.minisig
 
 ### 实验室（试验功能）
 
-以下功能核心逻辑由单元测试锁定、Windows 侧接线经 CI（windows-latest）构建验证，但真机行为尚未验证；如遇与描述不符，请用「导出诊断信息…」导出诊断文件反馈。**四项功能默认开启**（v0.3.22 起；v0.3.21 期间新装或保存过设置的用户保持文件里的显式值、不自动翻转，升级后首次启动会收到一次性提示，可在设置窗口一键对齐）——到 设置 → 精细化设置 逐项开关，或在 `config.toml` 直接改对应键（改动保存后重启生效，可点设置窗口「立即重启」立即应用）。
+以下功能核心逻辑由单元测试锁定、Windows 侧接线经 CI（windows-latest）构建验证，但真机行为尚未验证；如遇与描述不符，请用「导出诊断信息…」导出诊断文件反馈。**四项功能默认开启**（v0.3.22 起；v0.3.21 期间新装或保存过设置的用户保持文件里的显式值、不自动翻转，升级后首次启动会收到一次性提示，可在设置窗口一键对齐）——到 设置 → 精细化设置 逐项开关，或在 `config.toml` 直接改对应键（改动保存后重启生效，可点设置窗口「立即重启」立即应用）。菜单清单与文案（含带动态后缀的条件项，如「检查更新（当前 vX）」）以 `volttray/crates/tray/src/menu.rs` 实载为准；排查试验功能异常时的用户侧自助检查与报障入口，见 [docs/experience/04-onboarding.md](docs/experience/04-onboarding.md) §7——报 issue 时请附诊断导出文件（内含 `app_version` 字段，可定位你实际使用的版本）。
 
 - **重启即显最后已知电量**（v0.3.16 起）：默认开启，可在 设置 → 精细化设置 或 `experimental_persist_last_known` 键关闭。每台设备的最后一次电量读数持久化到 `%LOCALAPPDATA%\LogiVoltTray\last_known.json`（与配置文件分开放置，不随漫游配置同步；原子写入，文件损坏自动回退、不阻塞启动）。重启后立即灰显最后已知电量（虚拟条目，不发起任何设备查询，有数据才出现对应菜单项）；关机时做最终落盘，崩溃 / 掉电也能保住最近一次状态。以设备物理身份为主键，同名设备不会因重启互相混淆。
 
