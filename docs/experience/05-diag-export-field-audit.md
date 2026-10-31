@@ -119,10 +119,13 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 
 > 本节登记 manifest 自描述机制的设计要点与判读纪律（BvA-6 / BvA-8 与 38 字段双向钉板）；字段级审计主表在上方各节，本节不重复。用户侧「怎么分辨新旧版本导出」的判读指引见 [04 §7 版本分辨增补](04-onboarding.md)。
 
+- **读者是谁**：改诊断 / 统计导出字段的开发者；拿到导出文件做分析的新团队（含新 AI 团队）。**何时用**：给导出增删或改义任何字段时；或收到一份导出文件、需先判断其结构与字段含义时。
+
 - **机制位置**：`crates/app/src/export_manifest.rs`——`MANIFEST_SCHEMA_VERSION = 1`；导出 JSON 顶层 `manifest` 子对象随 v0.3.26（PR #19，merge `db9da3872`）起输出。
 - **BvA-6（只写规则名、不写可定位值）**：manifest 的 `notes` 只登记脱敏规则名与口径说明（如「不含采集时区偏移值(BvA-6)」），**不写入任何可定位具体值**（时区偏移量、用户名、设备名原文）——自描述本身不能成为新的泄露面。
 - **BvA-8（下游按 schema_version 判读）**：任何下游消费方按 `manifest.schema_version` 值分派解析逻辑；**禁止按字段存在性硬解析**（「有某键就当某版本」）——门禁登记见 [03 D12](03-release-quality-gate.md)。
 - **38 字段双向钉板**：`DIAG_EXPORT_TOP_FIELDS`（38 个顶层字段，2026-10-31 按源文件实测计数）与序列化字段集由同文件内的双向相等测试钉板防漂移——任一侧增删字段而另一侧未同步，测试即红；逐字段口径（per-run 计数器等）以该文件逐字段注释为准。
+- **口径桥接**（2026-10-31 源码对账实测后登记）：本节 38（`DIAG_EXPORT_TOP_FIELDS` 顶层字段集，manifest 侧计数对象）与上方各节 20（`DiagExport` 序列化字段集，t02b 测试计数对象）经对账实测为**同一计数对象的不同时点快照**——对账时点 `diag_export.rs` t02b expected 数组已演进为 38 项，与 `DIAG_EXPORT_TOP_FIELDS` 38 键键集合严格相等（双向钉板与 t02b 互锁同一序列化字段集）；上方各节「20」为 2026-10-26 时点快照（当时结构体 pub 字段与 t02b 数组均为 20，其后经 E10 波二等批次新增 18 字段演进至 38）。即现状两侧计数同为 38 且同集，「20」系漂移前快照，差异已在 [06 F.2](06-release-reconciliation.md) 打回登记；改任一字段时，结构体、t02b expected 数组、`DIAG_EXPORT_TOP_FIELDS` 三处由 t02b 与双向钉板强制同步变红，文档计数快照随对账更新。
 - **溯源**：`crates/app/src/export_manifest.rs`（`MANIFEST_SCHEMA_VERSION` / `DIAG_EXPORT_TOP_FIELDS` / `notes` / 双向钉板测试）；PR #19（merge commit `db9da3872`）；[03 D12](03-release-quality-gate.md)。
 
 ## 编号族与裸编号歧义映射表（G-13，2026-10-31）

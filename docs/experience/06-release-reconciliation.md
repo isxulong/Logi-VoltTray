@@ -50,6 +50,8 @@
 | v0.3.25 | 1 | 1 | 0（本版无滞后回写；E44 用户可见面描述偏差观察项随本版 RELEASES.md 同日登记） | CI 红绿史 1 次：run 40695132623（10-28，head 74fef25e，ubuntu 菜单签名测试模块位置致 CI 失败）→ 修复提交 4aa5cb79（menu_sig_tests 移至文件末，零断言改动）转绿（run 40702084478）；chore CI（run 40706407589，head 711d9120）与 release run 40707638547 均一次通过；三方 sha256 比对一致（CI 日志＝Release 资产＝本地重算，2026-10-28 登记，GitHub API 实测） |
 | v0.3.26 | 候选 17（实现分支 CI 迭代红 15 次＋质检复核退回 2 次；归并口径留维护者裁决定档） | 候选：质检复核拦截 8 条（复核一 P1×1+P2×2、批三复核二 P1×2+P2×3）＋CI 迭代红 15 次（条级明细未逐 run 统计；定档留维护者裁决） | 0（候选——本版经验回写 E45–E48＋04 §7/05/06 增补随 docs 批 PR 于发版当日开出，滞后以实际合入日定档） | 实现分支 fix/impl-fused-core CI 迭代红 15 次（10-30 18:57–22:17Z，fmt 与编译两型逐次分型处置，见 01 E48）→ 41137720468 转绿；四 PR 按编排合并（#18→#20→#19 rebase 保 G-33→#21，见 01 E45），merge commit 1ccf9b60e/c322e3d64/db9da3872/373a1dfc2 后 main 四次 CI（41162623174/41164678215/41172839430/41178783209）与 release（41178801290，含 actionlint 步）均一次通过；三方 sha256 比对一致（CI 日志＝Release 资产＝本地重算，2026-10-31 登记，GitHub API 实测）；E9 unsafe 台账实测 97≠台账 96（statsexport.rs +1），打回登记见 F.2 |
 
+**v0.3.26 行候选值收敛登记**（2026-10-31，按 G-37 观察项格式）：定档责任主体＝维护者｜复查时点＝下一版（v0.3.27）发布对账时回填定档结论｜判定标准＝打回次数 / 拦截条数归并口径与经验回写滞后天数经维护者裁决后由候选转为定值（回写滞后以本批 PR 实际合入日定档；若合入日晚于 2026-10-31，README 增补戳日期与本行同步调整）｜期限＝下一版发布窗口｜逾期处置＝逾期未定档自动升级主 AD 裁决并留痕。定档前本行候选值不进入「连续 2 版 >N」触发判定的消费——候选不是定值，消费候选等于替维护者定档。
+
 **「链路打回次数」取数规程**（C-16，2026-10-22 登记）：判定边界＝本版发布链路中任一「核验不通过 → 返工 → 再提交」记 1 次，同一问题被反复打回按次数逐次计，提示类（lint-only / advisory）不计；取数位置＝03 门禁逐条核验记录、CI run 红绿史、评审 / 找茬打回单三处对账时人工汇总；跨版归属＝打回计入「发起返工」时所在版本，返工完成跨入下一版不改记。
 
 定性注记行（不立指标、不设阈值；确有异常时一句话注记，不做常规登记）：
@@ -294,6 +296,7 @@ D8 核验｜日期：2026-10-28｜结论：通过｜异常项：无
 - verify.sh ↔ ci.yml 同步抽查（F-B8）：v0.3.26 tag 实测 ci.yml job 集＝windows / ubuntu / microbench / decisions-append-only / fuzz-smoke / redline-guard-advisory，与 v0.3.23 起形态一致、本版无变化；v0.3.23 登记的候选漂移（覆盖声明未列 fuzz-smoke 等）处置仍留维护者裁决；
 - actionlint 升必过：release run 41178801290 ci-gate/ubuntu 内 actionlint 步 success、零告警（jobs API 实测 2026-10-31）；
 - E9 unsafe 台账复核：**实测 97 ≠ 台账 96——本项判打回**。差异定位 `crates/tray/src/statsexport.rs` 10→11（随 PR #19 组 4/组 5 提交 `43fb8bd5b5` / `5d003ba93f` 新增 1 处 unsafe，`SAFETY(E9)` 注释已同批补齐：文件级 11/11、全仓 `grep -ra 'SAFETY(E9)' volttray/crates` 实测 97＝逐块勾稽成立）；台账分布表未随批同步（仍记 statsexport 10、合计 96）→ 登记差异，台账同步（statsexport 行 10→11、合计 96→97）留维护者随下代码窗口执行；
+- 05 字段计数快照复核（经验蒸馏落库对账，2026-10-31）：**实测 t02b expected 数组 38 ≠ 05 文档二/五节快照「20」——本项判打回**。差异定位：05 文档「20 字段（t02b 计数）」为 2026-10-26 时点快照（当时结构体 pub 字段与 t02b 数组均为 20），其后经 E10 波二等批次新增 18 字段演进至 38；对账实测（分支 docs/experience-distill-v0326 源文件只读）：`export_manifest.rs` `DIAG_EXPORT_TOP_FIELDS` 38 键与 `diag_export.rs` t02b expected 数组 38 项键集合严格相等。处置：本批 05 二/五节原文不动（不动清单约束），差异经 05 manifest 节「口径桥接」行如实登记；05 正文计数快照修订留维护者随下文档窗口执行；
 - REV-22 05 快照时点复核：05 声称 DIAG_CAPACITY 2048、LOG_TAIL_MAX_LINES 4096、export_diag 在 export.rs——与 v0.3.26 tag 代码实测一致（`crates/app/src/observer.rs` L21 / `crates/app/src/diag_export.rs` L29 / `crates/tray/src/export.rs` L282 起），无打回；
 - 三方 sha256 比对：release.yml 日志值＝Release 资产 volttray-tray.exe.sha256.txt＝本地独立下载重算，三者一致（`27344c1ca5fe41abedf01005dd9a3cbcf1058b9f1bf94ff88c309e56025c24a2`，资产大小 1,768,960 字节）；
 - 版本号与 chore 检查（A1/A2 惯例）：tag v0.3.26 → merge commit `373a1dfc2`（PR #21）；版本号 0.3.25→0.3.26 由 chore 提交 `41e54ec3b2`「发版检查单」携带（同含 RELEASES.md v0.3.26 条目），发版检查单惯例成立；
