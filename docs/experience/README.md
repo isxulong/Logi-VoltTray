@@ -34,7 +34,7 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | 新加入本项目的 AI / 开发者 | 先读 [04 上手指引](04-onboarding.md) 建立全貌与红线 → 再读 [01 工程经验教训](01-engineering-lessons.md) 吸收事故教训 → 动手前对照 [03 发布质量门禁](03-release-quality-gate.md) |
 | 接到用户报障的人 | 直接走 [04 §7 报障排查入口](04-onboarding.md) 的字段级决策表 |
 | 准备发布的人 | 直接照 [03 发布质量门禁](03-release-quality-gate.md) 逐条核验 |
-| 多智能体 / 多人团队协作 | [02 协作与流程方法论](02-collaboration-playbook.md)，主线与具体平台解耦、可直接迁移；E36 / E38 含平台特定操作形态，见 02 文件头 |
+| 多智能体 / 多人团队协作 | [02 协作与流程方法论](02-collaboration-playbook.md)，主线与具体平台解耦、可直接迁移；E36 / E38 / E46 含平台特定操作形态，见 02 文件头 |
 | 通用读者（不碰本仓库） | [02](02-collaboration-playbook.md) 全篇，与 [03](03-release-quality-gate.md) 的清单结构与核验思路；[01](01-engineering-lessons.md) 的 Windows/Rust/CI 教训也有跨项目价值 |
 
 ## 文件导航
