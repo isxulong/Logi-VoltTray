@@ -1,6 +1,6 @@
 # LogiVoltTray 项目经验知识库
 
-> **最近发布回写同步至 v0.3.24**｜**最近增补 2026-10-31（红蓝对抗 39 条报告第二批治理修订落库：G-01～G-11、G-13、G-16 勘误、G-19～G-27、G-29、G-31、G-32、G-37～G-39、G-06）**（每次发布回写时更新前者；任何增补——含非发布回写型修订——均更新后者，见「维护约定」）。
+> **最近发布回写同步至 v0.3.26**｜**最近增补 2026-10-31（v0.3.26 红蓝对抗修复战役经验蒸馏落库：E45–E48＋04 §7 版本分辨＋05 manifest 自描述＋06 v0.3.26 对账）**（每次发布回写时更新前者；任何增补——含非发布回写型修订——均更新后者，见「维护约定」）。
 >
 > 这个文件夹沉淀本项目（2026-09 至 2026-10 真实迭代）的工程教训与协作方法论。
 > 注：仓库于 2026-10-11 重建，此前素材以重建时合并入库为准。
@@ -12,11 +12,12 @@
 > E39–E42 为 2026-10-25 增补：CI 脚本纪律（job 级工作目录静默错位与异常可见）、复核必须独立取证、会话交接制度化（HANDOVER 自足原则）、派发即冻结——锚定同日 nightly 转红修复、双独立复核首跑与收口验收退回等事件。
 > E43 为 2026-10-26 增补：周期任务调度重锚纪律（continuous 标 done 停调度、重开不重锚）——锚定同日巡检静默失效事件。
 > E44 为 2026-10-26 增补：用户可见面一致性门禁——菜单 / 文案 / 设置项改动，验收必含 README 双语同步（锚定同日「检查更新」菜单项双语 README 零命中事件）。
+> E45–E48 为 2026-10-31 增补：v0.3.26 红蓝对抗修复战役经验蒸馏——多 PR 合并编排（E45）、oneshot 子任务生命周期与僵尸任务台账（E46）、git 对象库修复与派发竞合（E47）、CI 红分型处置（E48）；同日增补：04 §7 新旧版本数据分辨、05 manifest 自描述设计、06 v0.3.26 发布对账记录。
 > 目标：**新加入的 AI（或新参与者）仅凭本文件夹即可有效吸收过往经验**；通用读者也能带走可迁移的方法论。
 
 ## 这是什么
 
-LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 44 条经验（43 条带真实案例 + E44 门禁条款，编号 **E1–E44**，2026-10-26 实测，E15 见 [04 §8](04-onboarding.md)；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
+LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 48 条经验（47 条带真实案例 + E44 门禁条款，编号 **E1–E48**，2026-10-26 实测、2026-10-31 增补 E45–E48，E15 见 [04 §8](04-onboarding.md)；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
 
 每条经验的固定结构：
 
@@ -40,18 +41,18 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 
 | 文件 | 内容 | 覆盖经验 |
 | --- | --- | --- |
-| [01-engineering-lessons.md](01-engineering-lessons.md) | 工程经验教训：Windows 时间算术、HID 句柄失效、HID++ 协议与休眠、诊断导出设计、CI/GitHub 实战、Rust 托盘应用杂项、Windows 交叉验证、设备身份锚定、托盘性能审查、平台移植评估、本地文件有界、渲染可信性与 CI 纪律 | E1–E6、E16–E20、E27–E33、E35、E37、E39–E43 |
-| [02-collaboration-playbook.md](02-collaboration-playbook.md) | 协作与流程方法论：证据优于自述、红蓝对抗、质量门禁、卡壳判定、进度监控、断点交接、收口纪律、误指派处置、串行代码槽位、红蓝编排进阶、设计阶段红蓝、用户红线传导、决策发生链路、版本发布后经验回写机制、双角色独立质检、收口通道不能只有一条、用户可见面一致性门禁 | E7–E14、E21–E26、E34、E36、E38、E44 |
+| [01-engineering-lessons.md](01-engineering-lessons.md) | 工程经验教训：Windows 时间算术、HID 句柄失效、HID++ 协议与休眠、诊断导出设计、CI/GitHub 实战、Rust 托盘应用杂项、Windows 交叉验证、设备身份锚定、托盘性能审查、平台移植评估、本地文件有界、渲染可信性与 CI 纪律、多 PR 合并编排、git 对象库修复与派发竞合、CI 红分型 | E1–E6、E16–E20、E27–E33、E35、E37、E39–E43、E45、E47、E48 |
+| [02-collaboration-playbook.md](02-collaboration-playbook.md) | 协作与流程方法论：证据优于自述、红蓝对抗、质量门禁、卡壳判定、进度监控、断点交接、收口纪律、误指派处置、串行代码槽位、红蓝编排进阶、设计阶段红蓝、用户红线传导、决策发生链路、版本发布后经验回写机制、双角色独立质检、收口通道不能只有一条、用户可见面一致性门禁、oneshot 子任务生命周期 | E7–E14、E21–E26、E34、E36、E38、E44、E46 |
 | [03-release-quality-gate.md](03-release-quality-gate.md) | 发布质量门禁清单：逐条可核验的放行标准（含 B5 Windows 交叉验证门禁与 v0.3.15 / T6 真实拦截记录） | E5、E7、E9、E16、E17（清单化） |
 | [04-onboarding.md](04-onboarding.md) | 新 AI 上手指引：项目结构、构建、测试、发布流程、红线清单、报障排查入口、长期原则、文档导航、已知文档滞后点、术语表 | E15 + 仓库-specific 指引 |
-| [05-diag-export-field-audit.md](05-diag-export-field-audit.md) | 诊断导出字段审计（T-02b）：导出 JSON 全字段的内容来源 / 泄露面评估 / redact 规则覆盖逐字段登记，含回归测试守护 | T-02b 审计产物 |
+| [05-diag-export-field-audit.md](05-diag-export-field-audit.md) | 诊断导出字段审计（T-02b）：导出 JSON 全字段的内容来源 / 泄露面评估 / redact 规则覆盖逐字段登记，含回归测试守护；manifest 自描述设计（BvA-6 / BvA-8 / 38 字段双向钉板） | T-02b 审计产物 |
 | [06-release-reconciliation.md](06-release-reconciliation.md) | 发布对账（内部维护区）：对账机制、常设核验项（F.1）与本期对账表（F.2），自 03 F 节整体搬迁 | 内部维护（T/N/K/F-Ax 编号） |
 | [07-unsafe-ledger.md](07-unsafe-ledger.md) | unsafe 台账（红蓝对抗改进项 E9 产物）：全仓 unsafe 逐块 SAFETY 注释登记（2026-10-25 实测 96 处，变更注记见台账）、计数口径与发布对账复核规则 | 红蓝对抗整改产物 |
 | [reconciliation-clocks.yaml](reconciliation-clocks.yaml) | 时钟单源（机器可读，JSON 双合法）：T-05 / T-14 / T-09 时钟的起算日 / 到期日 / 状态 / 责任主体；06 F.1 表为人类可读镜像，两处冲突以 YAML 为准 | 内部维护（T 系列时钟） |
 
 > 对外读者说明：文中所有字母-数字形态的内部编号（T-xx / N-x / K-x / F-Ax / P0-x / P1-x / P2-x / C-xx / D1 / M13 / R1-Fx / F-Bx / A-Rx / U-x / WP-A/B/C 等实施令条款、对账机制条款与评审工作项编号）均为内部维护编号，仅服务项目内部对账与溯源，外部读者可忽略。
 
-> **编号空间**：库内并存两族 E 编号——**经验条目**（E1–E44，本索引收录，2026-10-26 实测，E15 居 [04 §8](04-onboarding.md)）与**红蓝对抗改进项**（E1–E24，2026-10-24 终审整改批的工作项编号，见各文件头部或注记）。引用一律带族名（「经验 E39」「改进项 E19」）；历史提交 message 内的裸编号属既成事实、豁免不改（commit message 不可改写）。
+> **编号空间**：库内并存两族 E 编号——**经验条目**（E1–E48，本索引收录，2026-10-26 实测、2026-10-31 增补 E45–E48，E15 居 [04 §8](04-onboarding.md)）与**红蓝对抗改进项**（E1–E24，2026-10-24 终审整改批的工作项编号，见各文件头部或注记）。引用一律带族名（「经验 E39」「改进项 E19」）；历史提交 message 内的裸编号属既成事实、豁免不改（commit message 不可改写）。
 
 **AI 上手指南**：仓库根 [AGENTS.md](../../AGENTS.md)（任何 AI 接手本仓库的第一入口：启动序列、接任务判断、范围红线、收口交付）与 [docs/ai-orchestration.md](../ai-orchestration.md)（多智能体调度附录：派单五要素、巡检清单、A/B 类替代规程）。
 
@@ -103,6 +104,10 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | E42 | [01](01-engineering-lessons.md) | 派发即冻结：任务描述更新对已启动的执行不生效 |
 | E43 | [01](01-engineering-lessons.md) | continuous 任务标 done 后重开不重锚调度，须手动 --next 重锚 |
 | E44 | [02](02-collaboration-playbook.md) | 用户可见面一致性门禁：菜单 / 图标呈现规则 / 通知文案 / 设置项改动，验收必含 README 双语同步 |
+| E45 | [01](01-engineering-lessons.md) | 多 PR 合并编排：顺序约束显式登记、冲突双侧全保留、merge commit（非 squash）保文档 sha 引用 |
+| E46 | [02](02-collaboration-playbook.md) | oneshot 子任务不会自动续跑：派发方巡检唤醒＋僵尸任务台账兜底 |
+| E47 | [01](01-engineering-lessons.md) | git loose object 损坏按 sha 重建修复；并行起草竞合弃本地、以远端为准并留痕 |
+| E48 | [01](01-engineering-lessons.md) | CI 红先分型再处置：fmt / 脚本类与编译 / 测试类不混同 |
 
 ## 双层受众约定
 

@@ -115,13 +115,23 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 
 **字段级脱敏清单指针（不预建）**：字段级脱敏清单留「待 U-2 落地后补」。U-2 已拍板选方案 C（字段级默认值：位图默认不导出＋时区归一化默认开＋型号默认保留但导出时提示「本文件含设备型号与作息信息」＋时间精度不动），并带时序闸门——字段覆盖面缺陷（N-12②，「现有匿名化开关只处理路径类字段、管不住型号和作息」）落地并经一次导出实测逐项核验前，默认值不变更。清单补建时须同时对齐 N-11（诊断 / 统计两导出面脱敏口径不一致：诊断侧设备名脱敏为「设备N」、统计侧保留真实型号）。
 
+## 诊断导出 manifest 自描述设计（2026-10-31 增补，v0.3.26 起生效）
+
+> 本节登记 manifest 自描述机制的设计要点与判读纪律（BvA-6 / BvA-8 与 38 字段双向钉板）；字段级审计主表在上方各节，本节不重复。用户侧「怎么分辨新旧版本导出」的判读指引见 [04 §7 版本分辨增补](04-onboarding.md)。
+
+- **机制位置**：`crates/app/src/export_manifest.rs`——`MANIFEST_SCHEMA_VERSION = 1`；导出 JSON 顶层 `manifest` 子对象随 v0.3.26（PR #19，merge `db9da3872`）起输出。
+- **BvA-6（只写规则名、不写可定位值）**：manifest 的 `notes` 只登记脱敏规则名与口径说明（如「不含采集时区偏移值(BvA-6)」），**不写入任何可定位具体值**（时区偏移量、用户名、设备名原文）——自描述本身不能成为新的泄露面。
+- **BvA-8（下游按 schema_version 判读）**：任何下游消费方按 `manifest.schema_version` 值分派解析逻辑；**禁止按字段存在性硬解析**（「有某键就当某版本」）——门禁登记见 [03 D12](03-release-quality-gate.md)。
+- **38 字段双向钉板**：`DIAG_EXPORT_TOP_FIELDS`（38 个顶层字段，2026-10-31 按源文件实测计数）与序列化字段集由同文件内的双向相等测试钉板防漂移——任一侧增删字段而另一侧未同步，测试即红；逐字段口径（per-run 计数器等）以该文件逐字段注释为准。
+- **溯源**：`crates/app/src/export_manifest.rs`（`MANIFEST_SCHEMA_VERSION` / `DIAG_EXPORT_TOP_FIELDS` / `notes` / 双向钉板测试）；PR #19（merge commit `db9da3872`）；[03 D12](03-release-quality-gate.md)。
+
 ## 编号族与裸编号歧义映射表（G-13，2026-10-31）
 
 本仓 E 编号存在**两族**，裸编号引用有同形歧义风险，引用时须带族名：
 
 | 族名 | 范围 | 载体与登记位 |
 | --- | --- | --- |
-| 经验条目 E1–E44 | 01 / 02 两文件的经验条目（如 01 E17「设备身份必须锚定物理设备」、02 E22「红蓝对抗编排进阶」） | [01-engineering-lessons.md](01-engineering-lessons.md)、[02-collaboration-playbook.md](02-collaboration-playbook.md)；库索引映射表在本目录 README |
+| 经验条目 E1–E48 | 01 / 02 两文件的经验条目（如 01 E17「设备身份必须锚定物理设备」、02 E22「红蓝对抗编排进阶」） | [01-engineering-lessons.md](01-engineering-lessons.md)、[02-collaboration-playbook.md](02-collaboration-playbook.md)；库索引映射表在本目录 README |
 | 红蓝对抗改进项 E1–E24 | 2026-10-24 首轮红蓝对抗终审的改进项编号（如改进项 E9＝unsafe 台账复核、改进项 E19＝时钟 YAML 单源、改进项 E22＝真机休眠反馈三项修复） | 各文档内带「改进项 E」前缀的引用与 03 / 06 / 07 登记行；RELEASES.md 条目标注 |
 
 裸编号歧义登记（已知清单，逐条消歧）：
