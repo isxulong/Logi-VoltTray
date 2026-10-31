@@ -134,7 +134,7 @@ BTHHID 路径实证（`wakechannel.rs` `bluetooth_path_systematically_misses` �
 
 | 族名 | 范围 | 载体与登记位 |
 | --- | --- | --- |
-| 经验条目 E1–E48 | 01 / 02 两文件的经验条目（如 01 E17「设备身份必须锚定物理设备」、02 E22「红蓝对抗编排进阶」） | [01-engineering-lessons.md](01-engineering-lessons.md)、[02-collaboration-playbook.md](02-collaboration-playbook.md)；库索引映射表在本目录 README |
+| 经验条目 E1–E49 | 01 / 02 两文件的经验条目（如 01 E17「设备身份必须锚定物理设备」、02 E22「红蓝对抗编排进阶」） | [01-engineering-lessons.md](01-engineering-lessons.md)、[02-collaboration-playbook.md](02-collaboration-playbook.md)；库索引映射表在本目录 README |
 | 红蓝对抗改进项 E1–E24 | 2026-10-24 首轮红蓝对抗终审的改进项编号（如改进项 E9＝unsafe 台账复核、改进项 E19＝时钟 YAML 单源、改进项 E22＝真机休眠反馈三项修复） | 各文档内带「改进项 E」前缀的引用与 03 / 06 / 07 登记行；RELEASES.md 条目标注 |
 
 裸编号歧义登记（已知清单，逐条消歧）：
