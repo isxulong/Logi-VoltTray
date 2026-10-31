@@ -118,6 +118,11 @@
   快照时点」行声称的容量常数与代码位置快照与当版代码仍一致（DIAG_CAPACITY /
   LOG_TAIL_MAX_LINES 常量值、export_diag 组装位置等，以常量符号引用实测为准、行号会
   漂移）；快照漂移而未同批更新 05 头戳行的，打回。
+- D-99 行号精确化登记（复核一 P3-1，2026-10-31 批三修正登记）：decisions.md
+  D-99 所述 main.rs 调用点「约 1924–1935 行」按 HEAD（32e8367）实测精确化为
+  **1913–1937 行**（`record_timeout == EnteredSleep` 判断起于 1921 行、
+  `stats_store.note_sleep_enter` 调用落于 1935–1939 行）；decisions.md 为
+  append-only 不回改，行号口径以本登记为准。
 - E18 minisign 签名登记（红蓝对抗终审 P2b 批，2026-10-24 登记）：
   release.yml 已加签名步——未配置 MINISIGN_SECRET_KEY 仓库密钥时跳过
   签名照常发布（fail-open，与 T-15 未签名披露现状兼容）；配置后自动
