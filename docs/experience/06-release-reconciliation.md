@@ -337,7 +337,7 @@ D8 核验｜日期：2026-10-31｜结论：通过｜异常项：无
   5. **D11 判负**（详见上条 D11 行）；
   6. **本版 CI 红绿史**：run 44786778488（head cc6f9f4d）与 44786823091（head 503c6f2f）ubuntu/clippy 红（`unresolved import crate::imp`（rustc unresolved-import 错误码），纯逻辑函数 `next_pin` 误置于 `#[cfg(windows)] mod imp` 内）→ 移置 crate root 修复 → run 44790537633（head 4a4eb46）六 job 全绿；另因 E9 台账不一致撤 tag v0.3.27 + `cancel` release run 44789300422（202）后重建提交重打 tag——三次均按 F.1 v0.3.27 行逐次计；
 
-D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复待下一 nightly 验证
+D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复并经 2026-11-20 手动 dispatch nightly（run 44797266154，head 7555d70）实证 drift-check 步 success 后关闭；issue #24 已关闭（T-05 结案）
 
 
 对账表（状态口径：2026-10-20 收官批（第 4 批）实施完成时点，第 1/2/3/4 批行已随各自批次实施刷新，实施令 19 节全部收口；「取证动作/复核日期」登记位
