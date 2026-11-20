@@ -41,6 +41,40 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.27
+
+用户报告的三处「用起来别扭」的结构性修复：离线很久的设备删不掉、没手动钉选时托盘图标偶尔跳到另一台设备、导出的 HTML 报告太复杂且部分图连纵坐标都没有。三项都是设计缺口而不是偶发错乱，因此修的是入口与算法本身。零配置迁移（新增一个可选键，缺省即启用合理的自动清理）。统计与导出只加不删，旧字段与旧表格行原样保留。
+
+### 用户可见变化
+
+1. **离线设备可以删掉了**：来自 `last_known.json` 的「离线最后已知」设备，右键菜单里那一行不再是一按就钉的扁平项，而是展开一个子菜单——里面既能「显示此设备电量（钉选）」，也有「忘记此设备（重启后不再出现）…」。确认后立即从菜单与本机记录中移除并落盘（不会重启又冒出来）。另外新增自动清理：超过 `forget_offline_days`（默认 30 天）没有任何新读数的离线条目会被自动遗忘；设为 `0` 可完全关闭自动遗忘、只保留手动「忘记此设备」。
+2. **展示哪台不再乱跳**：没有手动钉选时，托盘图标不再每次刷新都重选「最低电量那台」——它会保持当前设备，另一台要低出 3 个百分点才接管，两台电量此消彼长时不再来回闪。当前展示的设备开始充电、而另一台在放电时，立刻让位给放电的那台（充电中的设备电量在涨，展示它没意义）。**另外修掉了「误点即永久钉住」**：再点一次已钉选的设备即取消钉选、回到自动选择；子菜单里的钉选项文案也会随之变成「取消钉选（回到自动选择）」。
+3. **HTML 报告默认只讲三件事**：导出的报告打开即「简洁视图」——每台设备一段结论（现在剩多少电 / 今天用了多少 / 日均大概多少）+ 一条 0–100 的当前电量横条 + 近 14 天日耗电柱，柱图纵轴自 0 起、带刻度值与数值标签。想看电量曲线、24h 时间轴、分段明细与口径说明，点页首「完整视图」一键展开——**原有内容一样没删，只是默认收起**。
+4. **柱图终于有纵轴了**（用户原话「有些甚至纵坐标都没有」）：日耗电柱补上纵轴刻度（0 / 中值 / 峰值三条网格线 + 刻度值 + 单位「%/日」+ 右下角「纵轴：每日耗电 %（0 起）」），柱数不超过 31 根时逐柱标数值、更多时只标峰值柱；24h 时间轴补上 0/6/12/18/24 小时刻度，一眼看出「这段运行是凌晨还是傍晚」。
+
+### 工程与质量（开发者向摘要）
+
+- **B-1（遗忘链路）**：`Config` 新增 `forget_offline_days`（默认 30、钳 0..=3650、`0` 关闭）；`AppCore::forget_device` / `stale_virtual_keys` 新增；`LastKnownStore` 新增 `purge_dirty` 与 `prune_older_than`，并修正「`remove()` 只删内存不置脏、flush 不重写文件」的假删除缺口——`purge_dirty` 同时短路 10s 全局节流（用户显式动作不等节流）。菜单虚拟行改 `Submenu`，确认框 `MB_DEFBUTTON2` 默认焦点在「否」；设备行改子菜单不计入菜单固定项 9 项额度。
+- **B-2（展示位）**：`default_display_index` 改 `&mut self` 并引入 `auto_shown` 锚点 + `AUTO_SWITCH_MARGIN = 3` 滞回；充电态优先让位；`remove_device`/`forget_device` 清锚点；`auto_shown` 不持久化（重启取最低电量是正确初值）。钉选改 `next_pin(current, clicked)` 支持二次点击取消。
+- **B-3（报告）**：`#viewctl`/`#simple`/`#full` 三处模板结构；柱图绘制收敛到单函数 `drawBars`（`niceCeil` 好读上界 + 三档网格 + 数值标签 + 单位）；24h 时间轴补小时刻度。全部 `createElementNS`，零外部请求红线未放宽。
+- **回归**：新增 `b1_*` 五条（core 三条、persist 两条）、`b2_*` 三条（core 两条、tray 一条）、`b3_*` 四条（模板结构、柱图纵轴、时间轴刻度、简洁视图零外链）。`cargo test --workspace --locked` 全绿（app 349 + tray 86 及各 crate）；`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo fmt --all -- --check` 均绿。
+
+### 升级注意事项
+
+- 新增可选配置键 `forget_offline_days`（默认 30 天）。旧配置缺该键按 30 天处理，无需手改；想永久保留离线记录就写 `0`。该键本版只经 `config.toml` 暴露，设置窗口暂无对应控件。
+- **默认展示行为有变化**（D5 声明）：未钉选时的自动选择从「每次刷新取最低电量」改为「保持当前设备，除非另一台低出 3 个百分点」。如果你更希望它一直显示最低那台，手动钉选即可；想回到自动，再点一次已钉选的设备。
+- `last_known.json` 的清理逻辑新增两条路径（手动忘记、超期自动遗忘），文件格式与字段零变化，可与旧版互读。
+- HTML 报告默认打开「简洁视图」，原有完整内容需点「完整视图」；如你的脚本按 DOM 序抓取说明性文字，请改按 `#full` 容器定位。
+
+### 验证口径与未验证项
+
+- 全部改动经红蓝对抗（B-1 / B-2 / B-3 各一轮：红队找缺口、蓝队逐条反驳或修复）与 `cargo fmt --check` / `clippy -D warnings` / `cargo test --workspace --locked` 三门禁本地全绿。
+- 未验证（如实分级）：① 本地构建与测试在 Windows MSVC 工具链下完成，但**托盘菜单子菜单与确认框的实际观感（子菜单展开延迟、确认框焦点、缩放下对齐）未在真机双设备上人工点验**——代码层以 `b1_*`/`b2_*` 单测与菜单结构断言兜底，观感类问题留待用户回馈；② 「超期自动遗忘」的边界（跨年、时钟回拨、系统时间被手动改成未来）只用 `saturating_sub` 的单测覆盖，未做长周期实跑；③ HTML 简洁/完整视图在两代 Edge/Chrome 内核与 125%/150% 缩放下的排版未逐档截图核验。
+
+### English Summary
+
+v0.3.27 fixes the three usability defects reported by users — stale offline devices that could not be removed, a tray icon that occasionally switched to another device's battery, and an HTML report that was too busy with some charts lacking a y-axis. All three were design gaps rather than random glitches. Offline "last known" rows in the menu are now submenus: pin the device, or pick "Forget this device (won't come back after restart)…" and confirm to drop it from both the menu and `last_known.json`, flushed immediately. Entries with no fresh reading for `forget_offline_days` (default 30, `0` disables) are purged automatically. With nothing pinned, the tray no longer re-picks the lowest battery on every refresh: it keeps the current device until a challenger is at least 3 percentage points lower, and yields immediately if the shown device starts charging while another is discharging. Clicking a pinned device again unpins it — previously a stray click could only be undone by editing state. The exported HTML now opens in a "simple" view that answers three questions per device (current charge, today's drain, daily average range) with a current-battery bar and a 14-day daily-drain chart, and the daily bars gained a real y-axis (0-based, three gridlines with tick labels, unit "%/day", value labels for up to 31 bars or just the peak); the 24-hour timeline gained 0/6/12/18/24 hour ticks. The full report — battery curves, timelines, segment tables, glossary — is unchanged and one click away under "full view". Upgrade: one new optional key `forget_offline_days` (default 30); the automatic-selection default changed as described, pin a device if you prefer the old "always lowest" behavior.
+
 ## v0.3.26
 
 红蓝对抗波二落地批：唤醒归因与省电保护修复（PR #19 核心实现六组）＋治理文档两批（PR #18 批一、PR #20 批二）＋导出脱敏加强。升级零配置迁移：新增 5 个实验开关各有默认值（四个默认开、一个默认关），旧配置文件无需改动；统计与诊断导出只加字段、不改旧字段。
