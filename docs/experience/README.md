@@ -47,7 +47,7 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | [04-onboarding.md](04-onboarding.md) | 新 AI 上手指引：项目结构、构建、测试、发布流程、红线清单、报障排查入口、长期原则、文档导航、已知文档滞后点、术语表 | E15 + 仓库-specific 指引 |
 | [05-diag-export-field-audit.md](05-diag-export-field-audit.md) | 诊断导出字段审计（T-02b）：导出 JSON 全字段的内容来源 / 泄露面评估 / redact 规则覆盖逐字段登记，含回归测试守护；manifest 自描述设计（BvA-6 / BvA-8 / 38 字段双向钉板） | T-02b 审计产物 |
 | [06-release-reconciliation.md](06-release-reconciliation.md) | 发布对账（内部维护区）：对账机制、常设核验项（F.1）与本期对账表（F.2），自 03 F 节整体搬迁 | 内部维护（T/N/K/F-Ax 编号） |
-| [07-unsafe-ledger.md](07-unsafe-ledger.md) | unsafe 台账（红蓝对抗改进项 E9 产物）：全仓 unsafe 逐块 SAFETY 注释登记（2026-10-25 实测 96 处，变更注记见台账）、计数口径与发布对账复核规则 | 红蓝对抗整改产物 |
+| [07-unsafe-ledger.md](07-unsafe-ledger.md) | unsafe 台账（红蓝对抗改进项 E9 产物）：全仓 unsafe 逐块 SAFETY 注释登记（2026-11-21 实测 98 处，变更注记见台账）、计数口径与发布对账复核规则 | 红蓝对抗整改产物 |
 | [reconciliation-clocks.yaml](reconciliation-clocks.yaml) | 时钟单源（机器可读，JSON 双合法）：T-05 / T-14 / T-09 时钟的起算日 / 到期日 / 状态 / 责任主体；06 F.1 表为人类可读镜像，两处冲突以 YAML 为准 | 内部维护（T 系列时钟） |
 
 > 对外读者说明：文中所有字母-数字形态的内部编号（T-xx / N-x / K-x / F-Ax / P0-x / P1-x / P2-x / C-xx / D1 / M13 / R1-Fx / F-Bx / A-Rx / U-x / WP-A/B/C 等实施令条款、对账机制条款与评审工作项编号）均为内部维护编号，仅服务项目内部对账与溯源，外部读者可忽略。

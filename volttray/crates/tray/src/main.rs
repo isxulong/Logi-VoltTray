@@ -133,6 +133,21 @@ fn menu_content_sig(
     s
 }
 
+/// B-2（v0.3.27）：设备行点击的钉选语义。点未钉选的设备 → 钉住它；点已钉选
+/// 的同一台 → 取消钉选、回到「自动挑最低电量」。菜单重建时 `checked` 与文案
+/// 都由 `pinned` 推导，所以这里只需翻转状态。
+///
+/// 置于 crate root（无 cfg 门控）：纯 Option 运算，Linux 侧单测可直接覆盖
+/// 「再点一次取消钉选」这条此前完全缺失的语义（照 menu_content_sig 先例）。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn next_pin(current: Option<&str>, clicked: &str) -> Option<String> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked.to_string())
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::collections::HashSet;
@@ -229,6 +244,10 @@ mod imp {
         /// WP-B：耗电统计导出请求（GUI → IO 线程；渲染/写盘在 IO 线程
         /// 后台执行、不阻塞 UI，v3 P2-③ 口径；只读本机文件，零设备查询）。
         ExportStats(crate::statsexport::StatsExportRequest),
+        /// B-1（v0.3.27）：「忘记此设备」——GUI 侧已过 MB_YESNO 确认，
+        /// IO 线程负责「删内存条目 + 删持久化记录 + 立即落盘」三件事
+        ///（落盘必须走 store，否则重启 seed_virtual 又把它播种回来）。
+        ForgetDevice(String),
         Shutdown,
     }
 
@@ -1231,6 +1250,11 @@ mod imp {
                 // 唤醒裁决后手动刷新被丢弃的竞态。
                 Ok(IoCmd::RefreshNow) => {
                     reconnect.request_refresh();
+                }
+                // B-1（v0.3.27）：忘记离线设备——GUI 侧已过 MB_YESNO 二次
+                // 确认，这里做内存 + 持久化双删并立即落盘。
+                Ok(IoCmd::ForgetDevice(dev_id)) => {
+                    apply_forget_device(&core, &mut store, &dev_id);
                 }
                 // WakeSignal：维持旧语义（轮次即刻开始，丢弃无害）。
                 _ => {}
@@ -2354,6 +2378,34 @@ mod imp {
                 // WP-B（v3 R5 I-01 同口径）：冲突键同步停写统计事件。
                 stats_store.set_conflicted(c.conflicted_keys().clone());
             }
+            // B-1（v0.3.27）：超期离线设备自动遗忘。判据只看虚拟条目自己的
+            // `persisted_last_seen`（最后一次**成功**读数时刻），不看本轮是否
+            // 探测失败——探测失败率高的设备不该因为环境差而被抹掉记录。
+            // 0 = 关闭自动遗忘（用户显式选择「永不清理」）。
+            let forget_days = core
+                .lock()
+                .map(|c| c.config().forget_offline_days)
+                .unwrap_or(0);
+            if forget_days > 0 {
+                let max_age_secs = forget_days.saturating_mul(86_400);
+                let wall_now = wall_secs();
+                let stale = core
+                    .lock()
+                    .map(|c| c.stale_virtual_keys(wall_now, max_age_secs))
+                    .unwrap_or_default();
+                if !stale.is_empty() {
+                    let pruned = store.prune_older_than(wall_now, max_age_secs);
+                    if let Ok(mut c) = core.lock() {
+                        c.remove_virtual_by_keys(&stale);
+                    }
+                    bootlog::note(&format!(
+                        "forget device: reason=expired days={forget_days} \
+                         keys=[{}] store_removed={}",
+                        stale.join(", "),
+                        pruned.len()
+                    ));
+                }
+            }
             match store.flush_if_due(Instant::now()) {
                 Ok(out) => {
                     if !out.evicted.is_empty() {
@@ -2759,6 +2811,10 @@ mod imp {
                     Ok(IoCmd::ExportStats(req)) => {
                         let msg = run_stats_export(&mut stats_store, &req);
                         gui.send(GuiMsg::StatsExportDone(msg));
+                    }
+                    // B-1（v0.3.27）：忘记离线设备（与循环顶同口径）。
+                    Ok(IoCmd::ForgetDevice(dev_id)) => {
+                        apply_forget_device(&core, &mut store, &dev_id);
                     }
                     Ok(IoCmd::Shutdown) => {
                         // 小修批第 3 项：会话收尾冲出两个唤醒日志采样器的
@@ -3803,8 +3859,37 @@ mod imp {
                 }
                 // SAFETY(E9): PostQuitMessage 仅向本线程消息队列投递退出码，无指针参数。
                 unsafe { PostQuitMessage(0) };
+            } else if let Some((_, dev_id)) =
+                ids.device_forget_rows.iter().find(|(mid, _)| *mid == e.id)
+            {
+                // B-1（v0.3.27）：「忘记此设备」——二次确认后才动手。确认框
+                // 是本项唯一的误触保护：删掉的是用户唯一还能看到这条离线
+                // 设备电量的地方，误删之后除手工编辑 last_known.json 无处恢复。
+                let name = state
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.devices.iter().find(|d| &d.id == dev_id))
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| dev_id.clone());
+                if confirm_forget_device(&name) {
+                    // 立即从本地快照摘掉，避免「点了没反应」——IO 线程下一轮
+                    // 快照可能还在 30 分钟之后。摘完重算默认展示位，图标不会
+                    // 悬空在没有对应设备的旧下标上。
+                    if let Some(snap) = state.snapshot.as_mut() {
+                        drop_device_from_snapshot(snap, dev_id);
+                    }
+                    if state.pinned.as_deref() == Some(dev_id.as_str()) {
+                        state.pinned = None;
+                    }
+                    // 持久化删除交给 IO 线程（store 归它独占，GUI 侧不持锁）。
+                    let _ = cmd_tx.send(IoCmd::ForgetDevice(dev_id.clone()));
+                    bootlog::note(&format!("menu action: forget device requested id={dev_id}"));
+                    refresh_ui(tray, state, cache, ids, enum_snap, core);
+                }
             } else if let Some((_, dev_id)) = ids.device_rows.iter().find(|(mid, _)| *mid == e.id) {
-                state.pinned = Some(dev_id.clone());
+                // B-2（v0.3.27）：再点一次已钉选的设备即取消钉选、回到自动
+                // 选择——在此之前一旦误点就只能卸载重装才能回到自动。
+                state.pinned = crate::next_pin(state.pinned.as_deref(), dev_id);
                 refresh_ui(tray, state, cache, ids, enum_snap, core);
             }
         }
@@ -3826,6 +3911,92 @@ mod imp {
 
     fn s_snapshot_device(state: &GuiState, idx: usize) -> Option<&volttray_app::DeviceSnapshot> {
         state.snapshot.as_ref().and_then(|s| s.devices.get(idx))
+    }
+
+    /// B-1（v0.3.27）：执行一次「忘记设备」——内存条目与持久化记录一起删。
+    ///
+    /// 两处删除必须同时发生：只删内存则重启后 `seed_virtual` 从
+    /// last_known.json 把条目原样播种回来（用户视角＝「删了又回来」）；只删
+    /// 持久化则当前运行期菜单里那行还赖着不走。删完立刻强制落盘一遍——
+    /// 遗忘是低频的用户显式动作，值得一次 fsync 而不是等 30s/60s 节流窗口
+    /// （那窗口里退出或崩溃，删除就丢了）。
+    fn apply_forget_device(core: &Arc<Mutex<AppCore>>, store: &mut LastKnownStore, dev_id: &str) {
+        let key = match core.lock() {
+            Ok(mut c) => c.forget_device(dev_id),
+            Err(_) => {
+                bootlog::note(&format!(
+                    "forget device: core lock poisoned; id={dev_id} skipped"
+                ));
+                None
+            }
+        };
+        // 兜底：条目已不在内存里（例如同一 id 被连点两次），但虚拟条目 id 本身
+        // 就编码了持久化键（virtual#<physical_key>），据此仍能把记录删干净。
+        let key = key.or_else(|| dev_id.strip_prefix("virtual#").map(|s| s.to_string()));
+        let Some(key) = key else {
+            bootlog::note(&format!("forget device: id={dev_id} has no persistent key"));
+            return;
+        };
+        let removed = store.remove(std::slice::from_ref(&key));
+        match store.shutdown_flush(Instant::now()) {
+            Ok(out) if out.wrote => bootlog::note(&format!(
+                "forget device: key={key} removed_from_store={} flushed",
+                removed.len()
+            )),
+            Ok(_) => bootlog::note(&format!(
+                "forget device: key={key} removed_from_store={} nothing_to_flush",
+                removed.len()
+            )),
+            Err(e) => bootlog::note(&format!("forget device: key={key} flush failed: {e}")),
+        }
+    }
+
+    /// B-1（v0.3.27）：忘记离线设备的二次确认。
+    ///
+    /// 只删本机保存的最后已知电量，不动设备、不动驱动、不动统计库——所以文案
+    /// 必须写清楚「删的是什么」，避免用户以为是卸载。默认按钮显式压到「否」
+    /// （MB_DEFBUTTON2）：误触回车不该等于删掉一个设备的最后一条记录。
+    fn confirm_forget_device(name: &str) -> bool {
+        let title = wide("LogiVoltTray 忘记离线设备");
+        let body = wide(&format!(
+            "确定忘记「{name}」吗？\n\n只会删除本机保存的最后已知电量记录，\
+             不会卸载驱动、不影响设备本身。\n该设备下次连上时会重新记录。"
+        ));
+        // SAFETY(E9): body/title 为 NUL 结尾宽字符缓冲，MessageBoxW 同步调用期间存活；其余参数为值类型。
+        let ret = unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        };
+        ret.0 == IDYES.0
+    }
+
+    /// B-1（v0.3.27）：把一台设备从当前快照副本里摘掉，并修正默认展示下标。
+    ///
+    /// GUI 侧只动自己那份快照：store 归 IO 线程独占，持久化删除由
+    /// `IoCmd::ForgetDevice` 完成。下标修正规则——
+    /// 删的是后面那台就整体前移一位；删的正好是默认展示位就顶到同位置上
+    /// （末尾则退一格），保持图标有对象可画。这是临时视图，下一份快照到达时
+    /// 会被 AppCore 的 `default_display_index` 重新算过。
+    fn drop_device_from_snapshot(snap: &mut Snapshot, id: &str) {
+        let Some(pos) = snap.devices.iter().position(|d| d.id == id) else {
+            return;
+        };
+        snap.devices.remove(pos);
+        snap.default_device = match snap.default_device {
+            Some(i) if i > pos => Some(i - 1),
+            Some(i) if i == pos => {
+                if snap.devices.is_empty() {
+                    None
+                } else {
+                    Some(pos.min(snap.devices.len() - 1))
+                }
+            }
+            other => other,
+        };
     }
 
     /// 当前展示的设备（钉选优先）。
@@ -4317,5 +4488,16 @@ mod menu_sig_tests {
             false,
         );
         assert_ne!(a, b);
+    }
+
+    // ---------- v0.3.27（B-2）：钉选可解 ----------
+
+    /// 点未钉选的设备 → 钉住；点已钉选的同一台 → 取消钉选。
+    #[test]
+    fn b2_pin_toggles_off_on_second_click() {
+        assert_eq!(next_pin(None, "m1"), Some("m1".to_string()));
+        assert_eq!(next_pin(Some("m1"), "m1"), None);
+        // 点另一台 = 改钉到那一台（不是取消，也不是两台同时钉）。
+        assert_eq!(next_pin(Some("m1"), "m2"), Some("m2".to_string()));
     }
 }

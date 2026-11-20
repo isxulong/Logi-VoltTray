@@ -1706,6 +1706,9 @@ th{position:sticky;top:0;background:Canvas}
 .dayrow{display:flex;align-items:center;gap:8px;margin:2px 0;font-size:12px;flex-wrap:wrap}
 .dayrow .dl{width:64px;color:#777;flex:none}
 .dayrow .dd{color:#777;min-width:230px}
+.viewctl{margin:14px 0 2px}
+#simple .card{min-width:300px}
+#simple .card + .card{margin-top:0}
 footer{margin-top:28px;border-top:1px solid #ccc5;padding-top:10px;font-size:12.5px;color:#777}
 footer table{font-size:12px}
 </style>
@@ -1717,11 +1720,19 @@ footer table{font-size:12px}
 <p class="sparse">__SPARSE_NOTE__</p>
 </header>
 
+<div class="controls viewctl" id="viewctl" role="group" aria-label="视图切换">
+<button data-view="simple" class="on">简洁视图（默认）</button><button data-view="full">完整视图（全部图表与口径）</button>
+</div>
+<p class="hint" id="viewhint">简洁视图只回答三件事：现在剩多少电、今天用了多少、日均大概多少。想看电量曲线、分日时间轴、分段明细与口径说明，点「完整视图」。</p>
+
+<section id="simple"></section>
+
+<div id="full" style="display:none">
 <h2>首屏答案区</h2>
 <section class="cards" id="kpis"></section>
 
 <h2>分日视图（日界对齐：日耗电柱 + 24h 时间轴）</h2>
-<p class="hint">日耗电 = 当日放电快照首末差（跨日段在日界处切分、不摊入；charging-fast 事件还原段剔除）。时间轴实色段为 app 运行时段（监控覆盖，app 进程口径），绿色为充电段，灰罩为未知段。质量标签：设备上报粘滞（当日斜率可能低估）/ 样本不足（read&lt;3 或覆盖&lt;2h，只给首末差）。</p>
+<p class="hint">纵轴：每日耗电 %（<b>纵轴刻度自 0 起，柱高按当日最大值等比缩放</b>）。日耗电 = 当日放电快照首末差（跨日段在日界处切分、不摊入；charging-fast 事件还原段剔除）。时间轴实色段为 app 运行时段（监控覆盖，app 进程口径），绿色为充电段，灰罩为未知段。质量标签：设备上报粘滞（当日斜率可能低估）/ 样本不足（read&lt;3 或覆盖&lt;2h，只给首末差）。</p>
 <div id="daily"></div>
 
 <h2>静止 vs 活动</h2>
@@ -1767,6 +1778,7 @@ footer table{font-size:12px}
 <p>已移除：跨日段线性摊入柱图（日耗电口径已统一为当日首末差，避免同页双口径）；近 7 天耗速率摘要卡（分母语义错误：app 运行段由 run_start/run_stop 事件锚定）。</p>
 <p>单文件离线报告：零外部依赖，断网可开。</p>
 </footer>
+</div>
 
 <script id="volttray-data" type="application/json">__VOLTTRAY_DATA__</script>
 <script>
@@ -1852,7 +1864,7 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
       bars=cards.map(function(c){return {drain:c.drain_pct,label:c.date.slice(5),sticky:c.sticky,sparse:c.sparse};});
     }
     var sid="db"+di;
-    html+='<div class="scroll"><svg id="'+sid+'" width="960" height="150" role="img" aria-label="每日耗电柱"></svg></div>';
+    html+='<div class="scroll"><svg id="'+sid+'" width="960" height="160" role="img" aria-label="每日耗电柱（纵轴：每日耗电 %，0 起）"></svg></div>';
     jobs.push({type:"bars",id:sid,bars:bars});
     if(!weekly){
       cards.forEach(function(c,ci){
@@ -1866,7 +1878,7 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
         if(c.slope_pct_per_hour!=null)det+=" · 斜率 "+c.slope_pct_per_hour+"%/h";
         var tid="tl"+di+"_"+ci;
         html+='<div class="dayrow"><span class="dl">'+c.date.slice(5)+'</span>'
-          +'<svg id="'+tid+'" width="480" height="14" role="img" aria-label="当日时间轴"></svg>'
+          +'<svg id="'+tid+'" width="480" height="26" role="img" aria-label="当日时间轴（0/6/12/18/24 时）"></svg>'
           +'<span class="dd">'+esc(det)+'</span><span>'+tags+'</span></div>';
         jobs.push({type:"tl",id:tid,card:c,runs:runs});
       });
@@ -1877,20 +1889,7 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
   jobs.forEach(function(j){
     var svg=document.getElementById(j.id);if(!svg)return;
     if(j.type==="bars"){
-      var W=960,H=150,PL=30,PB=22,PT=8;var maxV=0.5;
-      j.bars.forEach(function(b){if(b.drain>maxV)maxV=b.drain;});
-      var n=j.bars.length;var bw=Math.max(6,Math.min(40,(W-PL-10)/n-4));
-      j.bars.forEach(function(b,i){
-        var x=PL+((W-PL-10)/n)*i+2;var h=b.drain/maxV*(H-PT-PB);
-        var r=el("rect",{x:x,y:H-PB-h,width:bw,height:Math.max(0,h),fill:"#2b6cb0",
-          "fill-opacity":b.sparse?0.35:(b.sticky?0.55:0.9)},svg);
-        var t=el("title",{},r);
-        t.textContent=b.sticky?"设备上报粘滞：当日斜率可能低估":(b.sparse?"样本不足：只给首末差":b.label+" 耗电 "+b.drain+"%");
-        if(n<=62||i%Math.ceil(n/62)===0){
-          var tx=el("text",{x:x+bw/2-12,y:H-PB+12,"font-size":9,fill:"#888"},svg);tx.textContent=b.label;
-        }
-      });
-      el("line",{x1:PL,y1:H-PB,x2:W-8,y2:H-PB,stroke:"#888","stroke-width":0.5},svg);
+      drawBars(j.id,j.bars);
     }else{
       var c=j.card;var d0=Date.parse(c.date+"T00:00:00Z")/1000-offSecs();
       function X(t){return (t-d0)/86400*480;}
@@ -1903,8 +1902,157 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
       spans(c.unknown_spans,"#a0aec0",0.5);
       spans(c.charging_spans,"#2f855a",0.85);
       spans(j.runs,"#2b6cb0",0.85);
+      // v0.3.27（B-3）：24h 时间轴补 0/6/12/18/24 小时刻度——此前只有一条
+      // 无色条，看不出「这段运行是凌晨还是傍晚」。
+      [0,6,12,18,24].forEach(function(h){
+        var hx=h*20;
+        el("line",{x1:hx,y1:14,x2:hx,y2:17,stroke:"#999","stroke-width":0.5},svg);
+        var hl=el("text",{x:h===24?hx-9:hx,y:24,"font-size":9,fill:"#888",
+          "text-anchor":h===0?"start":(h===24?"end":"middle")},svg);
+        hl.textContent=String(h);
+      });
     }
   });
+})();
+
+// v0.3.27（B-3）：日耗电柱统一绘制入口——纵轴自 0 起、3 条网格线、
+// 刻度值与柱数值标签。此前只有一条基线，用户原话「有些甚至纵坐标都没有」。
+// 全部用 createElementNS 的 rect/text/line，零外部请求（守门测试断言）。
+var BAR_VIEW_W=960,BAR_VIEW_H=160,BAR_PL=42,BAR_PR=10,BAR_PT=10,BAR_PB=30;
+function drawBars(id,bars){
+  var svg=document.getElementById(id);if(!svg)return;
+  var PL=BAR_PL,PR=BAR_PR,PT=BAR_PT,PB=BAR_PB,W=BAR_VIEW_W,H=BAR_VIEW_H;
+  var maxV=0;
+  bars.forEach(function(b){if(b.drain>maxV)maxV=b.drain;});
+  // 上界取「峰值向上取整到好读刻度」，避免 0.5 兜底把小柱子压成一条线。
+  var nice=niceCeil(maxV||1);
+  var plotH=H-PT-PB,n=bars.length||1;
+  // 纵轴：0 / 1/2 / 1 三档 + 网格线（0 线加粗实线，其余虚线）。
+  [0,0.5,1].forEach(function(f){
+    var v=nice*f,y=PT+plotH-(v/nice)*plotH;
+    el("line",{x1:PL,y1:y,x2:W-PR,y2:y,stroke:"#888",
+      "stroke-width":f===0?0.8:0.4,"stroke-dasharray":f===0?"none":"3 3",
+      "stroke-opacity":f===0?0.9:0.45},svg);
+    var t=el("text",{x:PL-6,y:y+3.5,"font-size":10,fill:"#666","text-anchor":"end"},svg);
+    t.textContent=fmtPct(v);
+  });
+  var unit=el("text",{x:PL-6,y:PT-1,"font-size":9,fill:"#888","text-anchor":"end"},svg);
+  unit.textContent="%/日";
+  var bw=Math.max(6,Math.min(40,(W-PL-PR)/n-4));
+  var maxIdx=0;
+  bars.forEach(function(b,i){if(b.drain>bars[maxIdx].drain)maxIdx=i;});
+  bars.forEach(function(b,i){
+    var x=PL+((W-PL-PR)/n)*i+2;var h=b.drain/nice*plotH;
+    var r=el("rect",{x:x,y:H-PB-h,width:bw,height:Math.max(0,h),fill:"#2b6cb0",
+      "fill-opacity":b.sparse?0.35:(b.sticky?0.55:0.9)},svg);
+    var t=el("title",{},r);
+    t.textContent=b.sticky?"设备上报粘滞：当日斜率可能低估":(b.sparse?"样本不足：只给首末差":b.label+" 耗电 "+b.drain+"%");
+    if(n<=62||i%Math.ceil(n/62)===0){
+      var tx=el("text",{x:x+bw/2-12,y:H-PB+13,"font-size":9,fill:"#888"},svg);tx.textContent=b.label;
+    }
+    // 数值标签：柱数 ≤31 全标，否则只标峰值柱——标签比柱子宽，全标会糊成一片。
+    if(n<=31||i===maxIdx){
+      var vt=el("text",{x:x+bw/2,y:H-PB-h-3,"font-size":9,fill:"#444","text-anchor":"middle"},svg);
+      vt.textContent=fmtPct(b.drain);
+    }
+  });
+  var cn=el("text",{x:W-PR,y:H-2,"font-size":9,fill:"#888","text-anchor":"end"},svg);
+  cn.textContent="纵轴：每日耗电 %（0 起）";
+}
+function fmtPct(v){return (Math.round(v*10)/10)+"%";}
+function niceCeil(v){
+  if(!(v>0))return 1;
+  var exp=Math.pow(10,Math.floor(Math.log(v)/Math.LN10));
+  var steps=[1,2,2.5,5,10];
+  for(var i=0;i<steps.length;i++){var cand=steps[i]*exp;if(cand>=v-1e-9)return cand;}
+  return 10*exp;
+}
+
+// v0.3.27（B-3）：简洁视图——只回答「现在剩多少 / 今天用了多少 / 日均多少」。
+(function(){
+  var host=document.getElementById("simple");
+  if(!host)return;
+  if(!devs.length){host.innerHTML='<div class="empty">暂无数据</div>';return;}
+  var html="";var jobs=[];
+  devs.forEach(function(dv,di){
+    var k=dv[0],name=dv[1];var kpi=(D.first_screen_kpis||{})[k]||{};
+    var cards=(D.daily_cards||{})[k]||[];
+    var cur=(kpi.current_pct==null)?null:kpi.current_pct;
+    var avg=kpi.avg||{};
+    var avgText=(avg.lower_pct_per_day==null&&avg.upper_pct_per_day==null)?"无有效放电样本"
+      :((avg.lower_pct_per_day==null?"—":avg.lower_pct_per_day)+" ~ "
+        +(avg.upper_pct_per_day==null?"—":avg.upper_pct_per_day)+" %/天");
+    var today=(kpi.today_sparse||kpi.today_drain_pct==null)?"数据不足（read<3 或覆盖<2h）"
+      :(kpi.today_drain_pct+"%（"+(kpi.today_date||"")+" 首末差）");
+    html+='<div class="card" style="min-width:620px;max-width:960px">'
+      +'<div class="k">'+esc(name)+' · 现在</div>'
+      +'<div class="v">'+(cur==null?"—":cur+"%")+'</div>'
+      +'<div class="s">'+((kpi.current_ts?fmtTs(kpi.current_ts):"")+(kpi.current_charging?" · 充电中":"")
+        +(cur!=null?"（条形长度即剩余电量，满格 100%）":""))+'</div>'
+      +'<div class="s" style="margin-top:6px">今日已耗：'+esc(today)+'</div>'
+      +'<div class="s">日均耗电区间：'+esc(avgText)+'</div>'
+      +badge("实测","b-measure")+badge("推断","b-infer")
+      +(ageStale(kpi.current_ts)?badge("读数超 2h 未刷新","b-warn"):"")+'</div>';
+    // 当前电量横条：0–100 轴 + 20% 网格，纵轴/横轴都写明刻度，不留「没坐标」的图。
+    var sid="sb"+di;
+    html+='<div class="scroll"><svg id="'+sid+'" width="960" height="34" role="img" aria-label="当前电量 0-100%（横轴 0/20/40/60/80/100%）"></svg></div>';
+    var job={sid:sid,cur:cur,bid:null,cards:null};
+    if(cards.length){
+      var recent=cards.slice(-Math.min(cards.length,14));
+      var bid="sdb"+di;
+      html+='<div class="hint">近 '+recent.length+' 天每日耗电（纵轴：每日耗电 %，0 起；柱高即当日放电百分点）</div>';
+      html+='<div class="scroll"><svg id="'+bid+'" width="960" height="160" role="img" aria-label="近 '+recent.length+' 天每日耗电（纵轴：每日耗电 %，0 起）"></svg></div>';
+      job.bid=bid;job.cards=recent;
+    }
+    jobs.push(job);
+  });
+  host.innerHTML=html;
+  jobs.forEach(function(j){
+    drawCurrentBar(j.sid,j.cur);
+    if(j.bid){
+      drawBars(j.bid,j.cards.map(function(c){
+        return {drain:c.drain_pct,label:c.date.slice(5),sticky:c.sticky,sparse:c.sparse};
+      }));
+    }
+  });
+})();
+function drawCurrentBar(id,cur){
+  var svg=document.getElementById(id);if(!svg)return;
+  var W=960,PL=42,PR=10,Y=8,BH=16;
+  [0,20,40,60,80,100].forEach(function(v){
+    var x=PL+(W-PL-PR)*v/100;
+    el("line",{x1:x,y1:Y,x2:x,y2:Y+BH,stroke:"#888","stroke-width":0.4,"stroke-opacity":0.4},svg);
+    var t=el("text",{x:x,y:Y+BH+9,"font-size":9,fill:"#888","text-anchor":"middle"},svg);
+    t.textContent=v+"%";
+  });
+  el("rect",{x:PL,y:Y,width:W-PL-PR,height:BH,fill:"#2b6cb0","fill-opacity":0.12},svg);
+  if(cur!=null){
+    el("rect",{x:PL,y:Y,width:(W-PL-PR)*Math.max(0,Math.min(100,cur))/100,height:BH,fill:"#2b6cb0","fill-opacity":0.85},svg);
+    var lb=el("text",{x:PL+(W-PL-PR)*Math.max(0,Math.min(100,cur))/100-4,y:Y+BH-5,"font-size":10,fill:"#fff","text-anchor":"end"},svg);
+    lb.textContent=cur+"%";
+  }
+}
+
+// v0.3.27（B-3）：简洁/完整视图切换。默认简洁——用户原话「只想简单看到用电情况」。
+(function(){
+  var btns=document.querySelectorAll("#viewctl button");
+  var simple=document.getElementById("simple"),full=document.getElementById("full");
+  var hint=document.getElementById("viewhint");
+  if(!btns.length||!simple||!full)return;
+  function pick(v){
+    var isSimple=(v==="simple");
+    simple.style.display=isSimple?"":"none";
+    full.style.display=isSimple?"none":"";
+    for(var i=0;i<btns.length;i++){
+      var on=btns[i].getAttribute("data-view")===v;
+      if(on)btns[i].classList.add("on");else btns[i].classList.remove("on");
+    }
+    if(hint)hint.style.display=isSimple?"":"none";
+  }
+  for(var i=0;i<btns.length;i++){
+    btns[i].addEventListener("click",function(){pick(this.getAttribute("data-view"));});
+  }
+  pick("simple");
 })();
 
 // 静止 vs 活动：灰态缺口卡（无字段不伪造；位图积累 ≥7 天后升级分日热力带）
@@ -3119,6 +3267,99 @@ mod tests {
         assert!(html.contains("function ageStale("), "缺 ageStale 钩子");
         assert!(html.contains("更新于 "), "缺 KPI 卡年龄文案钩子");
         assert!(html.contains("读数超 2h 未刷新"), "缺超 2h 醒目徽标钩子");
+    }
+
+    // -------------------------------------------------------------------
+    // v0.3.27（B-3）：报告直观性——默认简洁视图 + 所有柱图都有纵坐标
+    // -------------------------------------------------------------------
+
+    fn b3_report() -> serde_json::Value {
+        let k = "kbd-1";
+        let events = vec![
+            StatsEvent::RunStart { ts: 1000 },
+            ev_poll(2000, k, 90),
+            ev_poll(9200, k, 88),
+        ];
+        let segs = build_segments(&events);
+        build_report_data(&events, &segs, None, None, CST, 200000)
+    }
+
+    /// B-3 守卫：报告默认打开「简洁视图」，完整视图收在 #full 里。
+    #[test]
+    fn b3_default_view_is_simple_and_full_is_collapsed() {
+        let html = render_html(&b3_report());
+        assert!(html.contains(r#"id="viewctl""#), "缺视图切换控件");
+        assert!(html.contains(r#"data-view="simple""#), "缺简洁视图按钮");
+        assert!(html.contains(r#"data-view="full""#), "缺完整视图按钮");
+        assert!(
+            html.contains(r#"<section id="simple"></section>"#),
+            "缺简洁区容器"
+        );
+        assert!(
+            html.contains(r#"<div id="full" style="display:none">"#),
+            "完整视图默认必须收起（否则又回到一屏 6 区块）"
+        );
+        assert!(html.contains(r#"pick("simple")"#), "初始化必须落在简洁视图");
+    }
+
+    /// B-3 守卫：日耗电柱必须有纵轴——用户原话「有些甚至纵坐标都没有」。
+    /// 钉死：0 起刻度、网格线、纵轴单位文案、柱数值标签、y 轴说明。
+    #[test]
+    fn b3_daily_bars_have_y_axis_and_value_labels() {
+        let html = render_html(&b3_report());
+        assert!(html.contains("function drawBars("), "缺柱图绘制入口");
+        assert!(html.contains("function niceCeil("), "缺纵轴上界取整");
+        assert!(html.contains(r#"unit.textContent="%/日""#), "缺纵轴单位");
+        assert!(
+            html.contains("纵轴：每日耗电 %（0 起）"),
+            "缺纵轴口径说明（百分比自 0 起）"
+        );
+        assert!(
+            html.contains(r#""text-anchor":"end""#),
+            "缺 y 轴刻度文字锚点（刻度必须贴在轴左侧）"
+        );
+        assert!(html.contains("function fmtPct("), "缺柱顶数值标签格式化");
+        // 网格线三档：0 / 中值 / 最大。
+        assert!(html.contains("[0,0.5,1].forEach"), "缺三档纵轴网格线");
+    }
+
+    /// B-3 守卫：24h 时间轴要有小时刻度，否则看不出色条对应几点。
+    #[test]
+    fn b3_day_timeline_has_hour_ticks() {
+        let html = render_html(&b3_report());
+        assert!(
+            html.contains("[0,6,12,18,24].forEach"),
+            "缺 0/6/12/18/24 小时刻度"
+        );
+        assert!(
+            html.contains("当日时间轴（0/6/12/18/24 时）"),
+            "aria-label 必须写明刻度口径"
+        );
+    }
+
+    /// B-3 守卫：简洁视图的三句话结论 + 当前电量 0–100 横条都在，
+    /// 且新增内容仍零外部请求（沿用 g28 的自包含口径）。
+    #[test]
+    fn b3_simple_view_keeps_zero_external_requests() {
+        let html = render_html(&b3_report());
+        for pat in [
+            "<script src",
+            "<link",
+            "<img",
+            "@import",
+            "url(",
+            "fetch(",
+            "XMLHttpRequest",
+        ] {
+            assert!(!html.contains(pat), "HTML 含外部请求模式: {pat}");
+        }
+        assert!(html.contains("function drawCurrentBar("), "缺当前电量横条");
+        assert!(html.contains("今日已耗："), "缺简洁视图「今日已耗」结论");
+        assert!(
+            html.contains("日均耗电区间："),
+            "缺简洁视图「日均耗电区间」结论"
+        );
+        assert!(html.contains("满格 100%"), "缺电量横条的轴口径说明");
     }
 }
 

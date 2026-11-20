@@ -15,17 +15,23 @@
 - 剔除步骤已固化为命令（不靠人工记忆、不靠行号记忆）：
   `grep -rna 'unsafe' volttray/crates/*/src/*.rs | grep -vE ':[0-9]+:[[:space:]]*(//|/\*)' | wc -l`
   —— 过滤掉整行以 `//` 或 `/*` 开头的注释行（SAFETY 注释与说明性 doc 注释）；
-  2026-10-28 实测＝96，与下表逐文件小计逐行一致（settings 46 / main 11 / statsexport 10 / export 6 / rawinput 5 / bootlog 5 / autostart 5 / icon 3 / single 2 / aumid 2 / timelocal 1）。
-- 实测总数 **96 处**＝69 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
+  2026-11-21 实测＝98，与下表逐文件小计逐行一致（settings 46 / main 12 / statsexport 11 / export 6 / rawinput 5 / bootlog 5 / autostart 5 / icon 3 / single 2 / aumid 2 / timelocal 1）。
+- 实测总数 **98 处**＝71 个 `unsafe {}` 块 ＋ 18 个 `unsafe fn` ＋ 9 个
   `unsafe extern "system" fn`（后者为 windows crate 回调签名要求）。
 - 口径勘误（2026-10-28 红蓝对抗局复核）：终审报告口径「90 处」为**旧口径**，
-  以台账最新实测（当前 96）为准；差异未逐条回溯（报告统计时点与当时基线之间
+  以台账最新实测（当前 98）为准；差异未逐条回溯（报告统计时点与当时基线之间
   可能存在代码漂移），作为已知差异披露，不影响逐块登记的完整性。
 - 变更注记（2026-10-25 复核）：main.rs / single.rs 重构净减、export.rs 新增入册，
   实测总数 97→96，本表已同步；以最新实测为准。
-- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（96）。精确核验命令：
-  `grep -ra 'SAFETY(E9)' volttray/crates | wc -l`（2026-10-26 实测＝96）；字面「全仓 grep」
-  会把经验库文档自身引用计入（本台账 5 处、[06](06-release-reconciliation.md) 引用 1 处，合计 6 处，得 102）而误判漂移，故范围必须限定 `volttray/crates`。
+- 变更注记（2026-11-21 复核，96→98）：两处差异，均为「代码已登记、逐文件表未同批回写」的补登，
+  不是本版新增未登记代码——① `crates/tray/src/statsexport.rs` 10→11（块 7→8），差异起于 v0.3.26
+  PR #19 组 4/组 5 提交 `43fb8bd5b5` / `5d003ba93f`，当版对账已判打回并登记于
+  [06](06-release-reconciliation.md) F.2（该文件的 SAFETY 注释当批已补齐 11/11），但逐文件表漏了回写，本行补登；
+  ② `crates/tray/src/main.rs` 11→12（块 11→12），v0.3.27 新增 `confirm_forget_device` 的 `MessageBoxW` 调用
+  （B-1 忘记设备确认框），注释同批写入。台账合计随之 96→98。
+- 机器可核验：全仓 `SAFETY(E9)` 标记数必须等于下表合计（98）。精确核验命令：
+  `grep -ra 'SAFETY(E9)' volttray/crates | wc -l`（2026-11-21 实测＝98）；字面「全仓 grep」
+  会把经验库文档自身引用计入（2026-11-21 实测：本台账 5 处、[06](06-release-reconciliation.md) 4 处，合计 9 处，得 107）而误判漂移，故范围必须限定 `volttray/crates`。
   本命令固化进 [06](06-release-reconciliation.md) F.1 发布对账复核项引用。任一处新增 /
   删除 unsafe 代码，必须同批增删对应 SAFETY 注释并更新本台账。
 
@@ -38,13 +44,13 @@
 | crates/tray/src/bootlog.rs | 5 | 0 | 0 | 5 |
 | crates/tray/src/export.rs | 6 | 0 | 0 | 6 |
 | crates/tray/src/icon.rs | 3 | 0 | 0 | 3 |
-| crates/tray/src/main.rs | 11 | 0 | 0 | 11 |
+| crates/tray/src/main.rs | 12 | 0 | 0 | 12 |
 | crates/tray/src/rawinput.rs | 4 | 0 | 1 | 5 |
 | crates/tray/src/settings.rs | 23 | 18 | 5 | 46 |
 | crates/tray/src/single.rs | 2 | 0 | 0 | 2 |
-| crates/tray/src/statsexport.rs | 7 | 0 | 3 | 10 |
+| crates/tray/src/statsexport.rs | 8 | 0 | 3 | 11 |
 | crates/tray/src/timelocal.rs | 1 | 0 | 0 | 1 |
-| **合计** | **69** | **18** | **9** | **96** |
+| **合计** | **71** | **18** | **9** | **98** |
 
 ## 注释约定
 

@@ -173,6 +173,14 @@ pub struct LastKnownStore {
     path_map_dirty: bool,
     /// path_map 插入序（FIFO 淘汰基准）。
     path_map_order: Vec<String>,
+    /// 有记录被显式移除、等待把「删除」落盘（v0.3.27，B-1）。
+    ///
+    /// `remove()` 把键从 `records` 与 `persisted` 双双删掉，于是既不在
+    /// `dirty_since` 里（没有「新值」要写），也不会让 `flush_if_due` 的
+    /// dirty 判定成立——结果就是内存里删干净了、磁盘文件原封不动，
+    /// 下次启动 `seed_virtual` 又把这条播种回来（用户视角：设备删不掉）。
+    /// 本标志把「删除」也当成一次待落盘的状态变更，flush 后清零。
+    purge_dirty: bool,
 }
 
 impl LastKnownStore {
@@ -198,6 +206,7 @@ impl LastKnownStore {
             path_map_persisted: BTreeMap::new(),
             path_map_dirty: false,
             path_map_order: Vec::new(),
+            purge_dirty: false,
             enabled: true,
         }
     }
@@ -402,7 +411,37 @@ impl LastKnownStore {
             self.dirty_since.remove(k);
             self.last_persisted_at.remove(k);
         }
+        if !removed.is_empty() {
+            // B-1：删除本身也要落盘，否则重启即复活。
+            self.purge_dirty = true;
+        }
         removed
+    }
+
+    /// B-1（v0.3.27）：按天数淘汰陈旧记录（自动遗忘的超期路径）。
+    ///
+    /// 与 [`Self::remove`] 的差别：本函数按 `last_seen` 自己挑键，因此也能
+    /// 清掉「压根没变成虚拟条目」的残留记录（回退键冲突的、physical_key
+    /// 为空的、以及超过 [`MAX_DEVICES`] 上限的边角）。返回实际移除的键，
+    /// 语义与 `remove` 一致（置 purge_dirty）。
+    ///
+    /// `max_age_secs == 0` 表示关闭自动遗忘 → 恒返回空（调用方不必特判）。
+    /// 时钟回拨时 `saturating_sub` 得 0 → 不超期 → 不删。
+    pub fn prune_older_than(&mut self, wall_now_secs: u64, max_age_secs: u64) -> Vec<String> {
+        if !self.enabled || max_age_secs == 0 {
+            return Vec::new();
+        }
+        let mut stale: Vec<String> = self
+            .records
+            .iter()
+            .filter(|(_, rec)| wall_now_secs.saturating_sub(rec.last_seen) >= max_age_secs)
+            .map(|(k, _)| k.clone())
+            .collect();
+        stale.sort();
+        if stale.is_empty() {
+            return stale;
+        }
+        self.remove(&stale)
     }
 
     /// FR-1（RB2）：注册期落 raw path → unitId 持久映射（变更驱动；
@@ -447,10 +486,14 @@ impl LastKnownStore {
         if !self.enabled {
             return Ok(outcome);
         }
-        if !self.dirty_since.is_empty() || self.path_map_dirty {
-            let global_ok = self
-                .last_flush
-                .is_none_or(|t| now.duration_since(t) >= self.tuning.global_debounce);
+        if !self.dirty_since.is_empty() || self.path_map_dirty || self.purge_dirty {
+            // 删除是用户显式动作（或已超期的清扫），不等 10s 全局节流：
+            // IO 循环的空闲 tick 可能长达一个轮询档，压在这里会让「忘记」
+            // 拖到下一次设备轮询才落盘。
+            let global_ok = self.purge_dirty
+                || self
+                    .last_flush
+                    .is_none_or(|t| now.duration_since(t) >= self.tuning.global_debounce);
             if global_ok {
                 let oldest_dirty = self.dirty_since.values().min().copied();
                 let fallback = oldest_dirty
@@ -466,7 +509,7 @@ impl LastKnownStore {
                     })
                     .cloned()
                     .collect();
-                if !ready.is_empty() || self.path_map_dirty {
+                if !ready.is_empty() || self.path_map_dirty || self.purge_dirty {
                     outcome = self.flush_keys(&ready, now)?;
                 }
             }
@@ -493,7 +536,7 @@ impl LastKnownStore {
         let keys: Vec<String> = self.dirty_since.keys().cloned().collect();
         // FR-1（RB2）：仅 path_map 有变化（无设备 dirty）时也必须落盘，
         // 否则重启空槽位窗口的持久映射在退出路径丢失。
-        let mut outcome = if keys.is_empty() && !self.path_map_dirty {
+        let mut outcome = if keys.is_empty() && !self.path_map_dirty && !self.purge_dirty {
             FlushOutcome::default()
         } else {
             self.flush_keys(&keys, now)?
@@ -520,6 +563,7 @@ impl LastKnownStore {
         // FR-1（RB2）：path_map 随本次落盘一并持久化并清 dirty。
         self.path_map_persisted = self.path_map.clone();
         self.path_map_dirty = false;
+        self.purge_dirty = false;
         let mut all: Vec<PersistedDevice> = self.persisted.values().cloned().collect();
         let evicted = enforce_caps(&mut all);
         for k in &evicted {
@@ -655,6 +699,60 @@ mod tests {
         // write_atomic 的 create_dir_all。
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("last_known.json")
+    }
+
+    // ---------- v0.3.27（B-1）：忘记设备必须真落盘 ----------
+
+    /// B-1 核心回归：`remove` 之后**不**靠 note_reading 的新读数推动，
+    /// `flush_if_due` 也必须把删掉的结果写进文件——否则用户点「忘记」
+    /// 只改了内存，退出前没有新读数就永远不会重写，重启后条目复活。
+    #[test]
+    fn b1_remove_marks_purge_dirty_and_flush_rewrites_file() {
+        let path = fr1_tmp();
+        let mut st = LastKnownStore::with_tuning(path.clone(), FlushTuning::default());
+        let now = Instant::now();
+        st.note_reading(
+            "K1",
+            "Mouse K1",
+            50,
+            false,
+            "unified_battery",
+            1_700_000_000,
+            now,
+        );
+        st.shutdown_flush(now).unwrap();
+        assert_eq!(
+            LastKnownStore::load(path.clone(), FlushTuning::default()).1,
+            LoadOutcome::Loaded(1)
+        );
+        // 忘记：从内存删 + 置 purge_dirty（remove 自身不写盘）。
+        assert_eq!(st.remove(&["K1".to_string()]), vec!["K1".to_string()]);
+        // 全局节流窗口内也要写：purge 是用户显式动作，不受 debounce 限制。
+        let out = st.flush_if_due(now).unwrap();
+        assert!(out.wrote, "purge_dirty 必须触发重写");
+        assert_eq!(
+            LastKnownStore::load(path.clone(), FlushTuning::default()).1,
+            LoadOutcome::Loaded(0),
+            "文件里不得再有该设备"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// B-1：`prune_older_than` 只清超期记录（60 天阈值下 30 天前的不动），
+    /// 且 0 天视为「不自动遗忘」直接早退。
+    #[test]
+    fn b1_prune_older_than_only_expired() {
+        let path = fr1_tmp();
+        let mut st = LastKnownStore::with_tuning(path.clone(), FlushTuning::default());
+        let now = Instant::now();
+        st.note_reading("OLD", "Mouse OLD", 40, false, "unified_battery", 1_000, now);
+        st.note_reading("NEW", "Mouse NEW", 60, false, "unified_battery", 9_000, now);
+        assert!(st.prune_older_than(10_000, 0).is_empty(), "0 天不自动遗忘");
+        // 阈值 5000s：OLD(age 9000) 超期，NEW(age 1000) 不动。
+        assert_eq!(st.prune_older_than(10_000, 5_000), vec!["OLD".to_string()]);
+        assert!(st.records().iter().any(|r| r.physical_key == "NEW"));
+        assert!(!st.records().iter().any(|r| r.physical_key == "OLD"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -2,7 +2,10 @@
 //! 实施令 2026-10-20 注记「后续再加固定项须先评审」进对账表 F.2；
 //! 设备区行不计入额度）。
 //!
-//! 结构：设备区（每台一行 CheckMenuItem，点击钉为默认展示）/
+//! 结构：设备区（每台一行；有实时读数的行是 CheckMenuItem，点击即钉为
+//! 默认展示。v0.3.27 起「离线最后已知」的虚拟行改为子菜单：内含钉选项
+//! 与「忘记此设备…」（B-1 修复——此前这类行只能钉、无法删除，用户视角
+//! 是「离线很久的设备一直显示、删不掉」））/
 //! ── / 立即刷新（当前间隔 {人性化单位，如 30 分钟}；实验快档生效时
 //! 按充电三态分文案——统一充电形「15 秒·充电中，常规 …」/ 混合形
 //! 「… · 充电快档 15 秒」，见 settings_text::menu_refresh_label）/
@@ -10,13 +13,18 @@
 //! ── / 设置… / 导出诊断信息… / 导出耗电统计… / 检查更新（当前 v{X}）/
 //! ── / 退出。
 
-use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use volttray_app::settings_text::menu_refresh_label;
 use volttray_app::{DeviceSnapshot, FastPollState};
 
 /// 菜单项 ID 集合（构建时从 muda 取回，事件匹配用）。
 pub struct MenuIds {
+    /// 设备区「钉为该展示」项（设备行本身，或子菜单里的钉选项）。
     pub device_rows: Vec<(MenuId, String)>,
+    /// B-1（v0.3.27）：设备区「忘记此设备…」项——只为可遗忘的虚拟行
+    /// （`last_known.json` 播种的最后已知条目）生成；主循环据此弹二次
+    /// 确认后调 `AppCore::forget_device` + `LastKnownStore::remove`。
+    pub device_forget_rows: Vec<(MenuId, String)>,
     pub refresh: MenuId,
     pub blink: MenuId,
     pub silent: MenuId,
@@ -85,6 +93,16 @@ fn fmt_reading_age(secs: u64) -> String {
     } else {
         format!("{} 小时前", secs / 3600)
     }
+}
+
+/// B-1（v0.3.27）：该设备行是否提供「忘记此设备」入口。
+///
+/// 只有虚拟行（`is_virtual`，即重启后由 `last_known.json` 播种的「最后
+/// 已知电量」）可以遗忘——它们背后没有活的 HID 通道，删掉就是删掉。真机
+/// 行即使当前离线也不给删除入口：设备可能只是睡了一觉，条目由 IO 侧的
+/// 通道清扫负责回收，菜单里再开一个删除口只会误删在用设备。
+pub fn is_forgettable(dev: &DeviceSnapshot) -> bool {
+    dev.is_virtual
 }
 
 /// T-04（C-F1 宽标注）：直连（蓝牙/有线）通道读不到读数（`direct &&
@@ -164,19 +182,42 @@ pub fn build_menu(
 ) -> (Menu, MenuIds) {
     let menu = Menu::new();
     let mut device_rows = Vec::new();
+    let mut device_forget_rows = Vec::new();
 
     for dev in devices {
         let checked = pinned.map_or(default_device == Some(dev.id.as_str()), |p| p == dev.id);
         // WP-A（v3 A-2）：可展示数据即可点（含休眠灰行与虚拟最后已知行）；
         // 点击语义不变（pin + refresh_ui，零查询）。无任何读数才禁用。
-        let item = CheckMenuItem::new(
-            device_row_text(dev),
-            dev.has_displayable_data(),
-            checked,
-            None,
-        );
-        device_rows.push((item.id().clone(), dev.id.clone()));
-        let _ = menu.append(&item);
+        if is_forgettable(dev) {
+            // B-1：虚拟行是唯一会「设备早已不在、条目却一直挂在菜单里」的
+            // 形态（来自 last_known.json 的播种）。改子菜单后钉选语义与删除
+            // 入口各占一项：点行内钉选项仍是零查询 pin。
+            let sub = Submenu::new(device_row_text(dev), dev.has_displayable_data());
+            // checked 时文案改成「取消钉选」：同一行既是钉选也是解钉，
+            // 用户不必去找其它入口回到自动选择（B-2）。
+            let pin_label = if checked {
+                "取消钉选（回到自动选择）"
+            } else {
+                "显示此设备电量（钉选）"
+            };
+            let pin_item = CheckMenuItem::new(pin_label, dev.has_displayable_data(), checked, None);
+            let forget_item = MenuItem::new("忘记此设备（重启后不再出现）…", true, None);
+            device_rows.push((pin_item.id().clone(), dev.id.clone()));
+            device_forget_rows.push((forget_item.id().clone(), dev.id.clone()));
+            let _ = sub.append(&pin_item);
+            let _ = sub.append(&PredefinedMenuItem::separator());
+            let _ = sub.append(&forget_item);
+            let _ = menu.append(&sub);
+        } else {
+            let item = CheckMenuItem::new(
+                device_row_text(dev),
+                dev.has_displayable_data(),
+                checked,
+                None,
+            );
+            device_rows.push((item.id().clone(), dev.id.clone()));
+            let _ = menu.append(&item);
+        }
     }
     if !devices.is_empty() {
         let _ = menu.append(&PredefinedMenuItem::separator());
@@ -220,6 +261,7 @@ pub fn build_menu(
 
     let ids = MenuIds {
         device_rows,
+        device_forget_rows,
         refresh: refresh.id().clone(),
         blink: blink_item.id().clone(),
         silent: silent_item.id().clone(),
@@ -274,6 +316,13 @@ mod tests {
             last_seen: None,
             reading_age_secs: None,
         }
+    }
+
+    /// B-1：虚拟条目构造器（`is_virtual = true`，供 b1_tests 复用）。
+    pub(super) fn snap_virtual(id: &str, name: &str, percent: Option<u8>) -> DeviceSnapshot {
+        let mut dev = snap(id, name, "direct", percent, "offline", true, true);
+        dev.last_seen = Some(1_700_000_000);
+        dev
     }
 
     /// 断言一：direct + percent=None 必含标注（C-F1 宽条件）。
@@ -434,6 +483,92 @@ mod tests {
         )];
         append_direct_enum_failure_hint(&menu, &devs, None);
         assert_eq!(menu.items().len(), 0, "有 direct 行不追加");
+    }
+}
+
+/// B-1（v0.3.27）：虚拟行的「忘记此设备」入口断言。独立模块——B-1 若需
+/// 单独 revert 不牵连 T-04 / T-07 的验收断言。
+#[cfg(test)]
+mod b1_tests {
+    use super::tests::snap_virtual;
+    use super::*;
+    use tray_icon::menu::MenuItemKind;
+
+    /// 虚拟行 → 子菜单；钉选项与忘记项各自登记到对应表。
+    #[test]
+    fn b1_virtual_row_offers_forget_entry() {
+        let dev = snap_virtual("virtual#k", "MX Keys Mini", Some(55));
+        let (menu, ids) = build_menu(
+            std::slice::from_ref(&dev),
+            None,
+            None,
+            1800,
+            true,
+            true,
+            false,
+            FastPollState::Off,
+        );
+        assert_eq!(ids.device_rows.len(), 1, "钉选项仍只有一条（语义不变）");
+        assert_eq!(ids.device_forget_rows.len(), 1, "虚拟行必须给删除入口");
+        assert_eq!(
+            ids.device_forget_rows[0].1, dev.id,
+            "忘记项须绑定到该设备 id"
+        );
+        let sub_count = menu
+            .items()
+            .into_iter()
+            .filter(|k| matches!(k, MenuItemKind::Submenu(_)))
+            .count();
+        assert_eq!(sub_count, 1, "虚拟行应是子菜单而非扁平勾选项");
+    }
+
+    /// 真机行（非虚拟）不给删除入口——避免误删在用设备。
+    #[test]
+    fn b1_real_device_row_has_no_forget_entry() {
+        let mut dev = snap_virtual("u1", "MX Master 3S", Some(80));
+        dev.is_virtual = false;
+        let (menu, ids) = build_menu(
+            std::slice::from_ref(&dev),
+            None,
+            None,
+            1800,
+            true,
+            true,
+            false,
+            FastPollState::Off,
+        );
+        assert_eq!(ids.device_rows.len(), 1);
+        assert!(ids.device_forget_rows.is_empty(), "真机行不出删除入口");
+        let sub_count = menu
+            .items()
+            .into_iter()
+            .filter(|k| matches!(k, MenuItemKind::Submenu(_)))
+            .count();
+        assert_eq!(sub_count, 0, "真机行保持扁平勾选项（单击即钉选）");
+    }
+
+    /// 子菜单化不改变固定项计数（M13 额度只算固定项）。
+    #[test]
+    fn b1_submenu_keeps_fixed_item_count() {
+        let dev = snap_virtual("virtual#k", "MX Keys Mini", Some(55));
+        let (menu, _ids) = build_menu(
+            std::slice::from_ref(&dev),
+            None,
+            None,
+            1800,
+            true,
+            true,
+            false,
+            FastPollState::Off,
+        );
+        let fixed = menu
+            .items()
+            .into_iter()
+            .filter(|k| {
+                !matches!(k, MenuItemKind::Predefined(_)) && !matches!(k, MenuItemKind::Submenu(_))
+            })
+            .count();
+        assert_eq!(fixed, 9, "固定项仍为 9（子菜单与设备区不计额度）");
     }
 }
 

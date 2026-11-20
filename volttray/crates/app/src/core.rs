@@ -29,6 +29,15 @@ pub const WAKE_PROBE_COOLDOWN: Duration = Duration::from_secs(5);
 /// 才有「无响应」证据，阈值至少覆盖两个完整轮询周期。仅作兜底：鼠标
 /// 活跃期的新鲜读数主要由临近到期豁免（NEAR_GRAY_LEEWAY）保证。
 pub const GRAY_MIN_POLLS: u32 = 2;
+/// 自动展示切换的最小差值（v0.3.27，B-2）：未手动钉选时，当前展示设备
+/// 只要仍在册、仍有读数、仍然 eligible，就继续展示；挑战者（按原规则
+/// 取到的最低电量设备）必须比它低出至少该百分点数才允许接管图标。
+/// 3 个百分点足以吸收单次读数抖动（同型号设备同轮读数差通常 ≤1）与
+/// 两台设备电量交叉爬行的反复横跳，同时保证「真有一台快没电了」时
+/// 仍会切过去。取值与 D-08 原判据不冲突：首次选择（无历史）仍按最低
+/// 电量即时生效。
+pub const AUTO_SWITCH_MARGIN: u8 = 3;
+
 /// 临近到期豁免提前量（F5 主修复 (b)，v0.3.16 线；WP-C 起锚从「90s
 /// 墙钟」迁到「本设备自己的 next_due」）：在线、非充电设备的
 /// `next_due - now ≤ 本窗口` 时，探测轮对其提前放行一次查询——探测轮
@@ -326,6 +335,11 @@ pub struct AppCore {
     /// 持久化最后已知。由 `refresh_key_conflicts` 维护。
     conflicted_keys: HashSet<String>,
     snap_seq: u64,
+    /// 当前自动展示（未钉选时托盘图标显示的那台）的设备 id（v0.3.27，
+    /// B-2）。滞回锚点：仅当挑战者低出 AUTO_SWITCH_MARGIN 个百分点才换人。
+    /// 不持久化——重启后按最低电量重新选取是正确初值（用户没有钉选
+    /// 就是接受自动规则，只是不该在两次读数之间来回跳）。
+    auto_shown: Option<String>,
 }
 
 impl AppCore {
@@ -337,6 +351,7 @@ impl AppCore {
             pending_alerts: Vec::new(),
             conflicted_keys: HashSet::new(),
             snap_seq: 0,
+            auto_shown: None,
         }
     }
 
@@ -509,6 +524,56 @@ impl AppCore {
     pub fn remove_device(&mut self, id: &str) {
         self.entries.retain(|e| e.device.id != id);
         self.lowbats.remove(id);
+        // B-2（v0.3.27）：被移除的正好是自动展示锚点时清空，下次快照
+        // 重新按最低电量选（不清会让滞回锚指向不存在的条目而白跑一轮）。
+        if self.auto_shown.as_deref() == Some(id) {
+            self.auto_shown = None;
+        }
+    }
+
+    /// B-1（v0.3.27）：「忘记此设备」——从台账删除条目，并返回该条目的
+    /// 持久化键（`PhysicalKey::as_str()`），供调用方同步清除
+    /// `last_known.json` 里的同键记录。
+    ///
+    /// 返回 None 表示没有这个 id（幂等：重复点击 / 菜单已过期）。返回
+    /// Some 但键为空串时调用方只删内存即可（无键可清，不会写坏文件）。
+    ///
+    /// 为什么必须清持久化：虚拟条目（离线最后已知电量）的唯一数据源就是
+    /// `last_known.json`；只删内存条目的话下一次启动 `seed_virtual` 又会
+    /// 把它播种回来——这正是用户看到的「离线很久的设备删不掉」。
+    pub fn forget_device(&mut self, id: &str) -> Option<String> {
+        let idx = self.entries.iter().position(|e| e.device.id == id)?;
+        let key = self.entries[idx].device.physical_key.as_str().to_string();
+        self.entries.remove(idx);
+        self.lowbats.remove(id);
+        self.pending_alerts.retain(|(alert_id, _)| alert_id != id);
+        if self.auto_shown.as_deref() == Some(id) {
+            self.auto_shown = None;
+        }
+        Some(key)
+    }
+
+    /// B-1（v0.3.27）：超期虚拟条目的持久化键——`last_seen` 距今超过
+    /// `max_age_secs` 秒的全部虚拟条目。
+    ///
+    /// 只挑 `is_virtual`：真实在册设备永不被自动遗忘规则波及（拔掉但
+    /// 还在枚举里的设备仍要显示读数）。时钟回拨时 `saturating_sub`
+    /// 得 0 → 不超期 → 不删，宁可少删不错删。`max_age_secs == 0` 由
+    /// 调用方解释为「关闭自动遗忘」并在调用前短路，不进入本函数。
+    pub fn stale_virtual_keys(&self, wall_now_secs: u64, max_age_secs: u64) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.is_virtual)
+            .filter(|e| {
+                e.persisted_last_seen
+                    .is_some_and(|t| wall_now_secs.saturating_sub(t) >= max_age_secs)
+            })
+            .map(|e| e.device.physical_key.as_str().to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     pub fn entries(&self) -> &[DeviceEntry] {
@@ -1170,15 +1235,23 @@ impl AppCore {
         out
     }
 
-    /// 默认展示设备（决策 D-08，蓝图缺口的就地裁决）：
+    /// 默认展示设备（决策 D-08，蓝图缺口的就地裁决；v0.3.27 加滞回）：
     /// 在「有电量、未充电、未灰显」的设备中取电量最低者；无候选则
     /// 放宽到「有电量、未灰显」取最低；仍无 → None（图标显示 "?"）。
+    ///
+    /// v0.3.27（B-2）滞回：本函数每次 `snapshot()` 都会重跑，纯最低电量
+    /// 判据在两台设备电量接近或交叉爬行时会让托盘图标在两次读数之间
+    /// 反复跳台（用户侧现象：「没手动钉选，图标偶尔变成另一台」）。现在
+    /// 把上一次的结果记在 [`AppCore::auto_shown`]，当前设备仍然合格时
+    /// 挑战者必须低出 [`AUTO_SWITCH_MARGIN`] 个百分点才接管。档位变化
+    /// （充电 ↔ 未充电）不设滞后——D-08 原意就是尽量别展示正在被充电
+    /// 的那台，这一点不该被平滑掉。
     /// D-33：休眠设备保留展示资格（显示最后一次已知电量、灰显），
     /// 不被派生灰显排除——否则唯一设备休眠后图标又回退「?」。
     /// F5 主修复第 3 件（v0.3.16 线）：Online+灰显与 Sleeping 同权——
     /// 灰显的语义是「读数过期」而非「设备离线」，保留展示资格、灰显
     /// 显示最后一次已知电量，不再因派生灰回退「?」。
-    pub fn default_display_index(&self, now: Instant) -> Option<usize> {
+    pub fn default_display_index(&mut self, now: Instant) -> Option<usize> {
         let cfg = self.config();
         let eligible = |e: &DeviceEntry| {
             e.device.state == DeviceState::Sleeping
@@ -1194,12 +1267,47 @@ impl AppCore {
                 .min_by_key(|(_, p)| *p)
                 .map(|(i, _)| i)
         };
-        pick_min(&|e| {
+        let challenger = pick_min(&|e| {
             e.device.battery.is_some()
                 && !e.device.battery.is_some_and(|b| b.charging)
                 && eligible(e)
         })
-        .or_else(|| pick_min(&|e| e.device.battery.is_some() && eligible(e)))
+        .or_else(|| pick_min(&|e| e.device.battery.is_some() && eligible(e)));
+
+        // 滞回：锚点仍合格时先比差值（见函数文档）。
+        if let Some(cur_id) = self.auto_shown.clone() {
+            if let Some(cur_idx) = self.entries.iter().position(|e| e.device.id == cur_id) {
+                let keep_current = {
+                    let cur = &self.entries[cur_idx];
+                    match (cur.device.battery, eligible(cur)) {
+                        (Some(cur_batt), true) => match challenger {
+                            None => true,
+                            Some(ch) if ch == cur_idx => true,
+                            Some(ch) => {
+                                let chal = &self.entries[ch];
+                                let chal_batt = chal.device.battery;
+                                let chal_charging = chal_batt.is_some_and(|b| b.charging);
+                                if !cur_batt.charging && chal_charging {
+                                    true
+                                } else if cur_batt.charging && !chal_charging {
+                                    false
+                                } else {
+                                    let hp = chal_batt.map(|b| b.percent).unwrap_or(0);
+                                    hp.saturating_add(AUTO_SWITCH_MARGIN) > cur_batt.percent
+                                }
+                            }
+                        },
+                        _ => false,
+                    }
+                };
+                if keep_current {
+                    return Some(cur_idx);
+                }
+            }
+        }
+        let next = challenger.map(|i| self.entries[i].device.id.clone());
+        self.auto_shown = next;
+        challenger
     }
 
     /// 灰显阈值（F5 主修复 (a)，v0.3.16 线；WP-C 起按设备档位）：
@@ -2247,6 +2355,110 @@ mod tests {
         let mut d = Device::new(id.into(), name, LinkKind::Bolt, index, false);
         d.set_state(DeviceState::Online);
         d
+    }
+
+    // ---------- v0.3.27（B-1/B-2）：忘记离线设备 / 超期清扫 / 展示位滞回 ----------
+
+    /// B-2：未钉选时的展示位滞回——两台设备电量交叉不再来回跳。
+    /// 旧语义是「每次快照取最低电量」，b 从 40% 掉到 39% 就抢走展示位；
+    /// 新语义要求挑战者至少领先 AUTO_SWITCH_MARGIN 个百分点。
+    #[test]
+    fn b2_auto_display_hysteresis_holds_until_margin() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(50, false), now);
+        core.record_success("b", reading(49, false), now);
+        assert_eq!(core.default_display_index(now), Some(1), "首轮取最低电量 b");
+        // 交叉 1 个百分点：a(47) 变成最低，但没领先到门限，展示位不跳。
+        core.record_success("a", reading(47, false), now);
+        core.record_success("b", reading(48, false), now);
+        assert_eq!(
+            core.default_display_index(now),
+            Some(1),
+            "领先不足 AUTO_SWITCH_MARGIN 个百分点时保持原展示位"
+        );
+        // a 继续掉到 40：40 + 3 <= 48，越过门限才切。
+        core.record_success("a", reading(40, false), now);
+        assert_eq!(
+            core.default_display_index(now),
+            Some(0),
+            "差距超过门限才切换"
+        );
+        // b 回爬到 44（仍低于 a 45）：44 + 3 > 45，粘住 a 不抖回。
+        core.record_success("a", reading(45, false), now);
+        core.record_success("b", reading(44, false), now);
+        assert_eq!(
+            core.default_display_index(now),
+            Some(0),
+            "回爬不足门限不抖回（滞回的核心目的）"
+        );
+    }
+
+    /// B-2：滞回不得盖住「充电」这一强信号——当前展示的设备开始充电、
+    /// 另一台在放电时，无论差多少都立刻切走（充电中不该占着耗电位数）。
+    #[test]
+    fn b2_charging_current_device_yields_display_slot() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        core.upsert_device(dev("a", 1));
+        core.upsert_device(dev("b", 2));
+        core.record_success("a", reading(90, false), now);
+        core.record_success("b", reading(20, false), now);
+        assert_eq!(core.default_display_index(now), Some(1), "b 更低，占位");
+        // b 插上充电：a 仍在放电 → 立刻让位，不受 margin 影响。
+        core.record_success("b", reading(21, true), now);
+        assert_eq!(core.default_display_index(now), Some(0), "充电中让位");
+    }
+
+    /// B-1：`forget_device` 删内存条目并回传持久化键；再查即 None。
+    #[test]
+    fn b1_forget_device_removes_entry_and_returns_key() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        assert!(core.seed_virtual(&persisted("AAAA0001", "MX Master 3", 55)));
+        assert_eq!(
+            core.forget_device("virtual#AAAA0001").as_deref(),
+            Some("AAAA0001")
+        );
+        assert!(core.snapshot(now).devices.is_empty(), "条目已从内存移除");
+        assert!(
+            core.forget_device("virtual#AAAA0001").is_none(),
+            "再忘即 None"
+        );
+    }
+
+    /// B-1：忘掉的设备如果正占着展示位，展示位一并清空（不留悬空下标）。
+    #[test]
+    fn b1_forget_device_clears_auto_shown_slot() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        assert!(core.seed_virtual(&persisted("K1", "Mouse K1", 40)));
+        assert_eq!(core.default_display_index(now), Some(0));
+        core.forget_device("virtual#K1");
+        assert_eq!(core.snapshot(now).default_device, None);
+    }
+
+    /// B-1：超期清扫只看虚拟条目的最后成功读数时刻；未超期不动。
+    #[test]
+    fn b1_stale_virtual_keys_respects_age_and_scope() {
+        let mut core = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        let now = Instant::now();
+        assert!(core.seed_virtual(&persisted("OLD", "Mouse OLD", 50)));
+        assert!(core.seed_virtual(&persisted("NEW", "Mouse NEW", 50)));
+        // last_seen 钉在 1_700_000_000：以它为中心算年龄。
+        let base = 1_700_000_000u64;
+        assert!(core.stale_virtual_keys(base + 3600, 30 * 86_400).is_empty());
+        let stale = core.stale_virtual_keys(base + 31 * 86_400, 30 * 86_400);
+        assert_eq!(stale, vec!["NEW".to_string(), "OLD".to_string()]);
+        // 真机设备不在清扫范围（只清理虚拟条目）。
+        let mut core2 = AppCore::new(Arc::new(RwLock::new(Config::default())));
+        core2.upsert_device(dev("a", 1));
+        core2.record_success("a", reading(50, false), now);
+        assert!(core2
+            .stale_virtual_keys(base + 999 * 86_400, 30 * 86_400)
+            .is_empty());
     }
 
     /// A-1b 创建段：虚拟条目播种后渲染为「灰色最后已知 + 时间标注」，

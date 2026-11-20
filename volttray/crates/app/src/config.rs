@@ -74,6 +74,13 @@ pub const ICON_BG_SCALE_MAX: u8 = 100;
 /// 字体颜色与背景对比度下限（M9：<3.0 仅警告，不阻断）。
 pub const CONTRAST_FLOOR: f64 = 3.0;
 
+/// 「长时间离线设备自动遗忘」天数（v0.3.27，B-1）：虚拟条目（重启后由
+/// last_known.json 播种的最后已知电量）距最后一次成功读数超过该天数即
+/// 自动从持久化与菜单移除；0 = 永不自动遗忘（旧行为）。上限 3650 天
+/// 仅为防御手改配置写出天文数字，换算秒不溢出。
+pub const FORGET_OFFLINE_DAYS_DEFAULT: u64 = 30;
+pub const FORGET_OFFLINE_DAYS_MAX: u64 = 3650;
+
 // ---------- 分档字体颜色（v0.3.3 #4） ----------
 
 /// 分档数量下限（N 档 = N-1 个阈值 + N 个颜色）。
@@ -502,6 +509,11 @@ pub struct Config {
     /// 设置→精细化设置 逐项关闭并通过 Issues 反馈。
     /// 重启即显最后已知电量（last_known.json 持久化 + 虚拟条目）。
     pub experimental_persist_last_known: bool,
+    /// 长时间离线设备自动遗忘（v0.3.27，B-1）：虚拟条目距最后一次成功
+    /// 读数超过该天数即从 last_known.json 与菜单中一并移除；0 = 永不
+    /// 自动遗忘。只影响虚拟条目（真实在册设备永不被本条移除）；手动
+    /// 「忘记此设备…」不受该值限制。范围 0..=3650。
+    pub forget_offline_days: u64,
     /// 耗电统计与导出（stats.jsonl 落盘与导出链路）。
     pub experimental_stats: bool,
     /// 按设备计时轮询——关 = 充电设备不再走 15s 快刷档、与常态设备同
@@ -590,6 +602,8 @@ impl Default for Config {
             // （v0.3.21 存量经 experimental_migrated_v0321 迁移/显式值
             // 保留原状，不翻转）。
             experimental_persist_last_known: true,
+            // B-1（v0.3.27）：30 天无读数自动遗忘，设 0 可关。
+            forget_offline_days: FORGET_OFFLINE_DAYS_DEFAULT,
             experimental_stats: true,
             experimental_per_device_polling: true,
             experimental_bluetooth_wired: true,
@@ -870,6 +884,19 @@ impl Config {
                     saw_experimental_persist = true;
                     cfg.experimental_persist_last_known = *b;
                 }
+                // B-1（v0.3.27）：长时间离线设备自动遗忘天数；0 = 永不。
+                ("forget_offline_days", Value::Int(n)) => {
+                    let clamped = (*n).min(FORGET_OFFLINE_DAYS_MAX);
+                    if clamped != *n {
+                        warn(
+                            key,
+                            &format!(
+                                "out of range 0..={FORGET_OFFLINE_DAYS_MAX}; clamped {n} -> {clamped}"
+                            ),
+                        );
+                    }
+                    cfg.forget_offline_days = clamped;
+                }
                 ("experimental_stats", Value::Bool(b)) => {
                     saw_experimental_stats = true;
                     cfg.experimental_stats = *b;
@@ -1000,6 +1027,7 @@ impl Config {
                     | "icon_font_tier_thresholds"
                     | "icon_font_tier_colors"
                     | "experimental_persist_last_known"
+                    | "forget_offline_days"
                     | "experimental_stats"
                     | "experimental_per_device_polling"
                     | "experimental_bluetooth_wired"
@@ -1154,6 +1182,8 @@ impl Config {
              # 实验室（试验功能）：v0.3.22 起新装默认开（D-85）；显式值（含 false）保留（C-09）。\n\
              # 尚未完成全量真机验证——可到 设置→精细化设置 逐项关闭；保存后重启生效。\n\
              experimental_persist_last_known = {}\n\
+             # 长时间离线设备自动遗忘（天，0 = 永不）：超过该天数无读数的虚拟条目自动移除。\n\
+             forget_offline_days = {}\n\
              experimental_stats = {}\n\
              experimental_per_device_polling = {}\n\
              experimental_bluetooth_wired = {}\n\
@@ -1188,6 +1218,7 @@ impl Config {
             self.icon_text_scale_migrated_v0318,
             self.icon_bg_scale,
             self.experimental_persist_last_known,
+            self.forget_offline_days,
             self.experimental_stats,
             self.experimental_per_device_polling,
             self.experimental_bluetooth_wired,
