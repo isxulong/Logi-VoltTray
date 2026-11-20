@@ -23,7 +23,7 @@
 - 最新已发布版本：v0.3.27（2026-11-21）——用户报告三缺陷修复批（B-1 离线设备删不掉 / B-2 未钉选时托盘图标跳台 / B-3 HTML 报告过繁缺纵轴），决策 D-100～D-103，明细见 volttray/RELEASES.md v0.3.27 与 volttray/docs/design-v0327-three-fixes.md。
 - 上一版 v0.3.26（2026-10-31）：红蓝对抗波二落地批（唤醒归因与省电保护修复 + 治理文档两批 + 导出脱敏加强）。
 - main HEAD：以远端 git log 为准（本文件所在提交即 v0.3.27 发布对账登记）。
-- 已合入 main、未发版的内容：无（截至 v0.3.27 tag 全量发出）。
+- 已合入 main、未发版的内容：`.github/workflows/nightly.yml` 的 `30-nights review-due` 步修复（T-05 闭钟/挂起不再误判为结构损坏，commit `bbd359a`，经验 E54；纯 CI 行为，用户可见面无变化，随下一版本发布）。
 - v0.3.27 关键行为变化面（D5 兼容性声明，接手人须知道）：①未钉选时的自动展示从「每次刷新取最低电量」改为「保持当前设备 + 3 个百分点滞回」，充电态优先让位；②菜单虚拟行由扁平项改子菜单（钉选 + 忘记此设备），设备行改子菜单不计入固定项 9 项额度；③新增配置键 `forget_offline_days`（默认 30 天、`0` 关闭自动遗忘），只经 `config.toml` 暴露、设置窗口无控件；④HTML 报告默认「简洁视图」，完整内容折叠在 `#full`（内容零删减）；⑤`LastKnownStore` 新增 `purge_dirty`，删除动作立即落盘且短路 10s 全局节流。
 
 ## 3. 待办全景
@@ -46,7 +46,7 @@
 
 ### 3.3 常态运行
 
-- nightly 触发时刻以 `.github/workflows/nightly.yml` 的 cron 字段为准（G-16：不写具体时刻，cron 改动即文档失真）；评审步监控治理时钟 T-05（30 晚评审：起算 2026-10-20，due 2026-11-19；时钟单源＝docs/experience/reconciliation-clocks.yaml，解析失败必须响警报，见改进项 E19 / 经验 E39）。
+- nightly 触发时刻以 `.github/workflows/nightly.yml` 的 cron 字段为准（G-16：不写具体时刻，cron 改动即文档失真）；评审步监控治理时钟 T-05（30 晚评审：起算 2026-10-20，due 2026-11-19，**2026-11-20 已结案转 `closed`**；时钟单源＝docs/experience/reconciliation-clocks.yaml，解析失败必须响警报，见改进项 E19 / 经验 E39；闭钟 / 挂起属正常终态，门禁须无信号退出、不得判为结构损坏，见经验 E54）。
 - 此前由同平台（aily）的连续巡检任务看护（同平台线索，跨平台忽略）。
 - 接管 continuous 周期任务 / 每日首次巡检前，先看任务「周期执行概况」的下次执行时间：显示过去时间＝调度已静默失效，用 `aily-cli task update <id> --next 15m` 重锚并回读确认（详见经验 E43）。
 
