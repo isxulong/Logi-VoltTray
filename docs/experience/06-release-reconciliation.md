@@ -28,7 +28,7 @@
 | 时钟 | 起算日 | 到期日 | 责任主体 | 到期判据与逾期处置 |
 | --- | --- | --- | --- | --- |
 | T-14 命名与商标评估 | 本期 Release 日（v0.3.20，2026-10-21） | 挂起（原到期日 2026-11-06 已失效，2026-10-24 用户决策取代；机器可读口径＝YAML `status: suspended` / `due: null`） | 维护者（原到期提醒：traffic-snapshot 每日步，时钟挂起期间不产生 T-14 到期信号） | **2026-10-24 用户决策登记：暂不更名（用户决策 2026-10-24）**——取代原「2026-11-06 前咨询法务裁决」时钟（2026-10-23 咨询法务路径登记随之失效）；时钟状态＝**用户已拍板暂缓，重新评估时点待定**。重新评估时点确定后先改 reconciliation-clocks.yaml（status 改 active 并填 due）再同步本行；挂起期间原「逾期不裁决即阻塞渠道扩张」处置不生效 |
-| T-05 fuzz 30 晚 | T-05 fuzz 接电合入日（2026-10-20，单源＝reconciliation-clocks.yaml T-05 行 start；改进项 E19 起 nightly.yml 不再硬编码） | 2026-11-19（30 晚常量下限；单源＝YAML due 字段） | 维护者（数据源：nightly run `createdAt`） | 按最近一次 nightly run 的 `createdAt` 校核**实际运行晚数**，issue 正文写实际晚数，30 仅作起算日常量下限（F-A10） |
+| T-05 fuzz 30 晚 | T-05 fuzz 接电合入日（2026-10-20，单源＝reconciliation-clocks.yaml T-05 行 start；改进项 E19 起 nightly.yml 不再硬编码） | 2026-11-19（30 晚常量下限；单源＝YAML due 字段） | 维护者（数据源：nightly run `createdAt`） | 按最近一次 nightly run 的 `createdAt` 校核**实际运行晚数**，issue 正文写实际晚数，30 仅作起算日常量下限（F-A10）。**2026-11-20 对账结案**：实测 `createdAt >= 2026-10-20` 共 37 次 nightly run、success 31 ≥ 30 下限，判据达成、时钟转 `closed`（单源 reconciliation-clocks.yaml 已同步），issue #24 同日处置闭环 |
 | T-09 英文评审 | 英文版上线日（`README.en-US.md` 合入 main，2026-10-21） | **2027-01-19** | 维护者（到期提醒：traffic-snapshot 每日步） | 英文版上线日 + 90 天 |
 
 **过程度量（P0-1：3 个带消费方的指标；每次 Release 对账时在下表登记行填当版数值）**：
@@ -49,8 +49,11 @@
 | v0.3.24 | 0 | 0 | 1（E44 新条款随经验库红蓝对抗修订批 2026-10-27 合入 main，CI run 40433752017 / head 5efb5074；E43 于 10-26 发布前合入、不属本版回写） | 窗口内（10-24 15:40Z–10-26 09:04Z）ci.yml 全绿、release run 40296802580（head 17e5026d，release id 424084373）一次通过；nightly 红（10-25 评审步、10-26 advisory）不属发布链路、不计入（2026-10-27 补登） |
 | v0.3.25 | 1 | 1 | 0（本版无滞后回写；E44 用户可见面描述偏差观察项随本版 RELEASES.md 同日登记） | CI 红绿史 1 次：run 40695132623（10-28，head 74fef25e，ubuntu 菜单签名测试模块位置致 CI 失败）→ 修复提交 4aa5cb79（menu_sig_tests 移至文件末，零断言改动）转绿（run 40702084478）；chore CI（run 40706407589，head 711d9120）与 release run 40707638547 均一次通过；三方 sha256 比对一致（CI 日志＝Release 资产＝本地重算，2026-10-28 登记，GitHub API 实测） |
 | v0.3.26 | 候选 17（实现分支 CI 迭代红 15 次＋质检复核退回 2 次；归并口径留维护者裁决定档） | 候选：质检复核拦截 8 条（复核一 P1×1+P2×2、批三复核二 P1×2+P2×3）＋CI 迭代红 15 次（条级明细未逐 run 统计；定档留维护者裁决） | 0（候选——本版经验回写 E45–E48＋04 §7/05/06 增补随 docs 批 PR 于发版当日开出，滞后以实际合入日定档） | 实现分支 fix/impl-fused-core CI 迭代红 15 次（10-30 18:57–22:17Z，fmt 与编译两型逐次分型处置，见 01 E48）→ 41137720468 转绿；四 PR 按编排合并（#18→#20→#19 rebase 保 G-33→#21，见 01 E45），merge commit 1ccf9b60e/c322e3d64/db9da3872/373a1dfc2 后 main 四次 CI（41162623174/41164678215/41172839430/41178783209）与 release（41178801290，含 actionlint 步）均一次通过；三方 sha256 比对一致（CI 日志＝Release 资产＝本地重算，2026-10-31 登记，GitHub API 实测）；E9 unsafe 台账实测 97≠台账 96（statsexport.rs +1），打回登记见 F.2 |
+| v0.3.27 | 4（明细见备注，逐次计） | 3 | 0（E50–E53＋06/03 回写随发版当日 docs 提交合入） | 打回明细（C-16 逐次计）：① CI run 44786778488（head cc6f9f4d）ubuntu/clippy 红 `unresolved import crate::imp`（rustc unresolved-import 错误码）（纯逻辑函数 `next_pin` 误置于 `#[cfg(windows)] mod imp` 内）；② 同根因复推 run 44786823091（head 503c6f2f）二度红；③ 06 F.1 unsafe 台账复核项打回（实测 98 ≠ 台账 96 → 撤 tag v0.3.27 ＋ cancel release run 44789300422 ＋ 台账回写 96→98 后重建提交）；④ Release 说明体丢失（发布后实测 body 仅 51 字节、annotated tag 正文未进正文）→ PATCH 重写至 3823 字符。 拦截条数口径：①03 B1 CI 全绿 ②06 F.1 unsafe 台账 ③03 D1/D2 说明体完整性，各记 1 条。 通道与自检注记：`git push` 本版多次失败（`Recv failure: Connection was reset` / `RPC failed; curl 56` / 认证失败），改走 REST API 复制提交（逐 blob→tree→commit→PATCH ref），重建后 tree 与本地逐字节一致 `fb40b354dc01db673b2fb3004cfdc098f2dfcfc1`；通道故障不构成门禁核验对象，按 C-16 不计打回。本地 pre-push 自检（`cargo test --workspace --locked`）拦下 2 个真实缺陷（persist `flush_if_due` 的 `purge_dirty` 未短路 10s 全局节流、B-2 滞回测试断言写反），属开发期自检、不计门禁拦截（若维护者口径要求计入，则打回 6 / 拦截 5）。 触发判定：v0.3.26（定档 17）与 v0.3.27（4）连续两版 >N（N=2）→ **触发机制复盘**；复盘结论按本表约定于下一次对账附（期限＝下一版发布窗口）。 |
 
 **v0.3.26 行候选值收敛登记**（2026-10-31，按 G-37 观察项格式）：定档责任主体＝维护者｜复查时点＝下一版（v0.3.27）发布对账时回填定档结论｜判定标准＝打回次数 / 拦截条数归并口径与经验回写滞后天数经维护者裁决后由候选转为定值（回写滞后以本批 PR 实际合入日定档；若合入日晚于 2026-10-31，README 增补戳日期与本行同步调整）｜期限＝下一版发布窗口｜逾期处置＝逾期未定档自动升级主 AD 裁决并留痕。定档前本行候选值不进入「连续 2 版 >N」触发判定的消费——候选不是定值，消费候选等于替维护者定档。
+
+**v0.3.26 行候选值定档结论（2026-11-20，按上行「逾期处置」由主 AD 按 C-16 口径裁定并留痕）**：① 打回次数＝**17**（实现分支 CI 迭代红 15 次＋质检复核退回 2 次）；② 拦截条数＝**8**（质检复核 8 条：复核一 P1×1+P2×2、批三复核二 P1×2+P2×3）；CI 迭代红 15 次只计入打回次数、不重复计入拦截条数——同一事件不得在两个指标重复膨胀；③ 经验回写滞后＝**0**（E45–E48 与 04/05/06 增补当日合入 main）。裁定依据：C-16 判定边界（核验不通过→返工→再提交记 1 次）与 03 门禁「不通过→返工」条数口径；两项归并口径一经定档即为跨版可比基线，后续版本沿用。回滚点：本段为纯追加行，维护者改判只需追加新定档行并注明取代关系，不改本行。
 
 **「链路打回次数」取数规程**（C-16，2026-10-22 登记）：判定边界＝本版发布链路中任一「核验不通过 → 返工 → 再提交」记 1 次，同一问题被反复打回按次数逐次计，提示类（lint-only / advisory）不计；取数位置＝03 门禁逐条核验记录、CI run 红绿史、评审 / 找茬打回单三处对账时人工汇总；跨版归属＝打回计入「发起返工」时所在版本，返工完成跨入下一版不改记。
 
@@ -85,6 +88,7 @@
   - 未决裁决｜T 系列遗留子项跟踪结论（v0.3.24 / v0.3.25 两版积压，见本文件头断档登记行）｜责任主体：维护者｜期限：下一版发布窗口｜逾期处置：自动升级主 AD 裁决并留痕。
   - 未决裁决｜双独立复核一席长期不可用时的替补规则（HANDOVER §3.2 在册未决项；临时口径＝批次挂起＋主动推送等用户裁决）｜责任主体：用户｜期限：下一版发布窗口｜逾期处置：自动升级主 AD 按在册建议值（软件架构师第一替补＋当轮快速授权通道）裁定并留痕。
   - 观察项｜G-37 cargo tree CI 断言降级观察（39 条报告，复核一 P2-2 补登）：前半「04§2 补 app 侧归属规则」已随 PR #20 落地；后半「cargo tree CI 断言降级、观察一个版本量误报再固化」按裁决不立即落地，登记观察三要素——**观察起点**：v0.3.26 发版日｜**复查时点**：下一个版本窗口（发布对账时回填观察结论）｜**判定标准**：观察期内 cargo tree CI 断言误报量＝0 → 下一窗口固化为硬断言；误报量 ≥1 → 维持降级（advisory）并顺延观察一版，误报原因随对账登记本行｜责任主体：维护者｜期限：下一版发布窗口｜逾期处置：自动升级主 AD 裁决并留痕。
+  - **v0.3.27 复查结论（2026-11-20，按判定标准裁定）**：观察窗口内 `cargo tree` CI 断言误报量＝**0**（`ci.yml` 全仓 0 命中该断言、本版无相关变更，断言未接线故无误报可产生）→ 按判定标准应**固化为硬断言**；固化属 workflow 代码变更，不在本批纯文档批次落地（G-10 同类判据），故登记「待实施」并顺延：**限定落点**＝下一代码窗口（E10 独占窗口或首个含 workflow 变更的版本）｜**期限**＝下一版发布窗口｜**逾期处置**＝自动升级主 AD 裁决并留痕。
 - 时钟到期开单升级评审位（C-05，2026-10-22 登记）：T-14/T-09 首月 advisory
   期满（2026-11-23）后，traffic-snapshot 每日步仅当本区**以独立列表行**
   登记评审结论才执行自动开单，登记行格式＝行首列表项
@@ -169,11 +173,13 @@
 - D8 触发式条款、分支保护可选项登记：**删（留痕见本区留痕节）**——无机械消费方可接线；
 - 本清点不新增任何「必填登记行」类条目（G-08 判据：登记行 / 提醒 / 人工回读不算机械消费方，不作为修复形态）。
 
-**G-10 出清时钟硬联动实施者声明（D-2 裁决登记，2026-10-31，一次性声明记录非常设登记行）**：
+**G-10 出清时钟硬联动实施者声明（D2 裁决登记，2026-10-31，一次性声明记录非常设登记行）**：
+
+> 编号口径（2026-11-20 v0.3.27 对账修订）：本段 `D2` 为**治理裁决流水号**，不属 [volttray/docs/decisions.md](../../volttray/docs/decisions.md) 的 `D-NN` 决策编号体系；原文把流水号写成「`D`＋ASCII 连字符＋`2`」的形态，会被 nightly drift-check 的 `\bD-[0-9]+\b` 引用扫描误判为决策引用（nightly 报 missing_D 即指向该流水号，issue #22 连续命中 20 天的根因），故改称无连字符形态。
 
 - 03 D3 红线在册项（P0 wake-force 重枚举 / P1 在线灰显装填探测）出清时钟到期动作（release 阻断／自动升级）的硬联动，需 workflow 读取机器可读的在册状态输入（reconciliation-clocks.yaml 增字段或等价结构化载体）——属 workflow 代码变更，不在纯文档批次落地；实施者声明：**本批暂不可硬联动**；
 - 在册项在硬联动接线前按 03 D3 存量披露口径逐版披露；硬联动接线随 E10 独占窗口实施（2026-10-31 用户裁决 U-4：E10 立即开工）一并评估；
-- D-2 缺省规则：日后新增在册项未逐条登记硬联动可行性声明的，一律视为不可硬联动、自动走逐版披露。
+- D2 缺省规则：日后新增在册项未逐条登记硬联动可行性声明的，一律视为不可硬联动、自动走逐版披露。
 
 **N-3 降级必附取证（规则行原文）**：
 
@@ -305,6 +311,34 @@ D8 核验｜日期：2026-10-28｜结论：通过｜异常项：无
 - 分支保护登记项：随 G-08 二分清点删除（2026-10-31 留痕，见 F.1 留痕区），本版起不再逐版复读；
 
 D8 核验｜日期：2026-10-31｜结论：通过｜异常项：无
+
+**v0.3.27 发布对账记录（2026-11-20 发布并当日登记，本次由 AI 代理执行）**：
+
+- D8 注入防御核验：通过（见末行；本窗口新增 issue 仅 #24——nightly 30 晚到期评审自动开单，2026-11-20T11:49:25Z，发布之前、0 评论、无指令性文本；issue #22 为 2026-10-31 起连续命中的 advisory 自动单，本版对账内已定性根因并修复（见异常注记②），其正文与 10 条评论均为 workflow 模板生成、无外部指令性文本；本轮推送走 REST API、无 PR 面；全程 GitHub API、CI run 与本地源码实测证据驱动）；
+- D9 / T-14 时钟状态检查：T-14 维持挂起（`status: suspended` / `due: null`，YAML 单源实测无变化）；本版无渠道扩张动作（未上 winget、未新增分发渠道），D9 通过；T-09 英文评审时钟 `due 2027-01-19` 未到期、状态 active 无变化；T-05 本版到期待处置 → 见下条；
+- T-05 时钟结案（本版到期项，issue #24 处置出口）：起算日 2026-10-20、到期日 2026-11-19，本版为到期后首个发布窗口。实测 `createdAt >= 2026-10-20` 共 **37 次 nightly run、success 31**（另 failure 6：10-21×2 / 10-22 / 10-23 / 10-24 / 10-25，失败步分别为 fuzz frame_fuzz smoke 与 review-due 检查步，均为夜间定时链自身问题、无一进入发布链路），成功晚数 31 ≥ 常量下限 30 → 判据达成，时钟转 `closed`（单源 `docs/experience/reconciliation-clocks.yaml` 已同步；本文件时钟表 T-05 行为人类可读镜像，两处一致）；issue #24 按「下个发布窗口前处置并在 Release 说明标注」出口同日闭环。**口径差登记**：issue #24 正文写「全绿 30 晚」，因开单时点（11:49Z）早于当日 run 完成，复算值为 31；按 issue 原文登记开单口径、以复算值 31 作为判据证据，1 晚差异不改变结论；
+- T-07 复核（2026-11-20 实测 `download_count`）：20 个 Release 累计 242 次下载，单资产最高 36（v0.3.8），本版发布当日 exe 1 / minisig 0 / sha256.txt 1——远低于「单资产 ≥100」阈值，维持手动形态（menu.rs 固定项 + `ShellExecuteW` 常量 URL），不升自动化；
+- verify.sh ↔ ci.yml 同步抽查（F-B8）：v0.3.27 tag 实测 ci.yml job 集＝`windows` / `ubuntu` / `microbench` / `decisions-append-only` / `fuzz-smoke` / `redline-guard-advisory`，与本批 diff 前形态一致（本批未触 ci.yml / release.yml / verify.sh）；`verify.sh:8` 覆盖声明已明文列出不覆盖项（protocol freeze python unittest / release / nightly / fuzz-smoke / decisions-append-only / microbench），v0.3.23 登记的覆盖声明漂移候选**已由该声明闭环**，本项判通过；
+- actionlint 升必过：release run 44791552626 的 ci-gate/ubuntu 内 `actionlint` 步 success、Post 步 success、零告警（jobs API 实测 2026-11-20）；
+- E9 unsafe 台账复核：**v0.3.26 的 97≠96 打回项本版闭环**。实测 `grep -ra 'SAFETY(E9)' volttray/crates | wc -l` ＝ **98**；逐文件 python 计数（`unsafe{...}` 块 / `unsafe fn` / `unsafe extern "system" fn` 三类正则）：aumid 2 / autostart 5 / bootlog 5 / export 6 / icon 3 / main 12 / rawinput 4+0+1 / settings 23+18+5 / single 2 / statsexport 8+0+3 / timelocal 1 → 块 71 + fn 18 + extern 9 ＝ 98，与 [07-unsafe-ledger.md](07-unsafe-ledger.md) 现值逐行一致。两处差异已同批回写台账：① statsexport 10→11（v0.3.26 PR #19 新增，当版 F.2 已判打回但逐文件表漏回写）；② main 11→12（本版新增 `confirm_forget_device` 的 `MessageBoxW`，`SAFETY(E9)` 注释同批已写）。**本项判通过**；
+- 05 容量与代码位置快照复核（REV-22 配套）：v0.3.27 tag 代码实测 `DIAG_CAPACITY = 2048`（`crates/app/src/observer.rs:21`）、`LOG_TAIL_MAX_LINES = 4096`（`crates/app/src/diag_export.rs:29`）、`export_diag` 组装位置在 `crates/tray/src/export.rs`——与 05 头部「容量与代码位置快照时点」行声称值一致，无漂移、无打回。v0.3.26 的「38 ≠ 20 字段计数」打回已由 05 的「口径桥接」行（38 为 `DIAG_EXPORT_TOP_FIELDS` 顶层字段实测、20 为 2026-10-26 时点快照）闭环，本版不再重复判负；
+- D11 双设备环境实测：**判打回（留痕缺失）**。D11 条款合入 `7ec8267`（2026-10-31），`git merge-base --is-ancestor 7ec8267 373a1dfc2` ＝ YES → 合入后首个 Release 为 v0.3.26（该版无留痕不判负），**判负自本版 v0.3.27 起生效**。本版三处修复（B-1 虚拟条目子菜单与自动遗忘、B-2 展示位滞回、B-3 简洁视图与纵轴）均为单机可验证项，未取得真机双设备实测留痕（沙箱环境无第二台 Logitech 设备），如实登记为未通过项；处置＝随下一版补做（口径：至少两台设备同时在线的托盘菜单截图 + 电量交叉时图标不跳台的观察记录）。D11 核验｜日期：2026-11-20｜结论：打回｜实测设备：0 台（沙箱无第二台真机）｜异常项：留痕缺失，随下一版补做
+- D12 位图默认关兼容性披露：本版无位图相关变更（`export_activity_bitmap` 首次合入 `43fb8bd` 属 v0.3.26，其 Release 说明已含「位图」「ActivityBuckets」「export_activity_bitmap」「schema_version」四要点，首生效版合规）→ 本版**不触发 D12**；改按 D5「默认值或显示行为突变」核验：本版确有显示行为变化（未钉选时图标不再随最低电量抖动、虚拟行改子菜单、HTML 报告默认简洁视图），三项均已在 Release 说明「升级注意事项」头部作兼容性声明，D5 判通过；
+- 版本号与 chore 检查（A1/A2/A3 惯例）：tag v0.3.27（annotated tag object `de2ceff6980f0ae0c8a43ca0919062d823678277`）→ 指向 `4a4eb46ae6cfe12eef3ef5aca81f647b33798d9c`「chore(release): v0.3.27」，其父 `b7462ec5d393c6bd6cffd3d45f4ddd0ebfcd4313`「fix(v0.3.27): 修三处用户报告缺陷（B-1/B-2/B-3）」、祖父 `347903f`。**A1 成立**（版本号独立 chore：chore 仅 `docs/HANDOVER.md` / `Cargo.lock` / `Cargo.toml` / `RELEASES.md` 四文件）；**A2 成立**（tag 指该 chore 提交，release run 44791552626 的 `verify-tag-on-main` job success）；**A3 成立**（chore 内零业务代码；业务改动全部落在父提交 12 文件：README.en-US.md / README.md / docs/experience/07-unsafe-ledger.md / docs/experience/README.md / attribution.rs / config.rs / core.rs / persist.rs / tray/main.rs / tray/menu.rs / decisions.md / design-v0327-three-fixes.md）；
+- 三方 sha256 比对：release.yml 日志 SHALINE ＝ Release 资产 `volttray-tray.exe.sha256.txt` ＝ 本地从 API 下载 `volttray-tray.exe` 后独立重算，三者一致（`016c9aa98883a4c6dc9ee789c4fa3e9ee2feeef64502c3026bcd30978615ca6a`，资产大小 1,799,168 字节；minisig 资产 287 字节随附件发布）。注：本地独立 `cargo build --release` 产物为 1,798,144 字节 / `d96ad624d3aa3cedece04455f0a9fc981ee2d5720c06c98944e4263ad678825e`，与 CI 产物不同属工具链与构建环境差异，tag 正文已明示「以 Release 附件为准」，不构成打回；
+- release-contract 断言（D10）：build-release 步骤 7 `release-contract assertions` success、步骤 8 advisory success、步骤 12 `inject nightly status` success、步骤 14 `upload release assets (signed)` success（minisign 已配置、签名自验通过），D10 判通过；
+- G-08 / 分支保护登记项：维持维护者自决，本版无变更；
+- 观察项：G-37 `cargo tree` CI 断言观察已届满 → 本版复查结论「误报量 0、应固化硬断言、属 workflow 变更故顺延下一代码窗口」，登记于 F.1 评审/登记项 G-37 行下方，此处不重复判读；
+- 异常注记：
+  1. **Release 说明体丢失（发布后缺陷，已修，流程未修）**：首次发布后实测 Release body 仅 51 字节＝「最近一次 nightly：success（run 创建于 2026-11-20T11:42:49Z）」，annotated tag 正文（3,596 字符）未成为正文。根因：release.yml 的 `inject nightly status into release body` 步只写 `$RUNNER_TEMP/release-body.md` 一行，随后 `softprops/action-gh-release@v2` 带 `body_path` + `append_body: true`——append 仅在「Release 已存在」时保留既有正文，本次 Release 由该 action 新建，tag 正文被丢弃。同类历史缺陷：v0.3.25 body 亦仅 51 字节；v0.3.24 / v0.3.23 / v0.3.26 分别为 6,680 / 5,745 / 887 字符（人工预建或补写）。处置：以 `PATCH /repos/isxulong/Logi-VoltTray/releases/453042548` 重写 body＝tag 正文 + 分隔线 + nightly 行 + 「本版发布对账附注」段，最终 3,823 字符。**遗留**：release.yml 的 body 组装逻辑仍会在下一个「无预建 Release」的 tag 上复现该缺陷 → 登记待实施项（落点＝下一代码窗口，与 G-37 同批），期限＝下一版发布窗口；
+  2. **issue #22 连续命中 20 天的根因定位与修复**：nightly drift-check 第 ③ 查（D 编号存在性）用 `refs_D = \bD-[0-9]+\b` 扫 docs/experience 等目录，而 06 的治理裁决流水号原先写作「`D`＋连字符＋`2`」（`b0a8cc1` 引入）被误判为 decisions.md 的决策引用 → nightly 报 missing_D 指向该流水号。本地按 workflow 同命令复跑四查：① 旧指针无命中；② E 编号 defs 49 / refs 49 全部有定义；③ D 编号 defs 103 / refs 104、仅该流水号缺失；④ 唯一性通过。**修复**：把该流水号改写为无连字符形态 `D2` 并在原处加编号口径注记（说明它是治理裁决流水号、不属 decisions.md 的 D-NN 体系），同步把 03 门禁 D3 行同一流水号改成无连字符形态；**未**改成 `D-02`（那会指向语义无关的真实决策条目）。验证出口＝下一晚 nightly drift-check 第 ③ 查转绿；
+  3. **推送通道故障（非门禁项）**：`git push` 本版全部失败（`Recv failure: Connection was reset` / `Failed to connect to github.com:443 after 21028 ms` / `RPC failed; curl 56` / `fatal: Authentication failed`），`info/refs?service=git-receive-pack` 探活 401/000 而 API 全通 → 改走 REST API 复制两个本地提交（逐 `POST /git/blobs` → `POST /git/trees`（base_tree）→ `POST /git/commits` → `PATCH /git/refs/heads/main` force）；重建后 tree 与本地逐字节一致 `fb40b354dc01db673b2fb3004cfdc098f2dfcfc1`（184 个 blob 全等、无 exec-mode 差异），提交信息 UTF-8 正确。通道故障不构成门禁核验对象，按 C-16 不计打回；
+  4. **本地 pre-push 自检拦下 2 个真实缺陷（已修）**：`persist::flush_if_due` 的 `purge_dirty` 未短路 10s 全局节流（用户点「忘记此设备」后要等下一个 IO tick 才落盘）、B-2 滞回单测断言写反（把「交叉」写成「同向下降」）。属开发期自检，不计门禁拦截，已在 F.1 v0.3.27 行备注说明；
+  5. **D11 判负**（详见上条 D11 行）；
+  6. **本版 CI 红绿史**：run 44786778488（head cc6f9f4d）与 44786823091（head 503c6f2f）ubuntu/clippy 红（`unresolved import crate::imp`（rustc unresolved-import 错误码），纯逻辑函数 `next_pin` 误置于 `#[cfg(windows)] mod imp` 内）→ 移置 crate root 修复 → run 44790537633（head 4a4eb46）六 job 全绿；另因 E9 台账不一致撤 tag v0.3.27 + `cancel` release run 44789300422（202）后重建提交重打 tag——三次均按 F.1 v0.3.27 行逐次计；
+
+D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复待下一 nightly 验证
+
 
 对账表（状态口径：2026-10-20 收官批（第 4 批）实施完成时点，第 1/2/3/4 批行已随各自批次实施刷新，实施令 19 节全部收口；「取证动作/复核日期」登记位
 按 N-3 规则行填写，未降级条目留「—」。另注：表内「已实施」为实施令时间线口径，其中第 2 批及以后批次引用的 commit 与工作流/台账文件（0005/0007/0008/0009 等）已随补丁批①–⑤全部合入 main（批④⑤于 2026-10-21 收官合入，week1 携带期的「本批树中尚不存在」披露就此闭环）：

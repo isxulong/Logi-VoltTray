@@ -8,6 +8,7 @@
 
 > 注（2026-10-25 修订批）：E40–E43 为协作方法论条目，按增补批次就地入册；为保全既有锚点与索引不移册，主题归口见 [02](02-collaboration-playbook.md)。
 > 注（2026-10-31 增补批）：E45 / E47 / E48 同按增补批次就地入册（合并编排、git 对象库修复、CI 红分型）；E46（oneshot 子任务生命周期）归口 [02](02-collaboration-playbook.md)。
+> 注（2026-11-20 增补批）：E50–E53 按增补批次就地入册（v0.3.27 发版链路：跨平台 cfg 门控、台账闭环、Release 正文丢失、REST 复制提交等价性）。
 
 ---
 
@@ -541,6 +542,52 @@
 **溯源**：上述 GitHub Actions run 实录（run id 可公开查询）；[06-release-reconciliation.md](06-release-reconciliation.md) F.1 v0.3.22 / v0.3.26 度量登记行。
 
 **与既有条目边界**：[E32](01-engineering-lessons.md) 管 CI 红 fix-forward 纪律（修复新增提交、不 rebase 粉饰历史）、[E39](01-engineering-lessons.md) 管 CI 脚本纪律（job 级工作目录与异常可见）；本条管失败分型与分路处置，互补不合并。
+
+---
+
+## E50. 要在非 Windows target 上编译的纯逻辑，必须放 crate root，不能留在 `#[cfg(windows)]` 模块里（2026-11-20）
+
+- **教训**：Windows 专属代码惯用 `#[cfg(windows)] mod imp { ... }` 隔离，但**同一 crate 内被单测覆盖的纯逻辑函数一旦放进这层门控，非 Windows target 就编译不到它**——ubuntu CI 在 `clippy --workspace --all-targets` / `cargo test --workspace` 阶段直接 `unresolved import crate::imp`（rustc unresolved-import 错误码）。判断标准不是「这段代码是否服务 Windows」，而是「这段代码是否需要在 Linux 上被编译或被断言」。纯函数（无 Win32 调用、无平台类型）默认就该放 crate root，只在确实调用 Win32 时才进 `mod imp`。
+- **真实案例**：v0.3.27 为实现「再次点击设备行取消钉选」新增 `pub(crate) fn next_pin(current: Option<&str>, clicked: &str) -> Option<String>`（纯字符串比较），最初放在 `crates/tray/src/main.rs` 的 `#[cfg(windows)] mod imp` 内，并在同 crate 测试模块 `use crate::imp::next_pin;`。本地 Windows `cargo test -p volttray-tray` 86 passed 全绿；推上去后 ubuntu job 连续两次红（run 44786778488 / 44786823091），错误行 `unresolved import crate::imp`（rustc unresolved-import 错误码），note 指出 `mod imp` 在 main.rs:137 被 `cfg(windows)` 门控。修复＝把该函数移到 crate root（紧跟 `menu_content_sig`，带 `#[cfg_attr(not(windows), allow(dead_code))]`），调用点改 `crate::next_pin`，测试内 import 删除 → run 44790537633 六 job 全绿。
+- **可执行做法**：① 新增函数先问「它有没有一行 Win32 调用」——没有就放 crate root；② 确实要留在 `mod imp` 内的纯逻辑，至少不要给非 Windows target 写测试引用它；③ 本地只跑 Windows 时，改动 `crates/tray` 的任何 `pub(crate)` 可见性 / 模块位置，都要额外跑一次 `cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu`（或直接在 CI 上看 ubuntu job）；④ 跨平台死代码用 `#[cfg_attr(not(windows), allow(dead_code))]` 消 warning，而不是把它塞回门控模块。
+
+**溯源**：GitHub Actions run 44786778488（head cc6f9f4d）与 44786823091（head 503c6f2f）ubuntu/clippy 红；修复后 run 44790537633（head 4a4eb46）全绿；[06 F.1 度量登记行 v0.3.27](06-release-reconciliation.md)。
+
+**与既有条目边界**：[E48](01-engineering-lessons.md) 管 CI 红先分型（fmt / 编译 / 测试三族不混同），本条是「跨平台 target 差异」这一族的定位与预防，互补不合并。
+
+---
+
+## E51. 打回项的闭环是「台账回写」，不是「对账记录已登记」；台账实测要放在发版前（2026-11-20）
+
+- **教训**：发布对账把差异判为打回后，只在对账记录里写「已登记、留维护者随下代码窗口执行」**等于没闭环**——下一版对账读的是台账本身，台账没改，同一处差异会以「新差异」的姿态再次出现，甚至触发撤 tag 重做。闭环判据必须落在「台账现值 == 代码实测值」这一条可机械核验的等式上，而不是「有没有写过一段说明」。同样的道理适用于一切 append-only 台账（unsafe 计数、字段清单、决策编号）。
+- **真实案例**：v0.3.26 对账实测 `grep -ra 'SAFETY(E9)' volttray/crates | wc -l` ＝ 97，台账记 96，差异定位在 `crates/tray/src/statsexport.rs` 10→11（PR #19 新增 1 处 unsafe、`SAFETY(E9)` 注释同批已写），当版 F.2 判打回并把「台账同步留维护者随下代码窗口执行」写进了对账记录——但台账逐文件表未回写。v0.3.27 发布后对账再测已是 98（本版又新增 1 处 `MessageBoxW`），台账仍记 96，差异被当成「本版新出现的问题」处理：撤 tag v0.3.27（DELETE `/git/refs/tags/v0.3.27`）、cancel release run 44789300422、回写台账 96→98（含 :26-31 变更注记）、重建两个提交后重打 tag。**同一条差异被处置了两次**，第二次的代价是发布链路重跑一轮。
+- **可执行做法**：① 对账判打回时，同一轮就把台账改到与实测一致（或明确改成可自动核验的引用式计数），不要留「下个窗口」；② 把台账实测命令提前到**发版前**（打 tag 之前跑一遍 03 门禁清单里的机械项：unsafe 计数、字段清单、job 集、版本号位置），发版后再跑一遍对账；③ 台账改动加变更注记（原值 → 新值 + 来源 + 日期），不改历史行、不静默改数；④ 若已发版才发现不一致，先判断「撤 tag 重发」与「下发补丁」哪个成本低——不安全计数类属文档面事实，撤 tag 重打比带着错数发布更省后续成本。
+
+**溯源**：[07-unsafe-ledger.md](07-unsafe-ledger.md) 计数口径节与 2026-11-21 变更注记；[06 F.2](06-release-reconciliation.md) v0.3.26 打回行与 v0.3.27 复核行；GitHub Actions run 44789300422（cancelled）。
+
+**与既有条目边界**：[E40](01-engineering-lessons.md) 管「成员自述不可信、复核要独立取证」，本条管「取证之后如何让结论活到下一版」，互补不合并。
+
+---
+
+## E52. annotated tag 正文不会自动进 Release 正文：`body_path` + `append_body` 只在 Release 已存在时保留既有内容（2026-11-20）
+
+- **教训**：「写进 tag message 就等于写进 Release 说明」是错的。`softprops/action-gh-release@v2` 在 Release **不存在**时用 `body_path` 的文件内容作为正文——此时 `append_body: true` 没有可追加的对象，tag 正文被整体丢弃；只有 Release **已存在**（手工预建或重跑）时，append 才会把 `body_path` 追加到既有正文后面。因此「tag 正文为说明主体」这一惯例必须有一步显式把 tag message 写进 `body_path`，否则首发必丢。**发布后必须实测 body 长度与关键段落**，不能只看 workflow 绿。
+- **真实案例**：v0.3.27 首次发布（Release 453042548）后实测 body 仅 51 字节＝「最近一次 nightly：success（run 创建于 2026-11-20T11:42:49Z）」，3,596 字符的 annotated tag 正文完全没进正文。根因即 release.yml 的 `inject nightly status into release body` 步只向 `$RUNNER_TEMP/release-body.md` 写了一行。同类历史缺陷：v0.3.25 的 body 亦仅 51 字节；v0.3.24 / v0.3.23 / v0.3.26 分别为 6,680 / 5,745 / 887 字符（人工预建或人工补写，掩盖了流程缺陷）。处置：`PATCH /repos/{owner}/{repo}/releases/{id}` 以 tag 正文 + 分隔线 + nightly 行 + 对账附注重写，最终 3,823 字符。
+- **可执行做法**：① workflow 内先在 `body_path` 文件里**拼上** `git tag -l --format='%(contents)' $TAG`（或 `git for-each-ref`）的输出，再交 action；② 或改为两步：先创建 Release（body 取 tag 正文）、跑完流水线再 `PATCH` 追加构建信息；③ 发布后核验三件事：body 字节数 > 1KB、含说明首段关键词、含校验段（sha256 / 签名 / SmartScreen 披露）；④ 把「Release body 非空且有说明主体」写进对账门禁，作为独立于 workflow 绿的检查项。
+
+**溯源**：`https://github.com/isxulong/Logi-VoltTray/releases/tag/v0.3.27`；`PATCH /repos/isxulong/Logi-VoltTray/releases/453042548`；[06 F.2](06-release-reconciliation.md) v0.3.27 异常注记①（含历史版本 body 字节数对照）。
+
+---
+
+## E53. 推送通道不可用时用 REST API 复制提交，并以「tree 逐字节一致」作为等价性证明（2026-11-20）
+
+- **教训**：`git push` 走的是 `git-receive-pack` 服务，与 REST API 是两条独立通道——HTTPS 上 API 全通、`git push` 全部失败是可能的（本环境反复出现 `Recv failure: Connection was reset` / `Failed to connect ... after 21028 ms` / `RPC failed; curl 56` / `Authentication failed`）。此时正确做法不是反复重试或 force push，而是用 REST API 按对象模型复制提交：读取 base commit 的 tree → 逐文件 `POST /git/blobs`（base64）→ `POST /git/trees`（`base_tree`）→ `POST /git/commits`（`parents`）→ 更新 ref。**但必须证明复制结果与原提交等价**，证明方式是比较 tree sha：`git rev-parse <local>^{tree} <remote>^{tree}` 相等即内容逐字节一致（目录项、文件模式、blob 指针全等）。缺这一步的「API 推送成功」只是看起来成功。
+- **真实案例**：v0.3.27 两个提交（fix 12 文件 + chore 4 文件）在本地 HEAD 与工作区都正确、`cargo test --workspace --locked` 全绿，但 `git push`（含 `--force-with-lease`、`http.extraHeader` Basic 认证、`http.postBuffer` / `http.lowSpeedLimit` 调优）全部失败；探测显示 `GET .../info/refs?service=git-upload-pack` 200 而 `...?service=git-receive-pack` 401/000，API 侧读写均正常。改用脚本按 base commit 347903f 的 tree 逐文件建 blob → tree → commit → `PATCH /git/refs/heads/main`（force），得到远端 `4a4eb46`（父 `b7462ec`）。等价性核验：`git rev-parse '421d995^{tree}' HEAD^{tree}` 两者同为 `fb40b354dc01db673b2fb3004cfdc098f2dfcfc1`，184 个 blob 全等、无 exec-mode 差异、提交信息 UTF-8 正确；随后 `git fetch && git reset --hard origin/main` 使本地与远端一致。
+- **可执行做法**：① 先分通道探活（API `/rate_limit`、`info/refs?service=git-upload-pack`、`...receive-pack`），确认是通道问题而非凭据问题；② 复制脚本按「base tree → blob（逐文件，跳过内容未变者）→ tree → commit → ref」顺序，多提交按父链依次复制；③ ref 更新用 `PATCH /git/refs/heads/<branch>` 带 `force: true`（`POST /git/refs` 不能覆盖已存在 ref）；④ **强制等价性校验**：比较 tree sha、列出两侧文件数与模式差异；⑤ 推送后 `git fetch` + `reset --hard` 把本地对齐，避免下一次本地提交基于已不存在的父；⑥ 全程不把凭据写进脚本产物或提交信息。
+
+**溯源**：v0.3.27 发布链路工作记录；[06 F.2](06-release-reconciliation.md) v0.3.27 异常注记③（tree sha `fb40b354dc01db673b2fb3004cfdc098f2dfcfc1`）。
+
+**与既有条目边界**：[E5](01-engineering-lessons.md) 管「GitHub 实战陷阱：回推错位与 REST 备选通道」的通用形态，本条补「复制提交后的等价性证明」这一必做动作与具体对象模型顺序，互补不合并。
 
 ---
 
