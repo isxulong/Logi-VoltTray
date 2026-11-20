@@ -336,8 +336,9 @@ D8 核验｜日期：2026-10-31｜结论：通过｜异常项：无
   4. **本地 pre-push 自检拦下 2 个真实缺陷（已修）**：`persist::flush_if_due` 的 `purge_dirty` 未短路 10s 全局节流（用户点「忘记此设备」后要等下一个 IO tick 才落盘）、B-2 滞回单测断言写反（把「交叉」写成「同向下降」）。属开发期自检，不计门禁拦截，已在 F.1 v0.3.27 行备注说明；
   5. **D11 判负**（详见上条 D11 行）；
   6. **本版 CI 红绿史**：run 44786778488（head cc6f9f4d）与 44786823091（head 503c6f2f）ubuntu/clippy 红（`unresolved import crate::imp`（rustc unresolved-import 错误码），纯逻辑函数 `next_pin` 误置于 `#[cfg(windows)] mod imp` 内）→ 移置 crate root 修复 → run 44790537633（head 4a4eb46）六 job 全绿；另因 E9 台账不一致撤 tag v0.3.27 + `cancel` release run 44789300422（202）后重建提交重打 tag——三次均按 F.1 v0.3.27 行逐次计；
+  7. **T-05 结案当晚把 nightly 打红（已修，workflow 变更待随下一批次推送）**：按本版对账结论把 `reconciliation-clocks.yaml` 的 T-05 转 `closed`（正确动作），但 nightly.yml 的 `30-nights review-due check` 步断言写的是 `status == 'active' and start`，把「已闭钟」判成「行缺失 / 挂起」并 `::error` + `exit 1` → 2026-11-20 手动 dispatch 的 run 44797266154 中 `fuzz-smoke` step 11 failure（step 8 `fuzz frame_fuzz` 本体 success、step 10 开单步 skipped）。已改为二级判定：结构断言只保「行存在且带 start」，`status != active` 打印状态说明并 `exit 0`（无信号退出）；本地三态回归通过（closed→0 且打印无信号文案、active→打印起算日 2026-10-20、start=null→`::error` + 1）。回写经验 [E54](01-engineering-lessons.md)。
 
-D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复并经 2026-11-20 手动 dispatch nightly（run 44797266154，head 7555d70）实证 drift-check 步 success 后关闭；issue #24 已关闭（T-05 结案）
+D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复并经 2026-11-20 手动 dispatch nightly（run 44797266154，head 7555d70）实证 drift-check 步 success 后关闭；issue #24 已关闭（T-05 结案）；同一 run 暴露的 `30-nights review-due` 步把 T-05 闭钟误判为结构损坏（step 11 failure），根因已定位并按二级判定修复，本地三态回归通过、workflow 变更待随下一批次推送后由 nightly 实证
 
 
 对账表（状态口径：2026-10-20 收官批（第 4 批）实施完成时点，第 1/2/3/4 批行已随各自批次实施刷新，实施令 19 节全部收口；「取证动作/复核日期」登记位

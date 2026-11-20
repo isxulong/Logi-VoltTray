@@ -200,13 +200,23 @@ jobs:
           # 零依赖）；解析失败 ::error 并非 0 退出（时钟失效不得静默）。
           # 不吞 stderr：python traceback 直进 step 日志，真实异常不再被
           # 通用文案掩盖（E19「不得静默」含解析失败可见）。
-          FUZZ_CLOCK_START=$(python3 -c "
+          # E54（2026-11-20 v0.3.27 对账当晚实证）：status 由 active 转 closed/
+          # suspended 是**正常终态**，不是结构损坏——闭钟后本步须「无信号退出」
+          # 而非 ::error 硬红（原断言把非 active 一律判失败，T-05 结案当晚即红）。
+          # 结构断言只保留「行存在且带 start」；status 非 active → 安静跳过。
+          T05=$(python3 -c "
           import json
           d = json.load(open('docs/experience/reconciliation-clocks.yaml', encoding='utf-8'))
-          c = next(c for c in d['clocks'] if c['id'] == 'T-05')
-          assert c['status'] == 'active' and c['start'], 'T-05 时钟非 active 或缺 start'
-          print(c['start'])
-          ") || { echo "::error::T-05 起算日单源解析失败——reconciliation-clocks.yaml T-05 行缺失/挂起，须人工修复（E19/C-10）"; exit 1; }
+          c = next((c for c in d['clocks'] if c['id'] == 'T-05'), None)
+          assert c and c.get('start'), 'T-05 行缺失或缺 start'
+          print('%s|%s' % (c.get('status', ''), c['start']))
+          ") || { echo "::error::T-05 起算日单源解析失败——reconciliation-clocks.yaml T-05 行缺失或缺 start，须人工修复（E19/C-10）"; exit 1; }
+          FUZZ_CLOCK_STATUS=${T05%%|*}
+          FUZZ_CLOCK_START=${T05#*|}
+          if [ "$FUZZ_CLOCK_STATUS" != "active" ]; then
+            echo "T-05 时钟状态＝${FUZZ_CLOCK_STATUS}（非 active）：已闭钟或挂起，不再产生到期信号，本步无信号退出"
+            exit 0
+          fi
           echo "T-05 起算日（自 reconciliation-clocks.yaml 解析）：$FUZZ_CLOCK_START"
           gh label create ci-review-due \
             --color FBCA04 \

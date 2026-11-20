@@ -9,6 +9,7 @@
 > 注（2026-10-25 修订批）：E40–E43 为协作方法论条目，按增补批次就地入册；为保全既有锚点与索引不移册，主题归口见 [02](02-collaboration-playbook.md)。
 > 注（2026-10-31 增补批）：E45 / E47 / E48 同按增补批次就地入册（合并编排、git 对象库修复、CI 红分型）；E46（oneshot 子任务生命周期）归口 [02](02-collaboration-playbook.md)。
 > 注（2026-11-20 增补批）：E50–E53 按增补批次就地入册（v0.3.27 发版链路：跨平台 cfg 门控、台账闭环、Release 正文丢失、REST 复制提交等价性）。
+> 注（2026-11-21 增补）：E54 就地入册（治理时钟终态被误判为结构损坏，正确结案当晚把 nightly 打红）。
 
 ---
 
@@ -588,6 +589,18 @@
 **溯源**：v0.3.27 发布链路工作记录；[06 F.2](06-release-reconciliation.md) v0.3.27 异常注记③（tree sha `fb40b354dc01db673b2fb3004cfdc098f2dfcfc1`）。
 
 **与既有条目边界**：[E5](01-engineering-lessons.md) 管「GitHub 实战陷阱：回推错位与 REST 备选通道」的通用形态，本条补「复制提交后的等价性证明」这一必做动作与具体对象模型顺序，互补不合并。
+
+---
+
+## E54. 时钟的「终态」（closed / suspended）不是「结构损坏」：门禁必须把两者分开判，否则正确结案会当场把 CI 打红（2026-11-21）
+
+- **教训**：治理时钟（`docs/experience/reconciliation-clocks.yaml`）的 `status` 有三个合法取值——`active` 在跑并产信号、`suspended` 挂起不产信号、`closed` 事项终结不产信号。**后两者是正常终态，不是数据坏掉**。门禁脚本常写成 `assert c['status'] == 'active' and c['start']`：这种写法把「非 active」与「行缺失 / 缺 start」合并成同一个失败分支，于是**按时结案这个正确动作本身会触发 `::error` 并 `exit 1`**——门禁在保护它的数据的同时，把「事情做完了」判成了事故。正确形态是两级判定：① **结构断言**——行存在且 `start` 非空，失败才 `::error` 并非 0 退出（时钟失效不得静默）；② **状态分流**——`status != active` 时打印一行说明并 `exit 0`（无信号退出），不进入后续到期判据。
+- **真实案例**：v0.3.27 发布对账判定 T-05（fuzz 30 晚，实测 37 次 nightly run、success 31 ≥ 30 常量下限）达成，按流程把 `reconciliation-clocks.yaml` 的 T-05 改成 `status: closed` 并关闭 issue #24。当晚手动 dispatch nightly 验证时，`fuzz-smoke` job 的 step 11 `30-nights review-due check (ci-review-due)` **failure**——fuzz 本体（step 8 `fuzz frame_fuzz`）已 success，红的是门禁自己。根因就是 nightly.yml 里那行 `assert c['status'] == 'active' and c['start'], 'T-05 时钟非 active 或缺 start'`，随后的通用 `::error::T-05 起算日单源解析失败……` 把「已闭钟」误报成「yaml 行缺失/挂起」。修复：把单行断言拆成 `next(..., None)` + `assert c and c.get('start')`，python 侧输出 `status|start` 两段，shell 侧 `${T05%%|*}` / `${T05#*|}` 分流，非 active 打印「已闭钟或挂起，不再产生到期信号，本步无信号退出」并 `exit 0`。
+- **可执行做法**：① 任何读治理时钟的门禁，先问「这个状态的语义是产信号、不产信号，还是数据坏了」——三类必须三分支，不能二分支；② 结构断言只覆盖「能不能读到它」（行存在、必填字段非空、JSON 可解析），语义状态走分流；③ 分流分支必须有**可见输出**（一行 echo 说明当前状态与为何不产信号），否则闭钟后门禁静默绿，读日志的人会以为检查没跑；④ 修完必须三态回归：终态（closed/suspended）→ `exit 0` 且打印说明、在跑态（active）→ 继续到后续判据、结构坏（行删掉或 `start: null`）→ `::error` 且 `exit 1`；⑤ 改 clock 语义要顺手全仓 grep 其它读同一 yaml 的 workflow（本例 `traffic-snapshot.yml` 只读 T-14 / T-09 且自带 `status != active → 空信号` 分支，无需同步改）。
+
+**溯源**：v0.3.27 发布对账结案当晚实证（nightly run 44797266154，`fuzz-smoke` step 11 failure，修复编辑在 `.github/workflows/nightly.yml` 的 `30-nights review-due check` 步）；[06 v0.3.27 对账记录](06-release-reconciliation.md) 异常注记，时钟单源定义见 `reconciliation-clocks.yaml` 头部说明段。
+
+**与既有条目边界**：[E19](01-engineering-lessons.md) 管「门禁单源化与不得静默」的通用形态（常量硬编码收敛到单一文件、解析失败不得静默绿），本条补「单源文件里的**终态**如何被消费端正确处理」——同一份单源，读法错了会把结案判成事故，属于 E19 落地时的具体反模式，不取代 E19。
 
 ---
 
