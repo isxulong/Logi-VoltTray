@@ -616,6 +616,19 @@
 
 ---
 
+## E56. 本地门禁全绿 ≠ CI 全绿：测试里自己拼的导出参数必须与产品闸门同口径（2026-11-21）
+
+- **症状**：本地 `cargo test --workspace` / `fmt` / `clippy` 三门禁全绿，推送后 CI 的 windows 与 ubuntu 两个 job 的 `test` 步同时红，唯一失败项是集成测试 `activity_bitmap_legacy_fixture_matches_recheck_py`（v0.3.28 首推 `c90da938`，run 44872281043）。
+- **根因**：该集成测试自己复刻导出链路（`cargo` 测试里直接调 `render_html` / `render_json_events`），并按 `bitmap` 开关过滤事件后再渲染；而 `tools/recheck.py` 一侧仍按**原始 stats 事件**统计 `activity_days`。位图关时导出报告里 `activity_buckets` 整条被闸门剥掉、`activity_days = 0`，复算侧仍算出 1 → 报「不一致」。这是**测试自己的第二实现**与产品闸门不同口径，不是产品缺陷。
+- **为什么本地没红**：本地跑同一份代码也应当红——本次是**先推后查**：写完就推、CI 起来才看结果，本地那一次跑的是改动前的测试文件。纪律层面的教训是「推送前必须跑一次与被推内容完全一致的全量门禁」，而不是「CI 不可靠」。
+- **修法**：`check_html` 增 `bitmap_on` 参数，由 `main()` 依据 JSON 导出里是否真的出现 `activity_buckets` 事件推断闸门状态（未给 `--json` 时按开处理），闸门关时不统计活动日。修完 CI run 44872697816 六 job 全绿（`fdf92be`）。
+- **可执行做法**：①任何「测试内重建导出/序列化链路」的断言，都要显式把产品侧的开关参数透给对账脚本，不能只在一侧应用闸门；②新增或修改这类集成测试后，本地必须跑 `cargo test --workspace`（含 integration targets，`--lib` 不够）再推；③推送后不要只看 run 是否在跑，要等到 `conclusion` 落定再看 tag/发布动作；④CI 红时优先从 artifact（`ci-logs` / `ci-logs-ubuntu`）里读 `test.log`，比读日志 API 稳（后者对 job log 端点返回 401）。
+
+**溯源**：v0.3.28 首推 CI run 44872281043（windows/ubuntu `test` 步红，artifact `ci-logs` 内 `test.log` 定位到 `crates/app/tests/recheck_clock_rewind.rs:176`）；修复提交 `fdf92be`，其 run 44872697816 六 job 全绿。
+
+**与既有条目边界**：[E7](02-collaboration-playbook.md) 管「证据优于自述」的取数纪律、[E54](01-engineering-lessons.md) 管门禁的结构断言与信号断言分离；本条管的是**测试自己的第二实现与产品闸门口径不一致**这一类假红，以及「先推后查」的动线问题。
+
+---
 ## 仓外实验记录索引
 
 E4 / E18 / E19 三条条目的部分数字与原文细节来自**仓外**实验 / 评估记录（未入仓，详见各条「注（2026-10-23）」）。本段登记这些仓外记录与仓内可复核落点的对应关系，供按需复核时定位；仓外记录原文不落本文件夹（守本文件夹泄密面清单）。

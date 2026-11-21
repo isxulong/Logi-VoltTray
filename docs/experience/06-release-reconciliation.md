@@ -341,6 +341,17 @@ D8 核验｜日期：2026-10-31｜结论：通过｜异常项：无
 
 D8 核验｜日期：2026-11-20｜结论：通过｜异常项：D11 判负（双设备实测留痕缺失）；Release 说明体丢失已 PATCH 修复、流程缺陷登记待实施；issue #22 根因已修复并经 2026-11-20 手动 dispatch nightly（run 44797266154，head 7555d70）实证 drift-check 步 success 后关闭；issue #24 已关闭（T-05 结案）；同一 run 暴露的 `30-nights review-due` 步把 T-05 闭钟误判为结构损坏（step 11 failure），根因已定位并按二级判定修复，本地三态回归通过、修复已推 main（`bbd359a`）并由 nightly run 44799275589 实证 step 11 success
 
+**v0.3.28 发布对账记录（2026-11-21 发布并当日登记，本次由 AI 代理执行）**：
+
+- 版本与提交：workspace 0.3.27 → 0.3.28（`Cargo.toml` + `Cargo.lock` 同步，chore 提交 `78d1d92`）；实现提交 `59ca182`；CI 红修复提交 `fdf92be`；annotated tag `v0.3.28`（tag object `889292bd…`）指向 `fdf92be`，`verify-tag-on-main` 步 success。
+- Release：id **453480422**，资产 3 件——`volttray-tray.exe` 1,837,568 B、`volttray-tray.exe.minisig` 287 B、`volttray-tray.exe.sha256.txt` 84 B。签名链启用（`MINISIGN_SECRET_KEY` 在位，签名与自验步 success）。
+- 三方 sha256：release 日志 SHALINE ＝ 资产 `sha256.txt` ＝ 从 API 独立下载 exe 后重算，三者一致（`6272e139468acb34734056d29bc3528bff7c4eceebbcb52e2576086f44bab75a`）。
+- 门禁：CI run 44872697816（head `fdf92be`）六 job 全绿（windows / ubuntu / microbench / fuzz-smoke / redline-guard-advisory success，decisions-append-only skipped）；release run 44873347223 的 ci-gate 复用同一套门禁全绿，build-release 步骤 7 `release-contract assertions` / 步骤 8 advisory / 步骤 11 签名自验 / 步骤 12 nightly 注入 均 success。本地 `fmt --check` / `clippy -D warnings` / `cargo test --workspace`（app 362 + tray 90 + 其余 crate）与 `python -m unittest discover -s tests`（28 项）全绿。
+- 对账工具实跑：`tools/recheck.py` 对 4 个 fixture × 匿名化开关共 8 次逐值对账全部通过（volttray-data 逐值一致 + 断网零外链）。
+- Release 说明体：首次由 workflow 写入的 body 仅 51 字节（nightly 注入行，[E52](01-engineering-lessons.md) 复发形态），已用 tag message 全文 PATCH 修复，最终 3,710 字符（含「本版要点 / 用户可见变化 / 升级注意事项 / 验证口径与未验证项 / SmartScreen 披露 / English Summary」六段）。
+- 异常注记：①**CI 首推双红**（run 44872281043，head `c90da938`）：windows/ubuntu 的 `test` 步同红，唯一失败项 `activity_bitmap_legacy_fixture_matches_recheck_py`——测试按 bitmap=off 导出时 `activity_buckets` 被闸门整条剥掉、报告 `activity_days` 为 0，而 `recheck.py` 仍按原始事件统计得 1，把「闸门关闭」误判成数据不一致。修复 `fdf92be`（`check_html` 增 `bitmap_on`，按 JSON 导出实际事件推断闸门），已回写 [E56](01-engineering-lessons.md)。②**先推后查**：该红本可在本地 `cargo test --workspace`（含 integration target）拦住，本次直接推送后才看 CI，动线问题同记入 E56。③Release 说明体丢失为 [E52](01-engineering-lessons.md) 已知形态复发，仍按「发布后 PATCH」处置，流程缺陷未修（下次窗口处理）。
+- 发布后核验缺口（如实登记）：①未做真机安装体验（SmartScreen 提示、托盘图标心跳在 explorer 重启后的实际恢复时间、300 秒慢档的唤醒恢复速度均未采样）；②日耗电新口径只用合成事件与 fixture 覆盖，无真实设备连续多日插拔的对账；③D11 双设备实测仍判负（无留痕），本版未变。
+
 
 对账表（状态口径：2026-10-20 收官批（第 4 批）实施完成时点，第 1/2/3/4 批行已随各自批次实施刷新，实施令 19 节全部收口；「取证动作/复核日期」登记位
 按 N-3 规则行填写，未降级条目留「—」。另注：表内「已实施」为实施令时间线口径，其中第 2 批及以后批次引用的 commit 与工作流/台账文件（0005/0007/0008/0009 等）已随补丁批①–⑤全部合入 main（批④⑤于 2026-10-21 收官合入，week1 携带期的「本批树中尚不存在」披露就此闭环）：
