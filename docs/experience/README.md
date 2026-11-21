@@ -1,6 +1,6 @@
 # LogiVoltTray 项目经验知识库
 
-> **最近发布回写同步至 v0.3.27**｜**最近增补 2026-11-21（E54 时钟终态门禁反模式＋nightly 30-nights review-due 步修复）**（每次发布回写时更新前者；任何增补——含非发布回写型修订——均更新后者，见「维护约定」）。
+> **最近发布回写同步至 v0.3.27**｜**最近增补 2026-11-21（E54 时钟终态门禁反模式＋nightly 30-nights review-due 步修复；E55 长文档整文件重写的行尾与指针噪音）**（每次发布回写时更新前者；任何增补——含非发布回写型修订——均更新后者，见「维护约定」）。
 >
 > 这个文件夹沉淀本项目（2026-09 至 2026-10 真实迭代）的工程教训与协作方法论。
 > 注：仓库于 2026-10-11 重建，此前素材以重建时合并入库为准。
@@ -17,7 +17,7 @@
 
 ## 这是什么
 
-LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 49 条经验（48 条带真实案例 + E44 门禁条款，编号 **E1–E49**，2026-10-26 实测、2026-10-31 增补 E45–E49，E15 见 [04 §8](04-onboarding.md)；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
+LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工具（5-crate workspace，公开仓库）。在 v0.3.x 系列迭代中，团队经历了多次真机事故、质检打回与发布复盘，沉淀出 55 条经验（编号 **E1–E55**；逐条有无真实案例以本索引表为准，不写死计数；2026-10-31 增补 E45–E49，2026-11-20 增补 E50–E53，2026-11-21 增补 E54–E55，E15 见 [04 §8](04-onboarding.md)；原始素材包不入库，每条经验以仓内 `volttray/docs/decisions.md` 的 D 编号、commit、`volttray/RELEASES.md` 与 GitHub Release 页为溯源途径）。
 
 每条经验的固定结构：
 
@@ -52,7 +52,7 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 
 > 对外读者说明：文中所有字母-数字形态的内部编号（T-xx / N-x / K-x / F-Ax / P0-x / P1-x / P2-x / C-xx / D1 / M13 / R1-Fx / F-Bx / A-Rx / U-x / WP-A/B/C 等实施令条款、对账机制条款与评审工作项编号）均为内部维护编号，仅服务项目内部对账与溯源，外部读者可忽略。
 
-> **编号空间**：库内并存两族 E 编号——**经验条目**（E1–E49，本索引收录，2026-10-26 实测、2026-10-31 增补 E45–E49，E15 居 [04 §8](04-onboarding.md)）与**红蓝对抗改进项**（E1–E24，2026-10-24 终审整改批的工作项编号，见各文件头部或注记）。引用一律带族名（「经验 E39」「改进项 E19」）；历史提交 message 内的裸编号属既成事实、豁免不改（commit message 不可改写）。
+> **编号空间**：库内并存两族 E 编号——**经验条目**（E1 起、上界以本索引表实尾为准，本索引收录，E15 居 [04 §8](04-onboarding.md)）与**红蓝对抗改进项**（E1–E24，2026-10-24 终审整改批的工作项编号，见各文件头部或注记）。引用一律带族名（「经验 E39」「改进项 E19」）；历史提交 message 内的裸编号属既成事实、豁免不改（commit message 不可改写）。
 
 **AI 上手指南**：仓库根 [AGENTS.md](../../AGENTS.md)（任何 AI 接手本仓库的第一入口：启动序列、接任务判断、范围红线、收口交付）与 [docs/ai-orchestration.md](../ai-orchestration.md)（多智能体调度附录：派单五要素、巡检清单、A/B 类替代规程）。
 
@@ -114,6 +114,7 @@ LogiVoltTray 是一个 Rust 实现的 Windows 托盘罗技设备电量监控工�
 | E52 | [01](01-engineering-lessons.md) | annotated tag 正文不会自动进 Release 正文：`body_path` + `append_body` 只在 Release 已存在时保留既有内容 |
 | E53 | [01](01-engineering-lessons.md) | 推送通道不可用时用 REST API 复制提交，并以 tree 逐字节一致作为等价性证明 |
 | E54 | [01](01-engineering-lessons.md) | 治理时钟的终态（closed / suspended）不是结构损坏：门禁必须三分支，否则正确结案会当场打红 CI |
+| E55 | [01](01-engineering-lessons.md) | 整文件重写长文档会带进行尾翻转与指针滞后两类无声噪音：提交前核行尾、用 `--ignore-cr-at-eol` 验 diff 条数 |
 
 ## 双层受众约定
 
