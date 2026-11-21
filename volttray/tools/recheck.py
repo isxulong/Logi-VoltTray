@@ -959,7 +959,7 @@ def build_week_over_week(cards, conflict):
             "window_last": window_last, "badges": badges}
 
 
-def check_html(ck, path, events, segments, keys, off):
+def check_html(ck, path, events, segments, keys, off, bitmap_on=True):
     with open(path, "r", encoding="utf-8") as f:
         body = f.read()
     m = re.search(r'<script id="volttray-data" type="application/json">(.*?)</script>',
@@ -1083,11 +1083,17 @@ def check_html(ck, path, events, segments, keys, off):
     ck.eq("html.week_over_week", got.get("week_over_week"), want_wow)
     # 活动位图缺口卡（指标④：无字段不伪造；activity_days = 各事件 days[].date
     # 去重并集，不是单事件的 days.len() 最大值）。
+    # 位图闸门（组4 N-08② / BvA-8）：导出侧 `export_activity_bitmap=off` 时
+    # activity_buckets 事件整条不出现在报告里，报告里的 activity_days 自然是
+    # 0。复算必须按同一个闸门算，否则 bitmap=off 那一态会把「缺席」当成
+    # 「有没有」的差异而假红。`bitmap_on` 由 main() 依据 JSON 导出是否携带
+    # 该事件推断（未给 JSON 时按开处理，与菜单默认一致）。
     act_days = set()
-    for ev in events:
-        if ev[0] == "activity_buckets":
-            for d in ev[3]:
-                act_days.add(d["date"])
+    if bitmap_on:
+        for ev in events:
+            if ev[0] == "activity_buckets":
+                for d in ev[3]:
+                    act_days.add(d["date"])
     n_act = len(act_days)
     gap_present = n_act < AVG_MIN_VALID_DAYS
     if n_act == 0:
@@ -1203,7 +1209,18 @@ def main():
     if args.json:
         check_json(ck, args.json, events, keys)
     if args.html:
-        check_html(ck, args.html, events, segments, keys, args.tz)
+        # 位图是否进了导出：以 JSON 导出的实际事件为准（与 export_event_allowed
+        # 的闸门同口径）；没给 --json 时按「开」处理。
+        bitmap_on = True
+        if args.json:
+            try:
+                with open(args.json, "r", encoding="utf-8") as f:
+                    _jd = json.load(f)
+                bitmap_on = any(e.get("event") == "activity_buckets"
+                                for e in _jd.get("events", []))
+            except (OSError, ValueError):
+                bitmap_on = True
+        check_html(ck, args.html, events, segments, keys, args.tz, bitmap_on)
     if ck.failures:
         print("复算结果：不一致（%d 处）" % ck.failures, file=sys.stderr)
         sys.exit(1)
