@@ -619,6 +619,345 @@ def check_json(ck, path, events, keys):
             print("PASS json.activity_buckets：%d 条位图事件逐值一致" %
                   len(ge_buckets))
 
+# ---------------------------------------------------------------- 分日 / KPI 复算
+# v0.3.28（P2）：此前 daily_cards / run_spans_by_day / first_screen_kpis /
+# avg_estimate / week_over_week / activity_gap_note 只查 key 存在性——前端
+# 四个数字没有独立基准。以下逐值镜像 attribution.rs 同名函数，含 v0.3.28
+# 的四处口径修复：
+#   S1 日耗电按充电段切段后各子段首末差求和（充电回补后重置基准）；
+#   S2 冲突徽标与放电覆盖解耦（覆盖 <12h 只挂「覆盖不足」）；
+#   S3 单侧口径缺失挂「无法对账」而不是静默当不冲突；
+#   S4 源分布进 sparse 判据（当日全是唤醒首读 → 无效样本）。
+
+SPARSE_MIN_READS = 3
+SPARSE_MIN_COVERAGE_SECS = 7200
+AVG_MIN_VALID_DAYS = 7
+AVG_CONFLICT_RATIO = 2.0
+AVG_CONFLICT_ABS_THRESHOLD_PCT = 1.0
+AVG_CONFLICT_MIN_COVERAGE_HOURS = 12.0
+AVG_COVERAGE_SHORT_ESCALATE_RATIO = 10.0
+AVG_MIN_WINDOW_SECS = 300
+RECENT_DAYS = 7
+WOW_GAP_THRESHOLD_DAYS = 2
+STICKY_MIN_DURATION_SECS = 86400
+
+
+def days_from_civil(date):
+    """`YYYY-MM-DD` → 日序号（attribution.rs civil_days 镜像）；解析失败 None。"""
+    try:
+        y, m, d = (int(x) for x in date.split("-"))
+    except (ValueError, AttributeError):
+        return None
+    if not (1 <= m <= 12 and 1 <= d <= 31):
+        return None
+    y = y - 1 if m <= 2 else y
+    era = (y if y >= 0 else y - 399) // 400
+    yoe = y - era * 400
+    mp = m - 3 if m > 2 else m + 9
+    doy = (153 * mp + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def median(xs):
+    if not xs:
+        return None
+    xs = sorted(xs)
+    n = len(xs)
+    if n % 2 == 1:
+        return float(xs[n // 2])
+    return (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+
+
+def sticky_day_set(spans, off):
+    """粘滞段覆盖的本地日集合（attribution.rs sticky_day_set 镜像）。"""
+    out = {}
+    for dev, lst in spans.items():
+        days = out.setdefault(dev, set())
+        for a, b in lst:
+            t = a
+            while True:
+                days.add(fmt_local_date(t, off))
+                if t >= b:
+                    break
+                nxt = local_day_start(t, off) + 86400
+                if nxt <= t:
+                    break
+                t = min(nxt, b)
+    return out
+
+
+def build_daily_cards(events, segments, sticky_days, off):
+    """分日视图日卡（attribution.rs build_daily_cards 逐行镜像）。
+
+    日耗电 = 相邻两条读数之间的「下降量」累计（充电态读数同样参与——插电
+    期间读数下跌也是真实放电）。归属与分母同规则：以区间起点读数为准，
+    下降量记到起点日、跨日间隔按起点日窗口裁剪；放电跨度只累加「起点非
+    充电态」或「确有下降」的间隔（纯插电空转不计时长）。reads 仍只收非充
+    电读数；charging-fast 一律不收（推断值）。"""
+    reads = {}
+    series = {}
+    for ev in events:
+        if ev[0] != "read":
+            continue
+        _, ts, pk, _dn, pct, chg, src = ev
+        if src == "charging-fast":
+            continue
+        day = fmt_local_date(ts, off)
+        series.setdefault(pk, []).append((day, ts, pct, chg))
+        if chg:
+            continue
+        reads.setdefault((pk, day), []).append((ts, pct, src == WFR))
+    # 相邻下降量口径：按设备聚合后按时间扫（见函数 docstring）。
+    acc = {}
+    for dev, ds in series.items():
+        ds.sort(key=lambda r: r[1])
+        for i in range(len(ds) - 1):
+            d0, t0, p0, c0 = ds[i]
+            _dd, t1, p1, _c1 = ds[i + 1]
+            win_end = local_day_start(t0, off) + 86400
+            secs = max(0, min(t1, win_end) - t0)
+            drop = max(0, p0 - p1)
+            cell = acc.setdefault((dev, d0), [0, 0])
+            cell[0] += drop
+            if (not c0) or drop > 0:
+                cell[1] += secs
+    spans = {}
+    for seg in segments:
+        if seg["seg_type"] not in ("charging", "unknown"):
+            continue
+        t = seg["start_ts"]
+        while t < max(seg["end_ts"], seg["start_ts"] + 1) and t <= seg["end_ts"]:
+            d0 = local_day_start(t, off)
+            clip = (max(seg["start_ts"], d0), min(seg["end_ts"], d0 + 86400))
+            if clip[1] > clip[0]:
+                cell = spans.setdefault(
+                    (seg["device_key"], fmt_local_date(t, off)), ([], []))
+                if seg["seg_type"] == "charging":
+                    cell[0].append(clip)
+                else:
+                    cell[1].append(clip)
+            nxt = d0 + 86400
+            if nxt <= t:
+                break
+            t = nxt
+    recovery = {}
+    for seg in segments:
+        if seg["seg_type"] != "charging":
+            continue
+        gain = max(0, seg["end_pct"] - seg["start_pct"])
+        if gain == 0:
+            continue
+        mid = seg["start_ts"] + dur(seg) // 2
+        k = (seg["device_key"], fmt_local_date(mid, off))
+        recovery[k] = recovery.get(k, 0) + gain
+    out = {}
+
+    for (dev, date) in sorted(reads):
+        lst = sorted(reads[(dev, date)], key=lambda r: r[0])
+        first_ts, first_pct = lst[0][0], lst[0][1]
+        last_ts, last_pct = lst[-1][0], lst[-1][1]
+        coverage = last_ts - first_ts
+        cspans, uspans = spans.get((dev, date), ([], []))
+        acc_cell = acc.get((dev, date), [0, 0])
+        drain, discharge_secs = acc_cell[0], acc_cell[1]
+        non_wake = sum(1 for (_t, _p, w) in lst if not w)
+        sparse = (len(lst) < SPARSE_MIN_READS
+                  or coverage < SPARSE_MIN_COVERAGE_SECS
+                  or non_wake == 0)
+        slope = (round2(drain / (discharge_secs / 3600.0))
+                 if (not sparse and discharge_secs >= SPARSE_MIN_COVERAGE_SECS)
+                 else None)
+        out.setdefault(dev, []).append({
+            "date": date,
+            "first_ts": first_ts, "first_pct": first_pct,
+            "last_ts": last_ts, "last_pct": last_pct,
+            "drain_pct": drain, "discharge_secs": discharge_secs,
+            "charge_recovery_pct": recovery.get((dev, date), 0),
+            "reads": len(lst), "coverage_secs": coverage,
+            "slope_pct_per_hour": slope,
+            "sticky": date in sticky_days.get(dev, ()),
+            "sparse": sparse,
+            "charging_spans": [list(x) for x in cspans],
+            "unknown_spans": [list(x) for x in uspans],
+        })
+    for cards in out.values():
+        cards.sort(key=lambda c: c["date"])
+    return out
+
+
+def build_run_spans_by_day(events, off):
+    """每日 app 运行时段（attribution.rs 镜像：run_start/run_stop 配对、
+    崩溃段闭合到上一会话最后事件 ts、日界裁剪）。"""
+    spans = []
+    open_ts = None
+    last_after = None
+    for ev in events:
+        k = ev[0]
+        if k == "run_start":
+            if open_ts is not None and last_after is not None and last_after > open_ts:
+                spans.append((open_ts, last_after))
+            open_ts = ev[1]
+            last_after = None
+        elif k == "run_stop":
+            if open_ts is not None and ev[1] > open_ts:
+                spans.append((open_ts, ev[1]))
+            open_ts = None
+            last_after = None
+        else:
+            if open_ts is not None:
+                last_after = ev[1]
+    if open_ts is not None and last_after is not None and last_after > open_ts:
+        spans.append((open_ts, last_after))
+    out = {}
+    for a, b in spans:
+        t = a
+        while t < b:
+            d0 = local_day_start(t, off)
+            clip = (max(a, d0), min(b, d0 + 86400))
+            if clip[1] > clip[0]:
+                out.setdefault(fmt_local_date(t, off), []).append(list(clip))
+            nxt = d0 + 86400
+            if nxt <= t:
+                break
+            t = nxt
+    return out
+
+
+def avg_conflict(ledger, upper, ratio=None):
+    """双口径冲突判定（attribution.rs avg_conflict / avg_conflict_at 镜像；
+    单侧缺失 → False，由 unreconcilable 单独承载）。`ratio` 缺省用常规阈值，
+    传 AVG_COVERAGE_SHORT_ESCALATE_RATIO 即「覆盖不足态是否差得离谱」的硬判据。"""
+    if ledger is None or upper is None:
+        return False
+    r = AVG_CONFLICT_RATIO if ratio is None else ratio
+    l, u = ledger, upper
+    if l < 0.0 or u < 0.0:
+        return True
+    if u == 0.0:
+        return l > AVG_CONFLICT_ABS_THRESHOLD_PCT
+    if l <= 0.0:
+        return u > 0.0
+    return u > r * l or l > r * u
+
+
+def build_avg_estimate(events, segments, device_key, cards, sticky_days):
+    """日均耗电双口径对账（attribution.rs build_avg_estimate 镜像）。"""
+    valid_cards = [c for c in cards if not c["sticky"] and not c["sparse"]]
+    slopes = [c["slope_pct_per_hour"] for c in valid_cards
+              if c["slope_pct_per_hour"] is not None
+              and c["slope_pct_per_hour"] >= 0.0]
+    valid_days = len(slopes)
+    median_slope = median(slopes)
+    upper = None if median_slope is None else round2(median_slope * 24.0)
+    # 覆盖中位必须与 upper 同一批日卡（Rust 侧 red-d C4 修复同口径）：
+    # 只有出得了斜率（非 None 且 >=0）的卡才进覆盖中位。
+    coverage_hours = median([c["discharge_secs"] / 3600.0 for c in valid_cards
+                             if c["slope_pct_per_hour"] is not None
+                             and c["slope_pct_per_hour"] >= 0.0
+                             and c["discharge_secs"] / 3600.0 > 0.0])
+    if coverage_hours is None:
+        coverage_hours = 0.0
+    # 只按 ts 稳定排序（与 Rust `sort_by_key(|(ts, _)| *ts)` 同语义）：
+    # 同 ts 多读数时保留事件原序，末条才是真正的「最后一个读数」。旧写
+    # 法 sorted((ts, pct)) 在同 ts 上会退化为按 pct 升序重排，末条变成
+    # 较大 pct，总账 net 少算 1pp（stats_recheck 实测 13.89 vs Rust 14.59）。
+    dev_reads = sorted(((ev[1], ev[4]) for ev in events
+                        if ev[0] == "read" and ev[2] == device_key
+                        and not ev[5] and ev[6] != "charging-fast"),
+                       key=lambda x: x[0])
+    def recovery_in(t0, t1):
+        """窗口内充电回补（段被窗口切开时按时间占比缩放）。"""
+        acc = 0.0
+        for s in segments:
+            if s["device_key"] != device_key or s["seg_type"] != "charging":
+                continue
+            span = max(1, dur(s))
+            lo, hi = max(s["start_ts"], t0), min(s["end_ts"], t1)
+            inside = max(0, hi - lo)
+            if inside <= 0:
+                continue
+            gain = max(0, s["end_pct"] - s["start_pct"])
+            acc += gain * (inside / float(span))
+        return int(rust_round(acc))
+    if dev_reads and dev_reads[-1][0] - dev_reads[0][0] >= AVG_MIN_WINDOW_SECS:
+        t0, t1 = dev_reads[0][0], dev_reads[-1][0]
+        wd = (t1 - t0) / 86400.0
+        net = dev_reads[0][1] - dev_reads[-1][1]
+        ledger = round2((net + recovery_in(t0, t1)) / wd)
+        window_days = round2(wd)
+    else:
+        ledger, window_days = None, 0.0
+    unreconcilable = (ledger is not None) != (upper is not None)
+    coverage_short = valid_days > 0 and coverage_hours < AVG_CONFLICT_MIN_COVERAGE_HOURS
+    # 覆盖不足不无条件吞掉冲突：超过硬阈值（AVG_COVERAGE_SHORT_ESCALATE_RATIO）
+    # 仍报「口径冲突」，两个徽标同时挂（Rust 侧 red-g G4 同口径）。
+    hard_gap = (not unreconcilable
+                and avg_conflict(ledger, upper, AVG_COVERAGE_SHORT_ESCALATE_RATIO))
+    conflict = (not unreconcilable
+                and (hard_gap if coverage_short else avg_conflict(ledger, upper)))
+    badges = []
+    if valid_days < AVG_MIN_VALID_DAYS:
+        badges.append("样本不足")
+    if sticky_days:
+        badges.append("含粘滞")
+    if unreconcilable:
+        badges.append("无法对账")
+    else:
+        if coverage_short:
+            badges.append("覆盖不足")
+        if conflict:
+            badges.append("口径冲突")
+    return {
+        "lower_pct_per_day": ledger,
+        "upper_pct_per_day": upper,
+        "median_slope_pct_per_hour": median_slope,
+        "ledger_pct_per_day": ledger,
+        "valid_days": valid_days,
+        "window_days": window_days,
+        "coverage_hours": coverage_hours,
+        "coverage_short": coverage_short,
+        "sticky_days": sum(1 for c in cards if c["date"] in sticky_days),
+        "conflict": conflict,
+        "unreconcilable": unreconcilable,
+        "badges": badges,
+    }
+
+
+def build_week_over_week(cards, conflict):
+    """周环比（attribution.rs build_week_over_week 镜像）。"""
+    desc = list(reversed(cards))
+    window = desc[:2 * RECENT_DAYS]
+    window_first = window[-1]["date"] if window else None
+    window_last = window[0]["date"] if window else None
+    badges = []
+    asc = list(reversed(window))
+    has_gap = False
+    for a, b in zip(asc, asc[1:]):
+        da, db = days_from_civil(a["date"]), days_from_civil(b["date"])
+        if da is not None and db is not None and db - da > WOW_GAP_THRESHOLD_DAYS:
+            has_gap = True
+    if has_gap:
+        badges.append("窗口含缺口")
+    recent = desc[:RECENT_DAYS]
+    prev = desc[RECENT_DAYS:2 * RECENT_DAYS]
+    sticky_hit = any(c["sticky"] for c in recent) or any(c["sticky"] for c in prev)
+    if sticky_hit or conflict:
+        return {"suppressed": True, "reason": "不可比",
+                "delta_pct_per_day": None, "window_first": window_first,
+                "window_last": window_last, "badges": badges}
+    recent_eff = [c for c in recent if not c["sparse"]]
+    prev_eff = [c for c in prev if not c["sparse"]]
+    if not prev_eff or not recent_eff:
+        return {"suppressed": True, "reason": "样本不足",
+                "delta_pct_per_day": None, "window_first": window_first,
+                "window_last": window_last, "badges": badges}
+    r = sum(c["drain_pct"] for c in recent_eff) / float(len(recent_eff))
+    p = sum(c["drain_pct"] for c in prev_eff) / float(len(prev_eff))
+    return {"suppressed": False, "reason": None,
+            "delta_pct_per_day": round2(r - p), "window_first": window_first,
+            "window_last": window_last, "badges": badges}
+
 
 def check_html(ck, path, events, segments, keys, off):
     with open(path, "r", encoding="utf-8") as f:
@@ -675,11 +1014,95 @@ def check_html(ck, path, events, segments, keys, off):
           build_chart1(segs, [(k, n) for k, n in devices], sticky))
     pd, total = build_chart3(segs)
     ck.eq("html.chart3", got.get("chart3"), {"per_device": pd, "total": total})
-    # 融合稿 Phase 0 新结构存在性核验（逐值复算以 chart1/3、segments、CSV 为界）
-    for key in ("daily_cards", "run_spans_by_day", "first_screen_kpis",
-                "avg_estimate", "week_over_week", "activity_gap_note"):
-        if key not in got:
-            ck.eq("html.%s 存在" % key, "缺失", "存在")
+    # 融合稿 Phase 0 新结构逐值复算（复核二 P2）：日卡 / app 运行时段 / 首屏
+    # KPI / 双口径对账 / 周环比 / 活动位图缺口卡，全部按 attribution.rs 装配段
+    # （build_report_data :1593-1742）逐行镜像——此前这里只查 key 存在性，
+    # 前端的今日已耗、日均区间、周环比四个数字没有独立基准。
+    # 内部聚合一律在原始键上做（Rust 侧 daily_raw / avg / wow 同口径），
+    # 透出前才换展示键；raw_of 由 read 事件反查（与 Rust raw_of 同构造）。
+    raw_of = {}
+    for ev in events:
+        if ev[0] == "read":
+            raw_of[display_key(ev[2], anon)] = ev[2]
+    sd_days = sticky_day_set(sticky_raw, off)
+    daily_raw = build_daily_cards(events, segments, sd_days, off)
+    run_by_day = build_run_spans_by_day(events, off)
+    # now_ref = 全部事件的最大 ts（含 run/boundary/sleep_enter/activity_buckets），
+    # 空事件时回落到 meta.generated_at（Rust 侧回落到 generated_ts 同一值）。
+    ts_all = [ev[1] for ev in events]
+    now_ref = max(ts_all) if ts_all else got.get("meta", {}).get("generated_at", 0)
+    today = fmt_local_date(now_ref, off)
+    want_cards, want_avg, want_wow, want_kpis = {}, {}, {}, {}
+    for dkey, _nm in devices:
+        raw_key = raw_of.get(dkey, dkey)
+        cards = daily_raw.get(raw_key, [])
+        dev_sd = sd_days.get(raw_key, set())
+        avg = build_avg_estimate(events, segments, raw_key, cards, dev_sd)
+        wow = build_week_over_week(cards, avg["conflict"])
+        latest = None
+        for ev in reversed(events):
+            if ev[0] == "read" and ev[2] == raw_key:
+                latest = (ev[1], ev[4], ev[5])
+                break
+        today_card = next((c for c in cards if c["date"] == today), None)
+        today_run_secs = sum(b - a for a, b in run_by_day.get(today, []))
+        if today_card is None:
+            today_drain, today_sparse, today_sticky = None, True, False
+        else:
+            today_drain = None if today_card["sparse"] else today_card["drain_pct"]
+            today_sparse = today_card["sparse"]
+            today_sticky = today_card["sticky"]
+        want_cards[dkey] = cards
+        want_avg[dkey] = avg
+        want_wow[dkey] = wow
+        want_kpis[dkey] = {
+            "current_pct": None if latest is None else latest[1],
+            "current_ts": None if latest is None else latest[0],
+            "current_charging": False if latest is None else latest[2],
+            "today_date": today,
+            "today_drain_pct": today_drain,
+            "today_sparse": today_sparse,
+            "today_sticky": today_sticky,
+            "today_run_secs": today_run_secs,
+            # 首屏 avg 只透 6 个键（不是整个 AvgEstimate）——配对区间 +
+            # 单侧缺失标记 + 覆盖跨度 + 徽标，前端据此判灰态。
+            "avg": {
+                "lower_pct_per_day": avg["lower_pct_per_day"],
+                "upper_pct_per_day": avg["upper_pct_per_day"],
+                "conflict": avg["conflict"],
+                "unreconcilable": avg["unreconcilable"],
+                "coverage_hours": avg["coverage_hours"],
+                "coverage_short": avg["coverage_short"],
+                "badges": avg["badges"],
+            },
+        }
+    ck.eq("html.daily_cards", got.get("daily_cards"), want_cards)
+    ck.eq("html.run_spans_by_day", got.get("run_spans_by_day"), run_by_day)
+    ck.eq("html.first_screen_kpis", got.get("first_screen_kpis"), want_kpis)
+    ck.eq("html.avg_estimate", got.get("avg_estimate"), want_avg)
+    ck.eq("html.week_over_week", got.get("week_over_week"), want_wow)
+    # 活动位图缺口卡（指标④：无字段不伪造；activity_days = 各事件 days[].date
+    # 去重并集，不是单事件的 days.len() 最大值）。
+    act_days = set()
+    for ev in events:
+        if ev[0] == "activity_buckets":
+            for d in ev[3]:
+                act_days.add(d["date"])
+    n_act = len(act_days)
+    gap_present = n_act < AVG_MIN_VALID_DAYS
+    if n_act == 0:
+        gap_text = ("尚无静止/活动字段，不用 app 协议流量伪造。补齐计划："
+                    "activity_buckets 分钟位图随系统事件流积累（零设备查询、"
+                    "事件驱动），积累 ≥7 天后升级为分日热力带。")
+    elif gap_present:
+        gap_text = ("静止/活动分钟位图已积累 %d 天（≥7 天升级分日热力带）；"
+                    "当前版本仍按缺口口径展示，不用 app 协议流量伪造。" % n_act)
+    else:
+        gap_text = ("静止/活动分钟位图已积累 %d 天，满足升级条件；分日热力带"
+                    "将在后续版本上线，当前仍按缺口口径展示，不用 app 协议"
+                    "流量伪造。" % n_act)
+    ck.eq("html.activity_gap_note", got.get("activity_gap_note"),
+          {"present": gap_present, "text": gap_text})
     ck.eq("html.chart2 已移除", "chart2" in got, False)
     ck.eq("html.recent7d_active_rate 已移除",
           "recent7d_active_rate" in got, False)

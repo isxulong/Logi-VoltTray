@@ -41,7 +41,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 
 use crate::icon::{cache_from_config, IconColor};
 use volttray_app::autostart;
@@ -485,6 +485,10 @@ struct Ctx {
     br_border: Cell<isize>,
     /// tooltip 控件句柄。
     tooltip: Cell<isize>,
+    /// v0.3.28（耗电分析 P3-③配套）：保存后向 IO 线程投递 `ConfigChanged`，
+    /// 让换档重排即时生效——空闲分片从 5s 放宽到 15s 后，不再让窗口改动
+    /// 等下一轮 mtime 热重载（配置值本身已写进共享 `Arc`，无需再加载）。
+    cmd_tx: mpsc::Sender<crate::IoCmd>,
 }
 
 impl Ctx {
@@ -525,6 +529,19 @@ impl Ctx {
             ));
         }
         crate::bootlog::note(&settings_applied_note(&prev, cfg));
+        // v0.3.28（P3-③配套）：配置值已写进共享 Arc，这里只补「按新档位
+        // 重排到期点」。IO 线程若正在忙，消息留在队列里等下一次 try_recv，
+        // 不会阻塞窗口线程（send 失败仅表示 IO 线程已退出）。
+        //
+        // 只在**轮询相关键真的变了**时才投递（red-h #12 / red-e C4）：
+        // 滑块类控件每移动一格就调一次 apply（低电阈值 5→50 共 9 次、文本
+        // 缩放 40→160 共 25 次），而这些键与排程无关——无条件投递会让 IO
+        // 线程白跑 N 整轮、并往诊断环里塞 N 条 config applied。
+        let poll_changed = prev.poll_interval_secs != cfg.poll_interval_secs
+            || prev.experimental_per_device_polling != cfg.experimental_per_device_polling;
+        if poll_changed {
+            let _ = self.cmd_tx.send(crate::IoCmd::ConfigChanged);
+        }
     }
 }
 
@@ -537,6 +554,7 @@ pub fn open_settings(
     dark_theme: bool,
     tray_size: u32,
     preview_text: &str,
+    cmd_tx: mpsc::Sender<crate::IoCmd>,
 ) {
     // v0.3.7（D-63）：设置窗口注册/创建是启动后关键路径之一，失败留痕。
     crate::bootlog::stage("settings-open");
@@ -669,6 +687,7 @@ pub fn open_settings(
             br_input: Cell::new(0),
             br_border: Cell::new(0),
             tooltip: Cell::new(0),
+            cmd_tx,
         });
 
         let hwnd = match CreateWindowExW(

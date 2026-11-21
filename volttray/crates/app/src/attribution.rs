@@ -679,6 +679,20 @@ pub const AVG_CONFLICT_RATIO: f64 = 2.0;
 pub const AVG_CONFLICT_ABS_THRESHOLD_PCT: f64 = 1.0;
 /// 样本质量徽标阈值：有效日 <7 天挂「样本不足」（融合稿 §3③）。
 pub const AVG_MIN_VALID_DAYS: usize = 7;
+
+/// 双口径对账「覆盖不足」门槛：有效日放电跨度中位数低于该值时，
+/// `upper` 是对放电时段的全天外推、`ledger` 是按日历日摊的总账，
+/// 两者不同基——比值差异多半属口径差而不是冲突（S2/P2 解耦）。
+/// 渲染层也从这里取（经 `AvgEstimate::coverage_short`），不得另写字面量。
+pub const AVG_CONFLICT_MIN_COVERAGE_HOURS: f64 = 12.0;
+
+/// 「覆盖不足」态下仍要报冲突的硬阈值：口径差最多解释几倍差距，
+/// 百倍级的差必须如实透出（否则 S2 的解耦等于把真冲突整类静音）。
+pub const AVG_COVERAGE_SHORT_ESCALATE_RATIO: f64 = 10.0;
+
+/// 总账口径的最小分母（秒）：窗口首尾读数不足 5 分钟时不出总账。
+/// 否则相隔 1 秒的两条读数会把 1pp 放大成 86400 %/天（P1）。
+const AVG_MIN_WINDOW_SECS: i64 = 300;
 /// 周环比窗口日历缺口阈值：窗口内相邻两日卡日期差 >2 天时挂
 /// 「窗口含缺口」质量徽标（FR-5 / 冲突 C-4：不 suppress、照常给 delta）。
 pub const WOW_GAP_THRESHOLD_DAYS: i64 = 2;
@@ -743,8 +757,8 @@ fn sticky_day_set(
     out
 }
 
-/// 分日视图日卡（融合稿指标①②：日耗电 = 当日放电快照首末差，
-/// 跨日段在日界处切分、不摊入，charging-fast 剔除；两级质量标签
+/// 分日视图日卡（融合稿指标①②：日耗电 = 相邻读数下降量累计，
+/// 跨日段按下落起点日归属、不摊不重，charging-fast 剔除；两级质量标签
 /// 「设备上报粘滞 / 样本不足」）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DailyCard {
@@ -753,8 +767,15 @@ pub struct DailyCard {
     pub first_pct: u8,
     pub last_ts: i64,
     pub last_pct: u8,
-    /// 日耗电 = max(0, first−last)（电量回升不产生负耗电）。
+    /// 日耗电 = 当日相邻读数「下降量」累计（每段 max(0, 前值−后值)，
+    /// 回升段不产生负耗电）。插电读数同样参与——插电期间读数下跌也是
+    /// 真实放电（S1 修复，D-105）；与 `first_pct − last_pct` 不同源，
+    /// 一天多充放时本值会明显大于首末差。
     pub drain_pct: i16,
+    /// 当日放电跨度（秒）：按「起点读数非充电态」的相邻间隔累加，跨日
+    /// 间隔按起点日窗口裁剪。斜率分母口径，与 `drain_pct` 同源——既不把
+    /// 充电时长算进放电速率，也不把空闲时长漏掉。
+    pub discharge_secs: i64,
     /// 当日充电回补（%）：充电段增益按段中点归属日累加，跨日段不摊。
     pub charge_recovery_pct: i16,
     pub reads: usize,
@@ -777,17 +798,38 @@ fn build_daily_cards(
     sticky_days: &BTreeMap<String, BTreeSet<String>>,
     offset_minutes: i32,
 ) -> BTreeMap<String, Vec<DailyCard>> {
-    // 当日放电快照（剔除充电态与 charging-fast 事件还原段）。
-    let mut reads: BTreeMap<(String, String), Vec<(i64, u8)>> = BTreeMap::new();
+    // 当日放电快照（剔除 charging-fast 事件还原段）。第三列记「是否
+    // 唤醒首读」（wake-first-read 对同值也落盘，S4 用它把「全是唤醒首读」
+    // 的日子判成无效样本，而不是真实放电样本）。
+    type DayRead = (i64, u8, bool);
+    let mut reads: BTreeMap<(String, String), Vec<DayRead>> = BTreeMap::new();
+    // 按设备的完整读数序列（含充电态读数、剔除 charging-fast）：相邻下降
+    // 量口径要跨充电段连续，不能按日切片（见下方 acc 的说明）。末列是
+    // 「该读数是否处于充电态」，只用于放电跨度的取样（见 acc）。
+    type SeriesItem = (String, i64, u8, bool);
+    let mut series: BTreeMap<String, Vec<SeriesItem>> = BTreeMap::new();
     for ev in events {
         if let StatsEvent::Read(e) = ev {
-            if e.charging || e.source == crate::stats::SOURCE_CHARGING_FAST {
+            let day = (e.physical_key.clone(), fmt_local_date(e.ts, offset_minutes));
+            if e.source == crate::stats::SOURCE_CHARGING_FAST {
                 continue;
             }
+            // 相邻下降量要跨充电段连续，所以另存一条按设备的完整读数
+            // 序列（充电态读数也在内：插电时读数下跌同样是真实放电）。
+            series.entry(e.physical_key.clone()).or_default().push((
+                day.1.clone(),
+                e.ts,
+                e.percent,
+                e.charging,
+            ));
+            if e.charging {
+                continue;
+            }
+            let wake_first = e.source == crate::stats::SOURCE_WAKE_FIRST_READ;
             reads
-                .entry((e.physical_key.clone(), fmt_local_date(e.ts, offset_minutes)))
+                .entry(day)
                 .or_default()
-                .push((e.ts, e.percent));
+                .push((e.ts, e.percent, wake_first));
         }
     }
     // 日界裁剪的充电/未知段。
@@ -832,25 +874,70 @@ fn build_daily_cards(
             .entry((seg.device_key.clone(), fmt_local_date(mid, offset_minutes)))
             .or_insert(0) += gain;
     }
+    // 全设备读数按设备聚合后按时间扫一遍。日耗电 = 相邻两条读数之间的
+    // 「下降量」累计（red-g G1：插电期间读数下跌同样是真实放电；旧实现
+    // 把充电读数当切段边界，会把插电窗口内的跌幅整段丢掉——08h 90→
+    // 10h 80→12h 75(充电)→14h 65(充电)→16h 60→18h 50 这种一天多充放的
+    // 真实放电 40pp，旧口径只算出 25pp，比旧「首末差」口径还少）。
+    //
+    // 归属与分母都用同一条规则：**以区间起点读数为准**——
+    // · 下降量记到起点读数所在日（夜间跨日的跌幅留在「昨天」那张卡上，
+    //   两天合计不丢不重）；
+    // · 放电跨度只累加「起点读数不在充电态」的相邻间隔，并按起点日窗口
+    //   裁剪（跨日间隔只计起点日那一截，日卡分母不会超过 24h）；
+    // · 平走间隔（两条读数同值）计时间、不计下降量——否则空闲期不计时长，
+    //   斜率会被人为抬高。
+    type Acc = (i16, i64);
+    let mut acc: BTreeMap<(String, String), Acc> = BTreeMap::new();
+    for (dev, mut s) in series {
+        s.sort_by_key(|(_, ts, _, _)| *ts);
+        for pair in s.windows(2) {
+            let (ref d0, t0, p0, c0) = pair[0];
+            let (_, t1, p1, _) = pair[1];
+            let win_end = local_day_start(t0, offset_minutes) + 86_400;
+            let secs = (t1.min(win_end) - t0).max(0);
+            let drop = (p0 as i16 - p1 as i16).max(0);
+            let cell = acc.entry((dev.clone(), d0.clone())).or_insert((0, 0));
+            cell.0 += drop;
+            // 跨度计入条件：起点不在充电态（正常放电间隔），或该间隔内
+            // 确有下降（插电期间读数下跌＝拔线后真实放电，这一段时长属于
+            // 放电）。纯插电空转（起点充电、读数不变或上升）不计时长——
+            // 否则 5 小时插着不动会被算成放电跨度，把覆盖中位与斜率一起带偏。
+            if !c0 || drop > 0 {
+                cell.1 += secs;
+            }
+        }
+    }
     let mut out: BTreeMap<String, Vec<DailyCard>> = BTreeMap::new();
     for ((dev, date), mut list) in reads {
-        list.sort_by_key(|(ts, _)| *ts);
-        let (first_ts, first_pct) = list[0];
-        let (last_ts, last_pct) = list[list.len() - 1];
+        list.sort_by_key(|(ts, _, _)| *ts);
+        let (drain, discharge_secs) = acc
+            .get(&(dev.clone(), date.clone()))
+            .copied()
+            .unwrap_or((0, 0));
+        let (first_ts, first_pct) = (list[0].0, list[0].1);
+        let last = list[list.len() - 1];
+        let (last_ts, last_pct) = (last.0, last.1);
         let coverage = last_ts - first_ts;
-        let sparse = list.len() < SPARSE_MIN_READS || coverage < SPARSE_MIN_COVERAGE_SECS;
-        let slope = if !sparse && coverage > 0 {
-            Some(round2(
-                (first_pct as f64 - last_pct as f64) / (coverage as f64 / 3600.0),
-            ))
-        } else {
-            None
-        };
-        let sticky = sticky_days.get(&dev).is_some_and(|ds| ds.contains(&date));
         let (charging_spans, unknown_spans) = spans
             .get(&(dev.clone(), date.clone()))
             .cloned()
             .unwrap_or_default();
+        // 放电跨度与累计放电量来自上面的 acc 扫描（相邻读数下降量口径）。
+        // S4：源分布进样本量判据——当日读数若全由唤醒首读构成，不构成
+        // 有效放电样本（否则 3 条同值就能冒充「今日已耗 0.0%、非 sparse」）。
+        let non_wake_reads = list.iter().filter(|(_, _, wake)| !*wake).count();
+        let sparse = list.len() < SPARSE_MIN_READS
+            || coverage < SPARSE_MIN_COVERAGE_SECS
+            || non_wake_reads == 0;
+        // 斜率分母改用放电跨度（不含充电时段）；放电跨度不足 2h 时不出
+        // 斜率（只给首末差累计）。
+        let slope = if !sparse && discharge_secs >= SPARSE_MIN_COVERAGE_SECS {
+            Some(round2(drain as f64 / (discharge_secs as f64 / 3600.0)))
+        } else {
+            None
+        };
+        let sticky = sticky_days.get(&dev).is_some_and(|ds| ds.contains(&date));
         let charge_recovery_pct = recovery
             .get(&(dev.clone(), date.clone()))
             .copied()
@@ -861,7 +948,8 @@ fn build_daily_cards(
             first_pct,
             last_ts,
             last_pct,
-            drain_pct: (first_pct as i16 - last_pct as i16).max(0),
+            drain_pct: drain,
+            discharge_secs,
             charge_recovery_pct,
             reads: list.len(),
             coverage_secs: coverage,
@@ -977,15 +1065,36 @@ pub struct AvgEstimate {
     pub ledger_pct_per_day: Option<f64>,
     pub valid_days: usize,
     pub window_days: f64,
+    /// 有效日放电跨度中位数（小时）。< AVG_CONFLICT_MIN_COVERAGE_HOURS
+    /// 时判「覆盖不足」：此时上界是放电时段的全天外推，与总账不同基。
+    pub coverage_hours: f64,
+    /// 覆盖不足（有有效日但放电跨度中位数 < 12h）：此时 upper 是放电时段
+    /// 的全天外推、ledger 是按日历日摊，两者不同基，比值差不构成冲突。
+    /// 渲染层直接读这个字段，不再自己拿 coverage_hours 和硬编码 12 比
+    /// （red-g G4：常量必须单源）。
+    pub coverage_short: bool,
     pub sticky_days: usize,
     pub conflict: bool,
+    /// 单侧口径缺失（只有下界或只有上界）：无法对账。旧实现走
+    /// `_ => false` 静默当「不冲突」（S3）。
+    pub unreconcilable: bool,
     pub badges: Vec<String>,
 }
 
 /// 双口径对账冲突判定（FR-3）：conflict = (u > R·l) || (u > 0 且
 /// l > R·u)；u == 0 退化绝对阈值 l > 1.0 %/天；任一为负直接置真；
 /// l <= 0 且 u > 0 分支语义保持（N-4 回归锚）。
+///
+/// 单侧缺失（只有一侧可用）不提升为冲突：由 `unreconcilable` +「无法
+/// 对账」徽标单独承载（S3：旧实现对该状态完全静默）。
 fn avg_conflict(ledger: Option<f64>, upper: Option<f64>) -> bool {
+    avg_conflict_at(ledger, upper, AVG_CONFLICT_RATIO)
+}
+
+/// 与 [`avg_conflict`] 同构，但比值阈值可指定——「覆盖不足」态用它判
+/// 是否已超过硬阈值（[`AVG_COVERAGE_SHORT_ESCALATE_RATIO`]），此时两口径
+/// 差得再多也不能只挂「覆盖不足」。绝对值退化分支与符号分支保持同一口径。
+fn avg_conflict_at(ledger: Option<f64>, upper: Option<f64>, ratio: f64) -> bool {
     match (ledger, upper) {
         (Some(l), Some(u)) => {
             if l < 0.0 || u < 0.0 {
@@ -995,9 +1104,11 @@ fn avg_conflict(ledger: Option<f64>, upper: Option<f64>) -> bool {
             } else if l <= 0.0 {
                 u > 0.0
             } else {
-                u > AVG_CONFLICT_RATIO * l || l > AVG_CONFLICT_RATIO * u
+                u > ratio * l || l > ratio * u
             }
         }
+        // 单侧缺失不在这里判：它由 unreconcilable 单独承载（S3），
+        // 否则「只有上界可用」会被误报成「两口径互相矛盾」。
         _ => false,
     }
 }
@@ -1015,16 +1126,35 @@ fn build_avg_estimate(
     // 粘滞日剔除）。FR-2 症状剔除：slope < 0 的日卡（充电净增益日
     // 负斜率合法产生）不进中位数样本（冲突 C-2 已裁：只剔 slope<0
     // 症状日，废弃 charging_spans / charge_recovery_pct 判据）。
-    let slopes: Vec<f64> = cards
+    let valid_cards: Vec<&DailyCard> = cards.iter().filter(|c| !c.sticky && !c.sparse).collect();
+    let slopes: Vec<f64> = valid_cards
         .iter()
-        .filter(|c| !c.sticky && !c.sparse)
         .filter_map(|c| c.slope_pct_per_hour)
         .filter(|v| *v >= 0.0)
         .collect();
     let valid_days = slopes.len();
     let median_slope = median(slopes);
     let upper = median_slope.map(|m| round2(m * 24.0));
-    // 下界：窗口首尾总账（净降 + 充电回补）÷ 天数。
+    // 覆盖中位（小时）：判「覆盖不足」用，必须与 upper 同一批日卡——
+    // 旧实现取「全部非粘滞非稀疏日卡」的放电跨度，而 upper 只取其中
+    // 「slope 可用且 >=0」的那部分（red-d C4：两集合不同源，会出现
+    // 「upper 由 3 张 16h 卡算出、coverage 却是另 5 张 3h 卡的中位」）。
+    // 放电跨度不足 2h 的卡本来就不出 slope（sparse），故这里不再重复过滤。
+    let coverage_hours = median(
+        valid_cards
+            .iter()
+            .filter(|c| c.slope_pct_per_hour.is_some_and(|v| v >= 0.0))
+            .map(|c| c.discharge_secs as f64 / 3600.0)
+            .filter(|h| *h > 0.0)
+            .collect(),
+    )
+    .unwrap_or(0.0);
+    // 下界：窗口首尾总账（净降 + 充电回补）÷ **日历天数**。这是唯一按
+    // 日历日摊的口径，也是用户实际感知的「一天掉几个点」（含插电不用的
+    // 那几个小时），故不与 upper 的放电时段外推同基——两者的口径差由
+    // coverage_hours 门槛（<12h 只报「覆盖不足」）兜住，不升级为冲突。
+    // 唤醒首读（wake-first-read）在这里同样参与：它只是「设备刚醒时的
+    // 第一读」，不是推断值，剔除反而会让窗口首尾落空。
     let mut dev_reads: Vec<(i64, u8)> = events
         .iter()
         .filter_map(|ev| match ev {
@@ -1039,15 +1169,33 @@ fn build_avg_estimate(
         })
         .collect();
     dev_reads.sort_by_key(|(ts, _)| *ts);
-    let recovery: i16 = segments
-        .iter()
-        .filter(|s| s.device_key == device_key && s.seg_type == SegmentType::Charging)
-        .map(|s| (s.end_pct as i16 - s.start_pct as i16).max(0))
-        .sum();
+    // 充电回补只累加**窗口内**的那部分（red-d C9 的对偶：旧实现把整条历史
+    // 的充电增益全加进窗口净降，历史越长越会把下界抬高，极端情况下把真实
+    // 净放电抹成「充电在补」）。段被窗口切开时按时间占比缩放增益。
+    let recovery_in = |t0: i64, t1: i64| -> i16 {
+        let mut acc: f64 = 0.0;
+        for s in segments {
+            if s.device_key != device_key || s.seg_type != SegmentType::Charging {
+                continue;
+            }
+            let dur = s.duration_secs().max(1);
+            let lo = s.start_ts.max(t0);
+            let hi = s.end_ts.min(t1).max(lo);
+            let inside = (hi - lo).max(0) as f64;
+            if inside <= 0.0 {
+                continue;
+            }
+            let gain = (s.end_pct as i16 - s.start_pct as i16).max(0) as f64;
+            acc += gain * (inside / dur as f64);
+        }
+        acc.round() as i16
+    };
+    // P1：分母下限 5 分钟——短窗口的高倍放大不是信息而是噪声。
     let (ledger, window_days) = match (dev_reads.first(), dev_reads.last()) {
-        (Some((t0, p0)), Some((t1, p1))) if t1 > t0 => {
+        (Some((t0, p0)), Some((t1, p1))) if *t1 - *t0 >= AVG_MIN_WINDOW_SECS => {
             let wd = (*t1 - *t0) as f64 / 86_400.0;
             let net = *p0 as i16 - *p1 as i16;
+            let recovery = recovery_in(*t0, *t1);
             (Some(round2((net + recovery) as f64 / wd)), round2(wd))
         }
         _ => (None, 0.0),
@@ -1058,7 +1206,26 @@ fn build_avg_estimate(
     // u == 0 时比值式判据失效，退化为绝对阈值 l > 1.0 %/天；
     // l 或 u 任一为负直接置真；l <= 0 且 u > 0 的既有分支语义保持
     // （N-4 回归锚，含于比值式第一臂）。
-    let conflict = avg_conflict(ledger, upper);
+    // S2：冲突徽标与 coverage 解耦。放电覆盖不足 12h 时，upper（对放电
+    // 时段外推 24h）与 ledger（按日历日摊）本来就不是同一个量，比值差距
+    // 多半是口径差——此时默认只保留「覆盖不足」。
+    //
+    // 但「覆盖不足」不能无条件吞掉冲突（red-g G4）：8 张 6h 卡 + ledger=7.5
+    // 而 upper 崩到 750 那种百倍差，已经不是口径差能解释的了。所以设一个
+    // 更高的硬阈值：覆盖不足**且**比值超过 AVG_COVERAGE_SHORT_ESCALATE_RATIO
+    // 时仍报「口径冲突」（两个徽标同时挂），把「差得离谱」如实透出去。
+    let unreconcilable = ledger.is_some() != upper.is_some();
+    let coverage_short = valid_days > 0 && coverage_hours < AVG_CONFLICT_MIN_COVERAGE_HOURS;
+    let hard_gap =
+        !unreconcilable && avg_conflict_at(ledger, upper, AVG_COVERAGE_SHORT_ESCALATE_RATIO);
+    // 两口径都可用、且放电覆盖足够长（同基）→ 按常规阈值判冲突；
+    // 覆盖不足 → 只有差得离谱（硬阈值）才升级成冲突。
+    let conflict = !unreconcilable
+        && if coverage_short {
+            hard_gap
+        } else {
+            avg_conflict(ledger, upper)
+        };
     let mut badges: Vec<String> = Vec::new();
     if valid_days < AVG_MIN_VALID_DAYS {
         badges.push("样本不足".to_string());
@@ -1066,8 +1233,17 @@ fn build_avg_estimate(
     if !sticky_days.is_empty() {
         badges.push("含粘滞".to_string());
     }
-    if conflict {
-        badges.push("口径冲突".to_string());
+    if unreconcilable {
+        badges.push("无法对账".to_string());
+    } else {
+        // 「覆盖不足」与「口径冲突」可以同时挂（见上方 hard_gap 说明）——
+        // 前者说明两者不同基，后者说明差得离谱，两条信息都要给。
+        if coverage_short {
+            badges.push("覆盖不足".to_string());
+        }
+        if conflict {
+            badges.push("口径冲突".to_string());
+        }
     }
     AvgEstimate {
         lower_pct_per_day: ledger,
@@ -1076,6 +1252,9 @@ fn build_avg_estimate(
         ledger_pct_per_day: ledger,
         valid_days,
         window_days,
+        coverage_hours,
+        coverage_short,
+        unreconcilable,
         sticky_days: sticky_days
             .iter()
             .filter(|d| cards.iter().any(|c| &c.date == *d))
@@ -1573,6 +1752,11 @@ pub fn build_report_data(
                     "lower_pct_per_day": avg.lower_pct_per_day,
                     "upper_pct_per_day": avg.upper_pct_per_day,
                     "conflict": avg.conflict,
+                    "unreconcilable": avg.unreconcilable,
+                    "coverage_hours": avg.coverage_hours,
+                    // 三态判定结果直接透出：首屏只做展示，不再自己拿
+                    // coverage_hours 和字面量 12 比（red-g G4 单源要求）。
+                    "coverage_short": avg.coverage_short,
                     "badges": avg.badges,
                 },
             }),
@@ -1732,7 +1916,7 @@ footer table{font-size:12px}
 <section class="cards" id="kpis"></section>
 
 <h2>分日视图（日界对齐：日耗电柱 + 24h 时间轴）</h2>
-<p class="hint">纵轴：每日耗电 %（<b>纵轴刻度自 0 起，柱高按当日最大值等比缩放</b>）。日耗电 = 当日放电快照首末差（跨日段在日界处切分、不摊入；charging-fast 事件还原段剔除）。时间轴实色段为 app 运行时段（监控覆盖，app 进程口径），绿色为充电段，灰罩为未知段。质量标签：设备上报粘滞（当日斜率可能低估）/ 样本不足（read&lt;3 或覆盖&lt;2h，只给首末差）。</p>
+<p class="hint">纵轴：每日耗电 %（<b>纵轴刻度自 0 起，柱高按当日最大值等比缩放</b>）。日耗电 = 当日放电累计（按时间顺序把相邻两条读数的「下降量」相加——回升段不产生负耗电，插电期间读数下跌同样计入；跨日间隔按起点日归属、不摊不重；charging-fast 事件还原段剔除）。时间轴实色段为 app 运行时段（监控覆盖，app 进程口径），绿色为充电段，灰罩为未知段。质量标签：设备上报粘滞（当日斜率可能低估）/ 样本不足（read&lt;3 或覆盖&lt;2h 或全部读数来自唤醒首读，只给放电累计、不给斜率）。</p>
 <div id="daily"></div>
 
 <h2>静止 vs 活动</h2>
@@ -1747,7 +1931,7 @@ footer table{font-size:12px}
 <p class="hint">跨未知段断线并以灰罩标示（不直线相连）；充电段以底色标记；粘滞段以黄褐色罩层与虚线标注（悬停看说明）；窗口可切换，默认近 90 天。</p>
 <h3>日均耗电双口径对账明细</h3>
 <div class="cards" id="recon"></div>
-<p class="hint">上界 = 剔除粘滞标记日的每日放电实测斜率中位数 ×24h（系统性偏高：非运行时段按运行斜率外推）；下界 = 窗口首尾总账（净降 + 充电回补）÷ 天数（按全天摊薄，可能偏低）。差异 &gt;2 倍挂「口径冲突」。物理量（mAh/mWh）无电池容量字段，不给。</p>
+<p class="hint">上界 = 剔除粘滞标记日的每日放电实测斜率中位数 ×24h（系统性偏高：非运行时段按运行斜率外推）；下界 = 窗口首尾总账（净降 + 充电回补）÷ 天数（按全天摊薄，可能偏低）。差异 &gt;2 倍挂「口径冲突」；但有效日放电跨度中位数不足 12h 时两者不同基（上界对放电时段外推全天、下界按日历日摊薄），此时默认只挂「覆盖不足」；若此时比值差仍超过 10 倍的硬阈值，则两个徽标同时挂（差得离谱不能被口径差解释）。只有单侧口径可用时挂「无法对账」，不再静默当作不冲突。窗口首尾读数间隔不足 5 分钟时不出总账（短窗口放大不是信息）。物理量（mAh/mWh）无电池容量字段，不给。</p>
 
 <h2>证据与口径区</h2>
 <h3>app 运行时长占比</h3>
@@ -1762,20 +1946,20 @@ footer table{font-size:12px}
 <h3>口径与边界说明</h3>
 <table id="glossary"><thead><tr><th>展示项</th><th>形态</th><th>数据来源字段</th><th>口径</th><th>护栏</th></tr></thead><tbody>
 <tr><td>当前电量</td><td>首屏 KPI 卡</td><td>percent/ts 最新快照</td><td>实测</td><td>—</td></tr>
-<tr><td>今日已耗</td><td>首屏 KPI 卡</td><td>当日 discharging 首末差</td><td>实测</td><td>read&lt;3 或覆盖&lt;2h → 灰态「数据不足」</td></tr>
+<tr><td>今日已耗</td><td>首屏 KPI 卡</td><td>当日相邻读数下降量累计（含插电期间下跌；跨日按起点日归属）</td><td>实测</td><td>read&lt;3 或覆盖&lt;2h 或全为唤醒首读 → 灰态「数据不足」</td></tr>
 <tr><td>今日 app 运行时长</td><td>首屏 KPI 卡</td><td>run_start/stop 当日段</td><td>实测（app 进程口径）</td><td>文案守卫</td></tr>
-<tr><td>日均耗电区间</td><td>首屏 KPI 区间卡</td><td>剔除粘滞日中位数 × 总账对账</td><td>推断</td><td>无条件区间化 + 差异&gt;2 倍冲突提示 + 样本质量徽标</td></tr>
+<tr><td>日均耗电区间</td><td>首屏 KPI 区间卡</td><td>剔除粘滞日中位数 × 总账对账</td><td>推断</td><td>无条件区间化 + 差异&gt;2 倍冲突提示（覆盖不足 12h 时不报冲突）＋单侧缺失「无法对账」＋样本质量徽标</td></tr>
 <tr><td>每日耗电量</td><td>分日柱 + 明细</td><td>percent/charging/ts</td><td>实测</td><td>粘滞 / 样本不足两级标签</td></tr>
 <tr><td>app 运行时段</td><td>24h 分日时间轴</td><td>run_start/run_stop</td><td>实测（改名防误导）</td><td>口径守卫测试</td></tr>
 <tr><td>充电时段</td><td>时间轴绿色段</td><td>charging-fast 事件</td><td>实测</td><td>—</td></tr>
 <tr><td>静止 vs 活动</td><td>灰态卡→热力带</td><td>activity_buckets（新增）</td><td>缺口→实测</td><td>禁用流量代理</td></tr>
 <tr><td>电量曲线</td><td>折线 + 平台期标注</td><td>percent/ts 全量快照</td><td>实测</td><td>粘滞段标注 + tooltip</td></tr>
-<tr><td>日均耗电对账明细</td><td>P1 明细卡</td><td>双口径全量字段</td><td>推断</td><td>冲突状态明示</td></tr>
+<tr><td>日均耗电对账明细</td><td>P1 明细卡</td><td>双口径全量字段</td><td>推断</td><td>冲突/覆盖不足/无法对账三态明示</td></tr>
 <tr><td>app 运行时长占比</td><td>堆叠横条</td><td>分段时长合计</td><td>实测</td><td>改名</td></tr>
 <tr><td>分段明细表</td><td>表格（证据层）</td><td>与 CSV 同数据同列</td><td>实测</td><td>rate 护栏（duration&lt;5min 或 delta 绝对值&lt;1% → None）</td></tr>
 </tbody></table>
 <p>工程口径：设备数 <b id="mdev">—</b>、聚合段数 <b id="mseg">—</b>、覆盖天数 <b id="mday">—</b>（不占首屏）。日界 = 本地 00:00（时区见页首）。日界按单一 UTC 偏移计算，跨夏令时切换日前后历史日存在 ≤1h 归属偏差（不做事件级时区库重算）。</p>
-<p>已移除：跨日段线性摊入柱图（日耗电口径已统一为当日首末差，避免同页双口径）；近 7 天耗速率摘要卡（分母语义错误：app 运行段由 run_start/run_stop 事件锚定）。</p>
+<p>已移除：跨日段线性摊入柱图（日耗电口径已统一为当日放电累计，避免同页双口径）；近 7 天耗速率摘要卡（分母语义错误：app 运行段由 run_start/run_stop 事件锚定）。</p>
 <p>单文件离线报告：零外部依赖，断网可开。</p>
 </footer>
 </div>
@@ -1814,11 +1998,11 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
       +badge("实测","b-measure")+(ageStale(kpi.current_ts)?badge("读数超 2h 未刷新","b-warn"):"")+'</div>';
     if(kpi.today_sparse||kpi.today_drain_pct==null){
       html+='<div class="card dim"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">数据不足</div>'
-        +'<div class="s">read&lt;3 或覆盖&lt;2h 时不给斜率、只给首末差</div>'
+        +'<div class="s">read&lt;3、覆盖&lt;2h，或当天读数全来自唤醒首读——只给放电累计、不给斜率</div>'
         +badge("实测","b-measure")+badge("样本不足","b-warn")+'</div>';
     }else{
       html+='<div class="card"><div class="k">今日已耗 · '+esc(name)+'</div><div class="v">'+kpi.today_drain_pct+'%</div>'
-        +'<div class="s">'+(kpi.today_date||"")+' 首末差</div>'
+        +'<div class="s">'+(kpi.today_date||"")+' 放电累计（相邻读数下降量求和，含插电期间下跌）</div>'
         +badge("实测","b-measure")+(kpi.today_sticky?badge("设备上报粘滞","b-warn"):"")+'</div>';
     }
     html+='<div class="card"><div class="k">今日 app 运行时长 · '+esc(name)+'</div><div class="v">'
@@ -1832,7 +2016,7 @@ function devName(k){for(var i=0;i<devs.length;i++)if(devs[i][0]===k)return devs[
       var L=avg.lower_pct_per_day==null?"—":avg.lower_pct_per_day;
       var U=avg.upper_pct_per_day==null?"—":avg.upper_pct_per_day;
       var bds=badge("推断","b-infer");
-      (avg.badges||[]).forEach(function(b){bds+=badge(b,b==="口径冲突"?"b-conflict":"b-warn");});
+      (avg.badges||[]).forEach(function(b){bds+=badge(b,(b==="口径冲突"||b==="无法对账")?"b-conflict":"b-warn");});
       html+='<div class="card"><div class="k">日均耗电区间 · '+esc(name)+'</div><div class="v">'
         +L+" ~ "+U+' %/天</div><div class="s">剔除粘滞日中位数 × 总账对账</div>'+bds+'</div>';
     }
@@ -1946,7 +2130,7 @@ function drawBars(id,bars){
     var r=el("rect",{x:x,y:H-PB-h,width:bw,height:Math.max(0,h),fill:"#2b6cb0",
       "fill-opacity":b.sparse?0.35:(b.sticky?0.55:0.9)},svg);
     var t=el("title",{},r);
-    t.textContent=b.sticky?"设备上报粘滞：当日斜率可能低估":(b.sparse?"样本不足：只给首末差":b.label+" 耗电 "+b.drain+"%");
+    t.textContent=b.sticky?"设备上报粘滞：当日斜率可能低估":(b.sparse?"样本不足：只给放电累计":b.label+" 耗电 "+b.drain+"%");
     if(n<=62||i%Math.ceil(n/62)===0){
       var tx=el("text",{x:x+bw/2-12,y:H-PB+13,"font-size":9,fill:"#888"},svg);tx.textContent=b.label;
     }
@@ -1983,7 +2167,7 @@ function niceCeil(v){
       :((avg.lower_pct_per_day==null?"—":avg.lower_pct_per_day)+" ~ "
         +(avg.upper_pct_per_day==null?"—":avg.upper_pct_per_day)+" %/天");
     var today=(kpi.today_sparse||kpi.today_drain_pct==null)?"数据不足（read<3 或覆盖<2h）"
-      :(kpi.today_drain_pct+"%（"+(kpi.today_date||"")+" 首末差）");
+      :(kpi.today_drain_pct+"%（"+(kpi.today_date||"")+" 放电累计，相邻下降量求和）");
     html+='<div class="card" style="min-width:620px;max-width:960px">'
       +'<div class="k">'+esc(name)+' · 现在</div>'
       +'<div class="v">'+(cur==null?"—":cur+"%")+'</div>'
@@ -2117,7 +2301,7 @@ function drawCurrentBar(id,cur){
     var a=m[k];var name=devName(k);
     function f(v,unit){return v==null?"—":v+unit;}
     var bds="";
-    (a.badges||[]).forEach(function(b){bds+=badge(b,b==="口径冲突"?"b-conflict":"b-warn");});
+    (a.badges||[]).forEach(function(b){bds+=badge(b,(b==="口径冲突"||b==="无法对账")?"b-conflict":"b-warn");});
     var wow=w[k]||{suppressed:true};
     var wbadges="";(wow.badges||[]).forEach(function(b){wbadges+=badge(b,"b-warn");});
     var wwin=(wow.window_first&&wow.window_last)?(' · 窗口 '+wow.window_first+' ~ '+wow.window_last):"";
@@ -2128,7 +2312,15 @@ function drawCurrentBar(id,cur){
       +'<div class="s">总账（下界）'+f(a.ledger_pct_per_day," %/天")
       +' · 中位斜率 '+f(a.median_slope_pct_per_hour," %/h")+'（×24h = 上界）<br>'
       +'有效样本 '+a.valid_days+' 天 · 窗口 '+a.window_days+' 天 · 粘滞 '+a.sticky_days+' 天'
-      +' · 口径冲突：'+(a.conflict?"是":"否")+'<br>'+wtxt+wwin+'</div>'
+      +' · 覆盖中位 '+(a.coverage_hours==null?"—":a.coverage_hours)+' h · 对账状态：'
+      // 三态由 Rust 侧判定后透出（unreconcilable / coverage_short / conflict），
+      // 这里只做文案映射：不再拿 coverage_hours 和字面量 12 比；
+      // 且「覆盖不足」与「口径冲突」可以同时成立（比值差超硬阈值时两者都挂）。
+      +(a.unreconcilable?"无法对账（仅单侧口径）"
+        :(a.coverage_short?(a.conflict
+            ?"覆盖不足且比值差已超硬阈值，判口径冲突"
+            :"覆盖不足（双口径不同基，不比对）")
+          :(a.conflict?"口径冲突":"一致")))+'<br>'+wtxt+wwin+'</div>'
       +badge("推断","b-infer")+bds+wbadges+'</div>';
   });
   host.innerHTML=html;
@@ -3368,7 +3560,7 @@ mod filename_tests {
     use super::tests::{ev_poll, ev_read, seg, CST};
     use super::*;
     use crate::diag_export::LocalTimeParts;
-    use crate::stats::{ActivityDay, SOURCE_POLL};
+    use crate::stats::{ActivityDay, SOURCE_CHARGING_FAST, SOURCE_POLL};
 
     // -------------------------------------------------------------------
     // 融合稿 Phase 0 测试网（13 项，钉死新口径与删除守卫）
@@ -3387,6 +3579,9 @@ mod filename_tests {
             last_ts: 0,
             last_pct: (90 - drain).max(0) as u8,
             drain_pct: drain,
+            // 日卡默认按「整天未充电」构造放电跨度，避免默认样本落进
+            // 「覆盖不足 12h」分支影响冲突断言。
+            discharge_secs: 86_400,
             charge_recovery_pct: 0,
             reads: 3,
             coverage_secs: 7200,
@@ -3395,6 +3590,21 @@ mod filename_tests {
             sparse,
             charging_spans: Vec::new(),
             unknown_spans: Vec::new(),
+        }
+    }
+
+    /// 放电跨度可调的日卡（覆盖不足 / 同基判定用）。
+    fn card_secs(
+        date: &str,
+        drain: i16,
+        slope: Option<f64>,
+        sticky: bool,
+        sparse: bool,
+        discharge_secs: i64,
+    ) -> DailyCard {
+        DailyCard {
+            discharge_secs,
+            ..card(date, drain, slope, sticky, sparse)
         }
     }
 
@@ -3420,14 +3630,262 @@ mod filename_tests {
         assert_eq!(v[0].date, d0s);
         assert_eq!(v[0].first_pct, 90);
         assert_eq!(v[0].last_pct, 85);
-        assert_eq!(v[0].drain_pct, 5);
+        // S1（D-105 修订）：日耗电 = 相邻读数下降量累计，充电态读数同样
+        // 参与（插电期间读数下跌也是真实放电）。本样本逐段拆解：
+        //   08h→12h 90−88 = 2pp（跨 4h，起点非充电 → 计时长 4h）
+        //   12h→14h 88→91 回升，0pp（起点非充电 → 计时长 2h）
+        //   14h→20h 91−85 = 6pp（起点充电但有下降 → 计时长 6h）
+        //   20h→次日 09h 85−84 = 1pp（跨日落回**当日**，时长按当日窗口裁到 4h）
+        // 合计 9pp / 16h；旧「首末差」口径只给 5pp（90−85），漏掉 4pp。
+        assert_eq!(v[0].drain_pct, 9);
         assert_eq!(v[0].reads, 3);
         assert_eq!(v[0].coverage_secs, 12 * 3600);
-        assert_eq!(v[0].slope_pct_per_hour, Some(round2(5.0 / 12.0)));
+        assert_eq!(v[0].discharge_secs, 16 * 3600, "4h + 2h + 6h + 当日窗口 4h");
+        assert_eq!(v[0].slope_pct_per_hour, Some(round2(9.0 / 16.0)));
         assert!(!v[0].sparse);
         assert!(!v[0].sticky);
         assert_eq!(v[1].date, d1s);
         assert_eq!(v[1].drain_pct, 2);
+    }
+
+    #[test]
+    fn s1_drain_sums_across_charge_cycles() {
+        // S1 回归：一天充放三轮。旧「当日首末差」口径只给 90−60 = 30pp，
+        // 新口径（相邻下降量累计）= 30 + 30 + 30 = 90pp（3 倍差异）。
+        // 时长：08→10 降（2h）+ 10→11 回升（起点非充电，1h）+ 11→15 降（4h）
+        // + 15→16 回升（1h）+ 16→20 降（4h）= 12h。
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 8 * 3600, "d1", 90),
+            ev_poll(d0 + 10 * 3600, "d1", 60),
+            ev_read(d0 + 11 * 3600, "d1", 90, true, SOURCE_POLL),
+            ev_poll(d0 + 15 * 3600, "d1", 60),
+            ev_read(d0 + 16 * 3600, "d1", 90, true, SOURCE_POLL),
+            ev_poll(d0 + 20 * 3600, "d1", 60),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let c = &cards["d1"][0];
+        assert_eq!(c.first_pct, 90);
+        assert_eq!(c.last_pct, 60);
+        assert_eq!(c.drain_pct, 90, "相邻读数下降量累计");
+        assert_eq!(c.discharge_secs, 12 * 3600, "2h + 1h + 4h + 1h + 4h");
+        assert_eq!(c.slope_pct_per_hour, Some(round2(90.0 / 12.0)));
+        assert!(!c.sparse);
+    }
+
+    #[test]
+    fn s4_all_wake_first_reads_are_sparse() {
+        // S4 回归：三条同值的唤醒首读不得冒充有效放电样本
+        // （旧口径下 3 条 90% 会给出「今日已耗 0.0%」且 sparse=false）。
+        let d0 = day_base();
+        let events = vec![
+            ev_read(d0 + 3600, "d1", 90, false, SOURCE_WAKE_FIRST_READ),
+            ev_read(d0 + 8 * 3600, "d1", 90, false, SOURCE_WAKE_FIRST_READ),
+            ev_read(d0 + 12 * 3600, "d1", 90, false, SOURCE_WAKE_FIRST_READ),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let c = &cards["d1"][0];
+        assert_eq!(c.drain_pct, 0);
+        assert!(c.sparse, "全为唤醒首读须判样本不足");
+        assert_eq!(c.slope_pct_per_hour, None);
+    }
+
+    #[test]
+    fn s2_coverage_short_suppresses_conflict() {
+        // S2 回归：上界按放电时段外推 24h、下界按日历日摊薄，两者在
+        // 放电覆盖不足 12h 时不是同一个量。比值 24/3.75 = 6.4 远超 2 倍，
+        // 但只挂「覆盖不足」，不误报「口径冲突」。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 8 * 86400, "d1", 60)];
+        let cards: Vec<DailyCard> = (0..8)
+            .map(|i| {
+                card_secs(
+                    &fmt_local_date(d0 + i * 86400, CST),
+                    1,
+                    Some(1.0),
+                    false,
+                    false,
+                    6 * 3600,
+                )
+            })
+            .collect();
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert_eq!(est.upper_pct_per_day, Some(24.0));
+        assert_eq!(est.lower_pct_per_day, Some(3.75));
+        assert_eq!(est.coverage_hours, 6.0);
+        assert!(!est.unreconcilable);
+        assert!(!est.conflict, "覆盖不足时不报口径冲突");
+        assert!(est.badges.contains(&"覆盖不足".to_string()));
+        assert!(!est.badges.contains(&"口径冲突".to_string()));
+    }
+
+    #[test]
+    fn s3_single_sided_is_unreconcilable() {
+        // S3 回归：单侧口径缺失不得静默当作「不冲突」。
+        let d0 = day_base();
+        // 只缺上界：全部日卡无斜率 → upper=None、ledger=Some。
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 8 * 86400, "d1", 60)];
+        let cards: Vec<DailyCard> = (0..8)
+            .map(|i| card(&fmt_local_date(d0 + i * 86400, CST), 1, None, false, false))
+            .collect();
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert_eq!(est.upper_pct_per_day, None);
+        assert!(est.lower_pct_per_day.is_some());
+        assert!(est.unreconcilable);
+        assert!(!est.conflict);
+        assert!(est.badges.contains(&"无法对账".to_string()));
+        // 只缺下界：无任何放电读数 → ledger=None；日卡斜率在 → upper=Some。
+        let cards_u: Vec<DailyCard> = (0..8)
+            .map(|i| {
+                card(
+                    &fmt_local_date(d0 + i * 86400, CST),
+                    1,
+                    Some(1.0),
+                    false,
+                    false,
+                )
+            })
+            .collect();
+        let est2 = build_avg_estimate(&[], &[], "d1", &cards_u, &BTreeSet::new());
+        assert_eq!(est2.upper_pct_per_day, Some(24.0));
+        assert_eq!(est2.lower_pct_per_day, None);
+        assert!(est2.unreconcilable);
+        assert!(est2.badges.contains(&"无法对账".to_string()));
+    }
+
+    #[test]
+    fn p1_short_window_yields_no_ledger() {
+        // P1 回归：窗口首尾间隔不足 5 分钟时不出总账（短窗口放大不是信息）
+        // 且不因此挂「无法对账」（两侧都缺）。
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 60, "d1", 80)];
+        let est = build_avg_estimate(&events, &[], "d1", &[], &BTreeSet::new());
+        assert_eq!(est.lower_pct_per_day, None, "60s 窗口不出总账");
+        assert_eq!(est.window_days, 0.0);
+        assert!(!est.unreconcilable);
+        assert!(!est.conflict);
+    }
+
+    /// red-g G1 回归：插电期间的读数下跌同样是真实放电。
+    /// 旧实现（把充电读数当切段边界）会把插电窗口内的跌幅整段丢掉，
+    /// 08h 90→10h 80→12h 75(充电)→14h 65(充电)→16h 60→18h 50 真实放电 40pp，
+    /// 旧口径只算 25pp——比它想替换的「首末差」口径（也=40）还少。
+    #[test]
+    fn g1_charging_reads_still_count_as_discharge() {
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 8 * 3600, "d1", 90),
+            ev_poll(d0 + 10 * 3600, "d1", 80),
+            ev_read(d0 + 12 * 3600, "d1", 75, true, SOURCE_CHARGING_FAST),
+            ev_read(d0 + 14 * 3600, "d1", 65, true, SOURCE_CHARGING_FAST),
+            ev_poll(d0 + 16 * 3600, "d1", 60),
+            ev_poll(d0 + 18 * 3600, "d1", 50),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let c = &cards["d1"][0];
+        // charging-fast 是推断还原段，一律不收——本用例只保留 poll 读数，
+        // 因此 drain 仍是 90→80→60→50 的下降量之和 = 10 + 20 + 10 = 40。
+        assert_eq!(c.drain_pct, 40, "插电窗口两侧的跌幅都要计入");
+        assert_eq!(c.discharge_secs, 10 * 3600, "08→18h，扣掉插电段的 2h");
+    }
+
+    /// red-g G1 变体：同样是「插电下跌」，但读数是真实充电态轮询（source=poll）。
+    #[test]
+    fn g1b_charging_poll_reads_count_toward_drain() {
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 8 * 3600, "d1", 90),
+            ev_read(d0 + 10 * 3600, "d1", 85, true, SOURCE_POLL),
+            ev_read(d0 + 12 * 3600, "d1", 78, true, SOURCE_POLL),
+            ev_poll(d0 + 14 * 3600, "d1", 70),
+            ev_poll(d0 + 16 * 3600, "d1", 62),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let c = &cards["d1"][0];
+        assert_eq!(c.drain_pct, 28, "90−85−7−8−8 逐段下降量之和");
+        assert_eq!(c.reads, 3, "充电态读数不进 reads 计数");
+    }
+
+    /// red-g G3 回归：跨日落回「昨天」。夜充到 100 后次日首读 92 的 8pp 跌幅
+    /// 记在昨天的卡上（两天合计 16pp，不丢不重）。
+    #[test]
+    fn g3_cross_day_drop_stays_with_its_start_day() {
+        let d0 = day_base();
+        let events = vec![
+            ev_poll(d0 + 20 * 3600, "d1", 100),
+            ev_read(d0 + 86400 - 600, "d1", 100, true, SOURCE_POLL),
+            ev_poll(d0 + 86400 + 6 * 3600, "d1", 92),
+            ev_poll(d0 + 86400 + 12 * 3600, "d1", 84),
+        ];
+        let segs = build_segments(&events);
+        let sd = sticky_day_set(&sticky_spans(&segs), CST);
+        let cards = build_daily_cards(&events, &segs, &sd, CST);
+        let v = &cards["d1"];
+        assert_eq!(v.len(), 2, "两天各一张卡");
+        // 归属规则：一段下跌记到**起点读数所在日**——20h→次日 06h 那 8pp
+        // 留在昨天的卡上，次日 06h→12h 的 8pp 记在今天的卡上；两天合计 16pp。
+        assert_eq!(v[0].drain_pct, 8, "跨日下跌归起点日（昨天）");
+        assert_eq!(v[1].drain_pct, 8, "当日下跌归今天");
+        assert_eq!(v[0].drain_pct + v[1].drain_pct, 16, "两天合计不丢不重");
+    }
+
+    /// red-g G4 回归：覆盖不足态下若比值差超过硬阈值，仍要报「口径冲突」
+    /// （口径差解释不了百倍级差距，S2 的解耦不能把真冲突整类静音）。
+    #[test]
+    fn g4_short_coverage_still_escalates_huge_gap() {
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 8 * 86400, "d1", 60)];
+        // 8 张 6h 卡：上限 = 中位斜率 ×24h；这里让斜率极大，制造百倍差。
+        let cards: Vec<DailyCard> = (0..8)
+            .map(|i| {
+                card_secs(
+                    &fmt_local_date(d0 + i * 86400, CST),
+                    1,
+                    Some(31.0),
+                    false,
+                    false,
+                    6 * 3600,
+                )
+            })
+            .collect();
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert_eq!(est.upper_pct_per_day, Some(744.0));
+        assert_eq!(est.lower_pct_per_day, Some(3.75));
+        assert!(est.coverage_short, "覆盖不足仍如实标注");
+        assert!(est.conflict, "比值差 198 倍必须升级成冲突");
+        assert!(est.badges.contains(&"覆盖不足".to_string()));
+        assert!(est.badges.contains(&"口径冲突".to_string()));
+    }
+
+    /// red-g G4 对偶：覆盖不足 + 正常量级差（<10 倍）时仍只挂「覆盖不足」。
+    #[test]
+    fn g4b_short_coverage_keeps_normal_gap_quiet() {
+        let d0 = day_base();
+        let events = vec![ev_poll(d0, "d1", 90), ev_poll(d0 + 8 * 86400, "d1", 60)];
+        let cards: Vec<DailyCard> = (0..8)
+            .map(|i| {
+                card_secs(
+                    &fmt_local_date(d0 + i * 86400, CST),
+                    1,
+                    Some(1.0),
+                    false,
+                    false,
+                    6 * 3600,
+                )
+            })
+            .collect();
+        let est = build_avg_estimate(&events, &[], "d1", &cards, &BTreeSet::new());
+        assert!(est.coverage_short);
+        assert!(!est.conflict, "6.4 倍仍在口径差可解释范围内");
+        assert!(!est.badges.contains(&"口径冲突".to_string()));
     }
 
     #[test]
@@ -3673,7 +4131,8 @@ mod filename_tests {
     #[test]
     fn first_screen_no_inferred_single_value() {
         // 首屏推断项断言为区间形态：avg 只有 lower/upper 成对字段 +
-        // conflict/badges，不存在任何单值字段。
+        // conflict/badges + coverage_hours/unreconcilable（均为区间口径的元数据，
+        // 不是耗电量的点估计），不存在任何单值字段。
         let events = vec![
             StatsEvent::RunStart { ts: 1000 },
             ev_poll(2000, "d1", 90),
@@ -3691,7 +4150,10 @@ mod filename_tests {
             vec![
                 "badges",
                 "conflict",
+                "coverage_hours",
+                "coverage_short",
                 "lower_pct_per_day",
+                "unreconcilable",
                 "upper_pct_per_day"
             ]
         );

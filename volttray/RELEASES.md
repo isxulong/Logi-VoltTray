@@ -41,6 +41,48 @@
    手动删除该目录下这两个文件即可，不影响配置。
 4. 问题修复后按 runbook 重发新版；回退事件记入发布对账。
 
+## v0.3.28
+
+这一版的主体是**统计口径**：日耗电原来按「当日首末读数之差」算，一次充电回补就把之前耗掉的电量从柱子里抹掉；日均区间的三种异常（样本不足 / 覆盖不足 / 双侧缺失）原来混在一个布尔里，只有上界或只有下界时会静默当成「两口径一致」。本版把日耗电改成「放电累计」、把三种异常拆成三态明示，并给复算脚本补上了逐值独立基准。附带三项主机侧开销修复（托盘图标去重、空闲热重载放宽、设置保存即时生效）与一项重连扫描降频。
+
+### 用户可见变化
+
+1. **日耗电不再被充电「抹掉」**：柱图与「今日已耗」原来取当日首末读数之差——中途插线充回 10 个百分点，那 10 个百分点就从当天的柱子里消失了。现在改为**放电累计**：按时间顺序把相邻两次读数之间的「下降量」相加（回升段不产生负耗电）。关键是**插电期间的读数下跌也算**：插着线在用的那段时间同样在掉电，旧实现把它整段跳过了。一天里充放几次都好，柱子就是所有下降量之和；跨过午夜的那一段归**起点所在的昨天**，两天合计不丢不重。
+2. **日均耗电区间会明说自己是哪种情况**：原来只有「样本不足」「含粘滞」「口径冲突」三种提示，现在拆成**覆盖不足 / 无法对账 / 口径冲突**三态——①有效日的放电跨度中位数不足 12 小时 → 挂「覆盖不足」，此时上界是放电时段的全天外推、与总账不同基，默认不据此报冲突；②只有下界或只有上界 → 挂「无法对账」；③两口径都有且差超 2 倍 → 才是「口径冲突」。**但「覆盖不足」不会把离谱的差吞掉**：覆盖不足时若两口径仍差 10 倍以上，会同时挂出「口径冲突」（口径差解释不了百倍级差距）。另加一条：总账窗口不足 5 分钟不出下界（原来 1 秒的窗口也能算出一个 86400 %/天 的速率）。
+3. **全是唤醒首读的日子不再冒充放电样本**：设备唤醒后第一次读到的电量本身不是「放电过程」的观测，若一天的读数全部来自唤醒首读，该日按「样本不足」处理、不给斜率，只给放电累计。
+4. **空闲时不再每 5 秒查一次配置文件**：`config.toml` 的热重载轮询从 5 秒放宽到 15 秒（每天 17280 次 → 5760 次主机侧唤醒），手改配置后约 15 秒内生效。
+5. **设置窗口保存后立刻生效**：以前在设置里改了轮询档位要等下一轮睡眠分片结束才重排，现在保存即触发重排与重新分层，不用再点「立即重启」。只有**轮询相关**的键变更才会触发这件事——拖低电阈值、改图标缩放不会再把设备的下一轮读数整体推迟一个档位。
+6. **低电闪烁不再反复重建托盘图标**：闪烁期托盘每秒被刷新 2 次，原实现每次都新建一个 HICON 再发两次 `Shell_NotifyIconW`；现在只有「要推出去的形状」真的变了才推（颜色档 + 文本 + 提亮相位 + 形象代号），失败后按 1s→2s→4s…最多 60s 退避重试，不再每拍硬撞。同时保留了一条**自愈通道**：距上次成功推送满 60 秒就无条件再推一次——否则资源管理器（explorer.exe）重启时把图标丢了，而托盘库在重注册失败时不会报错，图标会一直缺到下次电量变化为止。
+
+### 工程与质量（开发者向摘要）
+
+- **S1（日耗电口径，红队复核后重定）**：`build_daily_cards` 先按设备聚一条完整读数序列（含充电态、剔 `SOURCE_CHARGING_FAST`），再顺序扫相邻对：`drain += (p0 - p1).max(0)`。**充电态读数参与**——红队反例证明「把充电读数当切段边界」会把插电窗口内的跌幅整段丢掉（08h 90→10h 80→12h 75(充电)→14h 65(充电)→16h 60→18h 50 真实放电 40pp，切段口径只算出 25pp，比它要替换的「首末差」还少）。归属与分母同一条规则：区间以**起点读数为准**——下降量记到起点日、跨日间隔按起点日窗口裁剪；`discharge_secs` 只累加「起点非充电态」或「该区间确有下降」的间隔（纯插电空转不计时长，否则 5 小时插着不动会被算成放电跨度）。`SOURCE_CHARGING_FAST` 仍一律不计（推断还原段）。
+- **S2（覆盖与冲突解耦，含升级阈值）**：`AvgEstimate` 新增 `coverage_hours` 与 `coverage_short`；`coverage_hours` 的口径与 `upper` **同源**（只取「出得了斜率且 >=0」的那批日卡，红队指出旧实现两个集合不同源）；`AVG_CONFLICT_MIN_COVERAGE_HOURS = 12.0` 低于该值默认只挂覆盖不足。**但覆盖不足不再无条件静音冲突**：新增 `AVG_COVERAGE_SHORT_ESCALATE_RATIO = 10.0` 与 `avg_conflict_at(..., ratio)`，覆盖不足时若比值仍超 10 倍则同时挂「覆盖不足」+「口径冲突」（红队构造：8 张 6h 卡、ledger=7.5、upper=750 时旧逻辑只输出「覆盖不足」，把百倍差整类吞掉）。
+- **S3（单侧缺失）**：`AvgEstimate` 新增 `unreconcilable`；`avg_conflict` 末臂 `_ => false` 保留（单侧缺失不在这里判），改由 `unreconcilable = ledger.is_some() != upper.is_some()` 单独承载，徽标与文案三态化。
+- **S4（唤醒首读）**：读数第 3 列记 `wake_first`，`non_wake_reads == 0` 进 `sparse`；`sparse` 日不给斜率、`kpis.today_drain_pct` 给 `None`。
+- **P2（复算脚本）**：`tools/recheck.py` 新增 `build_daily_cards` / `build_run_spans_by_day` / `build_avg_estimate` / `build_week_over_week` 的纯 Python 镜像（含 `median` / `round2` 的 Rust 语义复刻），`check_html` 对 `daily_cards` / `run_spans_by_day` / `first_screen_kpis` / `avg_estimate` / `week_over_week` / `activity_gap_note` 由「只查 key 存在」改为**逐值比对**。
+- **P3（主机侧，红队复核后重做）**：`push_needed` 换成 `PushState<K>` 状态机（crate root，纯逻辑可测）——钥匙变了推、距上次**成功**推送超过 `PUSH_HEARTBEAT = 60s` 也推、失败按 1s→2s→4s…封顶 60s 指数退避。心跳是 explorer 重启后的唯一自愈通道：tray-icon 收到 `TaskbarCreated` 会自行重注册，但 `platform_impl/windows/mod.rs:378-388` 把 `register_tray_icon` 的返回值丢掉了，重注册失败对上层不可见（红队 red-h #1）。`IconCache::generation` 仍在 `rebuild` 真正生效时 +1，保证形象变了但三元组相同时不漏推。`CFG_POLL_INTERVAL` 5s → 15s。新增 `IoCmd::ConfigChanged`，但**只在轮询相关键（`poll_interval_secs` / `experimental_per_device_polling`）真的变化时才投递**——红队 red-h #12 实测拖低电阈值滑块会连发 9 次 apply、文本缩放 25 次，无条件投递等于 N 次空轮 + N 条诊断。主循环收到后 `retier_all` 并 `continue 'outer` 重算睡眠预算。
+- **P2-重连**：接收器在但槽位全落空（`no_device && has_channels`）的枚举间隔从 30 秒退到 `NO_SLOT_RESCAN_INTERVAL = 300` 秒；该态恢复本来就靠 force 路径（唤醒枚举 / 通道活性判死），不靠这条门控。`wake_arm_set` 的「归因失败」豁免收紧为「没有任何休眠设备且只命中一台在线灰显设备」，避免无归因时把在线灰显设备一并装填。
+- **P2-重连的诊断面补正（红队 red-f 复核后追加）**：`EnteredNoDevice` 的 bootlog 与诊断流文案原本硬写「backoff enum retry 30s/60s/120s」，而 `has_channels` 为真时实际是 300 秒单档——现在按 `channels.is_empty()` 分档输出（无通道才报三档退避，有通道报 `slow rescan every 300s`），否则排障时会照文案去等 30 秒。同时修掉两处注释漂移：`RESCAN_LOG_CAP` 单会话 `100` 行的覆盖时长（120 秒档 ≈3.3 小时 → 300 秒档 ≈8.3 小时）、死槽冷却「新配对发现 ≈5 分钟」的估算（该说法源自 120 秒轮询时代，300 秒档 ≈50 分钟、1800 秒档 ≈5 小时）。Raw Input 安装失败的日志补上后果说明：该态没有 `WM_INPUT`，也就没有 `force` 重扫，0 注册槽位的恢复只能等 300 秒慢扫（比 v0.3.27 的 30 秒晚 270 秒）。
+- **回归**：新增 `g1_charging_reads_still_count_as_discharge` / `g1b_charging_poll_reads_count_toward_drain` / `g3_cross_day_drop_stays_with_its_start_day` / `g4_short_coverage_still_escalates_huge_gap` / `g4b_short_coverage_keeps_normal_gap_quiet`（红队 red-g 反例逐条钉死）、`push_state_tests` 四条（首推 / 同钥匙到心跳才重推 / 钥匙变化立即推 / 失败退避与恢复）、`no_device_with_channels_uses_slow_rescan`、`wake_arm_set_arm_all_single_gray_exempt_only_without_sleeping`；既有断言按新口径修正（`daily_card_first_last_delta` 的 drain 5 → 9 并补 `discharge_secs = 16h`、`s1_drain_sums_across_charge_cycles` 的 90/10h → 90/12h、`first_screen_no_inferred_single_value` 键集加 `coverage_short`）。`cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --locked -- -D warnings` / `cargo test --workspace --locked` 三门禁本地全绿（app 362 + tray 90 + 其余 crate 各绿），`python -m unittest discover -s tests` 28 项通过。
+- **对账实跑**：4 个 fixture（`stats_recheck` / `stats_adversarial` / `stats_activity_bitmap_legacy` / `stats_clock_rewind_tail`）× 匿名化开/关共 8 次，`tools/recheck.py` 全部通过「volttray-data 逐值一致 + 断网零外链」。
+
+### 升级注意事项
+
+- **日耗电数值会变**（这是本次修复的目的）：同一天若充过电，柱高会比旧版**更大**（旧的把充电回补吞掉了）。历史数据无需迁移——`stats.jsonl` 格式零变化，报告是导出时现算的，旧文件用新版导出即按新口径呈现。旧版导出的 HTML 不会再变（它是快照）。
+- **日均区间可能出现新的徽标**：以前显示「口径冲突」而现在显示「覆盖不足」或「无法对账」的，不是数据变差，是原来把两种不同的异常一起报成了冲突。
+- `config.toml` 手改后的生效延迟由约 5 秒变为约 15 秒；设置窗口改动仍即时生效。
+- 配置键、数据文件、导出契约均无新增/删除/改名；`DailyCard` 多一个 `discharge_secs`、`AvgEstimate` 多 `coverage_hours` 与 `unreconcilable`——**只加不删**，按旧字段名读取的下游脚本不受影响。
+
+### 验证口径与未验证项
+
+- 三门禁（fmt / clippy -D warnings / test）与 `tools/recheck.py` 8 次逐值对账均为本地实测，未取 CI 结果当作证据。
+- 未验证（如实分级）：① 日耗电新口径只用合成事件与 fixture 覆盖了「一天内多次充放」「插电期间下跌」「跨日归属」「全是唤醒首读」四种形态，**没有真实设备连续多日插拔充电的实测对账**；② 「覆盖不足 12 小时」与「升级阈值 10 倍」都是按既有 fixture 的分水岭定的经验值，真实用户里放电跨度中位数落在 8–14 小时的样本表现未验证；③ 托盘心跳 60s 只在单测里验证了状态机时序，**真机上 explorer 重启后的实际恢复时间未采样**（依赖 tray-icon crate 自行重注册是否成功，而它不上报失败）；④ `discharge_secs` 的「纯插电空转不计时长」依赖 `charging` 标志的准确性，若设备在插电瞬间上报 `charging=false`（协议抖动），该段会被当成放电时长；⑤ `config.toml` 手改延迟 15 秒的体感、以及 300 秒慢档在真实「接收器在、鼠标刚唤醒」场景下的恢复速度，均未真机实测。
+
+### English Summary
+
+v0.3.28 is mostly about measurement honesty. Daily drain used to be "last reading minus first reading of the day", so a single recharge erased everything drained before it from that day's bar. It is now the running sum of drops between consecutive readings, including readings taken while charging — a mouse keeps discharging while plugged in, and the previous attempt (segmenting at charge points) skipped exactly that window. Each drop is attributed to the day its *starting* reading falls on, so a drop across midnight stays with yesterday and the two days still add up. The slope denominator (`discharge_secs`) only accumulates intervals that start outside a charging state or that actually dropped, so idle plugged-in hours no longer inflate it. The daily-average range used to fold three different anomalies into one boolean: under-covered days (median valid discharge span below 12 h) now say "coverage too short", one-sided estimates now say "cannot reconcile", and a coverage-short state no longer silently swallows a genuine conflict — if the two estimates still differ by more than 10x, both badges appear. Days whose readings are all wake-first reads count as insufficient samples. On the host side, tray pushes go through a small state machine: push when the shape changes, push anyway after 60 s since the last *successful* push (the only self-healing path after an explorer.exe restart, since the tray crate discards the re-register result), and back off 1s→2s→4s capped at 60 s on failure. Idle config hot-reload moved from 5 s to 15 s, saving the settings window re-tiers immediately but only when a polling-related key actually changed, and the "receiver present but no slot registered" rescan dropped from 30 s to 300 s. `tools/recheck.py` grew a line-by-line Python mirror of the daily-card, average, and week-over-week builders and now compares every value instead of checking that keys exist. Upgrade notes: daily drain numbers get larger on days with charging (that is the fix), some "conflict" badges become "coverage too short" or "cannot reconcile", and the data format is unchanged — no migration needed.
+
 ## v0.3.27
 
 用户报告的三处「用起来别扭」的结构性修复：离线很久的设备删不掉、没手动钉选时托盘图标偶尔跳到另一台设备、导出的 HTML 报告太复杂且部分图连纵坐标都没有。三项都是设计缺口而不是偶发错乱，因此修的是入口与算法本身。零配置迁移（新增一个可选键，缺省即启用合理的自动清理）。统计与导出只加不删，旧字段与旧表格行原样保留。

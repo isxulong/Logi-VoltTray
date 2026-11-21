@@ -276,6 +276,10 @@ pub struct IconCache {
     /// 背景覆盖度（% 相对位图内切块，D-48/D-57，20..=100；100% = 满出血）。
     bg_scale: u8,
     frames: FrameLru<(IconColor, String, bool)>,
+    /// 渲染输入代号（v0.3.28，耗电分析 P3-②）：每次 rebuild 真正生效时 +1。
+    /// 托盘侧以 (代号, 色档, 文本, 提亮) 作推送钥匙——形象变了即使三元组
+    /// 相同也必须重推，靠代号把两种情形区分开。
+    generation: u64,
 }
 
 impl IconCache {
@@ -302,6 +306,7 @@ impl IconCache {
             text_scale: text_scale.clamp(ICON_TEXT_SCALE_MIN, ICON_TEXT_SCALE_MAX),
             bg_scale: bg_scale.clamp(ICON_BG_SCALE_MIN, ICON_BG_SCALE_MAX),
             frames: FrameLru::new(FRAME_CACHE_CAP),
+            generation: 0,
         }
     }
 
@@ -398,7 +403,14 @@ impl IconCache {
             // v0.3.15（P1-2）：渲染输入已变 → 旧帧（尺寸/配色全部失效）
             // 整体清空，后续请求按新输入懒渲染。
             self.frames.clear();
+            // v0.3.28（P3-②）：代号前移，托盘侧据此重推图标。
+            self.generation = self.generation.wrapping_add(1);
         }
+    }
+
+    /// 当前渲染输入代号（v0.3.28）：配 (色档, 文本, 提亮) 作托盘推送钥匙。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// 取渲染图标；`bright` = 低电闪烁的提亮档。

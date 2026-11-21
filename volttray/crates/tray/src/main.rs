@@ -147,6 +147,145 @@ pub(crate) fn next_pin(current: Option<&str>, clicked: &str) -> Option<String> {
         Some(clicked.to_string())
     }
 }
+/// 托盘推送状态机（v0.3.28 P3-②，红队 red-h 复核后重做）。
+///
+/// 原实现只做「钥匙没变就不推」。两个问题：
+///
+/// 1. **explorer 重启会永久丢图标**。tray-icon crate 自己处理 TaskbarCreated
+///    （`platform_impl/windows/mod.rs:378-388`）并用内部保存的 icon 重注册，
+///    但那条路径把 `register_tray_icon` 的返回值直接丢掉——重注册失败对上层
+///    不可见。旧实现里 refresh_ui 每拍都推、失败下一拍自愈；只按钥匙去重之后，
+///    稳态下电量文本几十分钟不变，图标就一直缺着。
+/// 2. **失败后没有退避**。`Shell_NotifyIconW` 持续失败（explorer 崩溃窗口、
+///    UIPI 阻挡）时，每次 refresh_ui 都会重建 HICON 再失败一次；闪烁期 2Hz，
+///    正好把本批要省的开销原样吐回去。
+///
+/// 因此改成三条规则：
+/// - 钥匙变了 → 推；
+/// - 距上次**成功**推送超过 `heartbeat` → 无论钥匙变没变都再推一次（自愈通道，
+///   也是唯一不依赖 crate 内部状态的恢复手段）；
+/// - 失败后指数退避（1s → 2s → … → 封顶 60s），退避期间不推也不重建 HICON。
+///
+/// 置于 crate root（无 cfg 门控）：纯状态机，Linux 侧单测可直接覆盖。
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct PushState<K> {
+    /// 上一次**成功**推送的钥匙。
+    key: Option<K>,
+    /// 上一次成功推送的时刻。
+    last_ok: Option<std::time::Instant>,
+    /// 连续失败次数（成功后清零）。
+    fails: u32,
+    /// 退避到期时刻（期间不重试）。
+    retry_at: Option<std::time::Instant>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl<K: Clone + PartialEq> PushState<K> {
+    pub(crate) fn new() -> Self {
+        Self {
+            key: None,
+            last_ok: None,
+            fails: 0,
+            retry_at: None,
+        }
+    }
+
+    /// 本拍是否该推送。`heartbeat` 是「无变化也重推一次」的最长间隔。
+    pub(crate) fn should_push(
+        &self,
+        now: std::time::Instant,
+        next: &K,
+        heartbeat: std::time::Duration,
+    ) -> bool {
+        if let Some(t) = self.retry_at {
+            if now < t {
+                return false;
+            }
+        }
+        if self.key.as_ref() != Some(next) {
+            return true;
+        }
+        match self.last_ok {
+            None => true,
+            Some(t) => now.saturating_duration_since(t) >= heartbeat,
+        }
+    }
+
+    /// 登记一次推送结果：成功则记钥匙、清退避；失败则进入指数退避。
+    pub(crate) fn note(&mut self, ok: bool, now: std::time::Instant, next: K) {
+        if ok {
+            self.key = Some(next);
+            self.last_ok = Some(now);
+            self.fails = 0;
+            self.retry_at = None;
+            return;
+        }
+        self.fails = self.fails.saturating_add(1);
+        // 1s、2s、4s…按 2 的幂退避，封顶 60s（explorer 重启通常几秒内就绪，
+        // 但也不该在它长期不可用时继续 2Hz 重试）。
+        let shift = (self.fails - 1).min(6);
+        let secs = 1u64 << shift;
+        self.retry_at = Some(now + std::time::Duration::from_secs(secs.min(60)));
+    }
+}
+
+#[cfg(test)]
+mod push_state_tests {
+    use super::PushState;
+    use std::time::{Duration, Instant};
+
+    const HB: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn first_push_always_happens() {
+        let s: PushState<u64> = PushState::new();
+        assert!(s.should_push(Instant::now(), &7, HB));
+    }
+
+    #[test]
+    fn same_key_is_skipped_until_heartbeat() {
+        let mut s = PushState::new();
+        let t0 = Instant::now();
+        s.note(true, t0, 7u64);
+        assert!(!s.should_push(t0 + Duration::from_secs(1), &7, HB));
+        assert!(!s.should_push(t0 + Duration::from_secs(59), &7, HB));
+        // 心跳到点：即使钥匙没变也重推（explorer 重启后的自愈通道）。
+        assert!(s.should_push(t0 + HB, &7, HB));
+    }
+
+    #[test]
+    fn changed_key_pushes_immediately() {
+        let mut s = PushState::new();
+        let t0 = Instant::now();
+        s.note(true, t0, 7u64);
+        assert!(s.should_push(t0 + Duration::from_secs(1), &8, HB));
+    }
+
+    #[test]
+    fn failure_backs_off_then_recovers() {
+        let mut s = PushState::new();
+        let t0 = Instant::now();
+        // 首次失败 → 1s 退避。
+        s.note(false, t0, 7u64);
+        assert!(!s.should_push(t0, &7, HB));
+        assert!(!s.should_push(t0 + Duration::from_millis(500), &7, HB));
+        assert!(s.should_push(t0 + Duration::from_secs(1), &7, HB));
+        // 连续失败 → 2s、4s…封顶 60s。
+        s.note(false, t0 + Duration::from_secs(1), 7u64);
+        assert!(!s.should_push(t0 + Duration::from_secs(2), &7, HB));
+        assert!(s.should_push(t0 + Duration::from_secs(3), &7, HB));
+        for i in 0..10 {
+            s.note(false, t0 + Duration::from_secs(3 + i), 7u64);
+        }
+        let t = t0 + Duration::from_secs(20);
+        assert!(!s.should_push(t, &7, HB), "封顶 60s 退避期间不重试");
+        assert!(s.should_push(t + Duration::from_secs(60), &7, HB));
+        // 成功后退避清零、钥匙记账。
+        s.note(true, t + Duration::from_secs(60), 7u64);
+        assert!(!s.should_push(t + Duration::from_secs(61), &7, HB));
+    }
+}
 
 #[cfg(windows)]
 mod imp {
@@ -223,10 +362,25 @@ mod imp {
     /// 接收器槽位扫描顺序（参考实现 `_scan_channel` 实证：1..=6 再 0xFF）。
     const SCAN_SLOTS: [u8; 7] = [1, 2, 3, 4, 5, 6, 0xFF];
     /// v0.3.11（F3）：无设备态每轮重扫的汇总日志单会话行数上限
-    /// （30s 一轮 ≈ 50 分钟覆盖；防长期无人值守时日志爆量）。
+    /// （v0.3.28/D-109 起最慢一档 300s 一轮 ≈ 8.3 小时覆盖；防长期
+    /// 无人值守时日志爆量）。
     const RESCAN_LOG_CAP: u32 = 100;
+    /// 空闲等待的分片长度，同时就是「手改 TOML 多久被发现」的节奏
+    /// （v0.3.28，耗电分析 P3-③）：原 5s 分片让空闲期每小时醒 720 次
+    /// （17280 次/天），其中绝大多数只为 stat 一次 mtime。放宽到 15s
+    /// 后降到 240 次/时（5760 次/天）。命令、唤醒信号、设备到期点都能
+    /// 随时打断 recv_timeout，所以只影响纯空闲轮询；用户可感知的
+    /// 热重载延迟由「约 5 秒」变成「约 15 秒」（README 已同步）。
+    const CFG_POLL_INTERVAL: Duration = Duration::from_secs(15);
     /// 电压曲线名（v0.2.0：参考实现 13 锚点实证曲线）。
     const CURVE: &str = "li-ion-logi";
+    /// 托盘推送心跳（v0.3.28 P3-②，red-h 复核）：即使图标钥匙与 tooltip
+    /// 都没变，距上次成功推送超过该间隔也再推一次。这是一条**自愈通道**
+    /// ——tray-icon crate 收到 TaskbarCreated 会自行重注册，但它把 register
+    /// 的返回值丢掉（platform_impl/windows/mod.rs:378-388），重注册失败对
+    /// 上层不可见；没有心跳的话，稳态下电量文本几十分钟不变，图标就一直
+    /// 缺着。取 60s：比最短轮询档（300s）密，代价是稳态每分钟一次 NIM_MODIFY。
+    const PUSH_HEARTBEAT: Duration = Duration::from_secs(60);
 
     enum GuiMsg {
         Snapshot(Box<Snapshot>),
@@ -248,6 +402,12 @@ mod imp {
         /// IO 线程负责「删内存条目 + 删持久化记录 + 立即落盘」三件事
         ///（落盘必须走 store，否则重启 seed_virtual 又把它播种回来）。
         ForgetDevice(String),
+        /// v0.3.28（耗电分析 P3-③配套）：设置窗口刚保存过配置。
+        /// 配置内容本身已是共享 Arc 里的新值（窗口直接写同一个
+        /// `Arc<RwLock<Config>>`），这条命令补的是「换档重排」——
+        /// 空闲分片从 5s 放宽到 15s 后，不再让窗口改动等下一轮
+        /// mtime 热重载才重排到期点。
+        ConfigChanged,
         Shutdown,
     }
 
@@ -1256,6 +1416,10 @@ mod imp {
                 Ok(IoCmd::ForgetDevice(dev_id)) => {
                     apply_forget_device(&core, &mut store, &dev_id);
                 }
+                // 设置窗口保存：配置值已在共享 Arc 里，这里只补重排。
+                Ok(IoCmd::ConfigChanged) => {
+                    apply_config_applied(&core, &observer);
+                }
                 // WakeSignal：维持旧语义（轮次即刻开始，丢弃无害）。
                 _ => {}
             }
@@ -1844,15 +2008,23 @@ mod imp {
                 }
                 match reconnect.record_result(enum_now, total_slots) {
                     Some(EnumTransition::EnteredNoDevice) => {
-                        bootlog::note(
-                            "no-device: entered (0 registered slot after enum); \
-                             backoff enum retry 30s/60s/120s (host-side only, zero rf)",
-                        );
+                        // v0.3.28（D-109）：退避档按「接收器在不在」分档——接收器
+                        // 仍在（channels 非空）但 0 注册槽位走 NO_SLOT_RESCAN_INTERVAL
+                        // （300s）单档慢扫；接收器整体不在才走 30s/60s/120s 指数退避。
+                        // 文案必须与 reconnect.rs 的实际分档一致，否则诊断读错档。
+                        let backoff = if channels.is_empty() {
+                            "backoff enum retry 30s/60s/120s"
+                        } else {
+                            "slow rescan every 300s (receiver present, 0 registered slot)"
+                        };
+                        bootlog::note(&format!(
+                            "no-device: entered (0 registered slot after enum); {backoff} (host-side only, zero rf)"
+                        ));
                         if let Ok(mut o) = observer.lock() {
                             o.push(DiagEvent::new(
                                 Layer::App,
                                 DiagKind::Info {
-                                    message: "no-device: entered; enum backoff 30s/60s/120s".into(),
+                                    message: format!("no-device: entered; {backoff}"),
                                 },
                             ));
                         }
@@ -2356,7 +2528,8 @@ mod imp {
             }
 
             // 配置热重载（P1-2：所有权在 app 层）。每轮 io round 检查一次；
-            // 分片睡眠内还会按 ~5s 节奏补查（见下），保证 TOML 手改秒级生效。
+            // 分片睡眠内还会按 CFG_POLL_INTERVAL（15s）节奏补查（见下），
+            // 保证 TOML 手改在十几秒内生效。
             handle_config_reload(&mut watcher, &core, &observer, &mut last_reload_warnings);
 
             // WP-A（v3 R5 I-01 键冲突条款）：每轮同步冲突集——冲突键停写
@@ -2475,16 +2648,19 @@ mod imp {
             // v0.3.14：watcher 原本一轮 io round 才 poll 一次——默认轮询
             // 周期 1800s 意味着手改 TOML 最长 ~30 分钟才生效（用户体感
             // 「改配置不生效」的另一半根因）。mtime stat 是主机侧零射频
-            // 操作，不触碰设备、不构成设备轮询，~5s 查一次零耗电代价。
+            // 操作，不触碰设备、不构成设备轮询。
+            // v0.3.28（P3-③）：节奏由固定 5s 改为 CFG_POLL_INTERVAL（15s）
+            // ——空闲期唤醒次数随分片长度线性下降，热重载延迟仍远小于
+            // 一轮 io round。
             let mut last_cfg_check = Instant::now();
             while Instant::now() < deadline {
                 // v0.3.15（P2-1①）：等待分片从固定 200ms 放宽到
-                // min(距 deadline 余量, 5s)——空闲期 recv 唤醒次数降
-                // 25 倍；命令依旧随时可打断（阻塞上限即分片长度），
-                // ~5s 配置热查节奏与 deadline 语义均不变。
+                // min(距 deadline 余量, CFG_POLL_INTERVAL)——空闲期 recv
+                // 唤醒次数降 75 倍；命令依旧随时可打断（阻塞上限即分片
+                // 长度），分片长度＝配置热查节奏与 deadline 语义均不变。
                 let slice = deadline
                     .saturating_duration_since(Instant::now())
-                    .min(Duration::from_secs(5));
+                    .min(CFG_POLL_INTERVAL);
                 if slice.is_zero() {
                     break;
                 }
@@ -2493,6 +2669,15 @@ mod imp {
                     // 缓存句柄可能已失效，只查旧句柄等于没刷。
                     Ok(IoCmd::RefreshNow) => {
                         reconnect.request_refresh();
+                        continue 'outer;
+                    }
+                    // v0.3.28（P3-③配套）：设置窗口保存 → 立即按新档位重排
+                    // 到期点，不等本分片自然超时（分片最长 15s）。
+                    // 重排后旧 deadline 已作废（新档可能更早也可能更晚），故直接
+                    // 回外层重算睡眠预算——只 continue 内层 while 会继续用刚算出的
+                    // 旧 deadline 睡眠，等于重排白做。
+                    Ok(IoCmd::ConfigChanged) => {
+                        apply_config_applied(&core, &observer);
                         continue 'outer;
                     }
                     // 被动唤醒（D-33）：装填一次唤醒探测资格并立即跑一轮——
@@ -2851,7 +3036,7 @@ mod imp {
                         return;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if last_cfg_check.elapsed() >= Duration::from_secs(5) {
+                        if last_cfg_check.elapsed() >= CFG_POLL_INTERVAL {
                             last_cfg_check = Instant::now();
                             handle_config_reload(
                                 &mut watcher,
@@ -2868,7 +3053,8 @@ mod imp {
     }
 
     /// 配置热重载处理（P1-2：所有权在 app 层）。从 io 循环体抽出，
-    /// 供「每轮 io round」与「分片睡眠内 ~5s 节奏」两处调用，逻辑唯一。
+    /// 供「每轮 io round」与「分片睡眠内 CFG_POLL_INTERVAL 节奏」两处调用，
+    /// 逻辑唯一。
     fn handle_config_reload(
         watcher: &mut ConfigWatcher,
         core: &Arc<Mutex<AppCore>>,
@@ -2908,6 +3094,27 @@ mod imp {
         }
     }
 
+    /// 设置窗口保存后的即时生效（v0.3.28，P3-③配套）。
+    ///
+    /// 与 `handle_config_reload` 的分工：TOML 侧改动走 mtime 热重载（含
+    /// 解析告警上报）；设置窗口已经把新配置直接写进共享 `Arc<RwLock<Config>>`
+    ///（AppCore 同一份），值本身无需再加载，缺的只是「按新档位重排到期点」
+    /// ——D-74 的 `retier_all` 原本只挂在热重载路径上，分片放宽到 15s 后
+    /// 窗口改轮询档位会晚十几秒才生效，故由窗口保存显式触发一次。
+    fn apply_config_applied(core: &Arc<Mutex<AppCore>>, observer: &Arc<Mutex<Observer>>) {
+        if let Ok(mut c) = core.lock() {
+            c.retier_all(Instant::now());
+        }
+        if let Ok(mut o) = observer.lock() {
+            o.push(DiagEvent::new(
+                Layer::App,
+                DiagKind::Info {
+                    message: "config applied (settings window)".into(),
+                },
+            ));
+        }
+    }
+
     /// GUI 侧缓存的可视化配置（与共享配置逐 tick 对账，变化即重建图标缓存）。
     struct GuiState {
         snapshot: Option<Snapshot>,
@@ -2936,6 +3143,11 @@ mod imp {
         blink: crate::blink::BlinkState,
         /// 上一 tick 的闪烁状态（v0.3.14，B9：闪烁启停 bootlog 的沿检测）。
         prev_blinking: bool,
+        /// 图标推送状态机（v0.3.28 P3-②，red-h 复核后重做）：钥匙变了才推、
+        /// 距上次成功超过心跳也重推（explorer 重启自愈）、失败走指数退避。
+        push_icon: crate::PushState<(u64, IconColor, String, bool)>,
+        /// tooltip 推送状态机（同上：文本未变不重推，心跳兜底）。
+        push_tip: crate::PushState<String>,
         /// 图标文本/背景缩放镜像（v0.3.4 #4，D-48）。
         icon_text_scale: u8,
         icon_bg_scale: u8,
@@ -2962,6 +3174,8 @@ mod imp {
                 menu_sig: String::new(),
                 blink: crate::blink::BlinkState::new(),
                 prev_blinking: false,
+                push_icon: crate::PushState::new(),
+                push_tip: crate::PushState::new(),
                 icon_text_scale: cfg.icon_text_scale,
                 icon_bg_scale: cfg.icon_bg_scale,
             }
@@ -3349,7 +3563,14 @@ mod imp {
         if raw_input.is_some() {
             bootlog::stage("rawinput-installed");
         } else {
-            bootlog::note("rawinput install failed; passive wake degraded to polling");
+            // v0.3.28（D-109）：Raw Input 是「0 注册槽位」态唯一的即时恢复通道
+            // （鼠标一动 → request_wake_enum → force → 立即重扫）。失败后退化为
+            // 只能等 NO_SLOT_RESCAN_INTERVAL（300s）慢扫，比 v0.3.27 的 30s 晚
+            // 270s；这行日志是唯一能解释「插上鼠标半天不亮」的线索，必须写明。
+            bootlog::note(
+                "rawinput install failed; passive wake degraded to polling \
+                 (no-slot recovery falls back to 300s slow rescan, not rawinput force)",
+            );
         }
         let _raw_input = raw_input;
 
@@ -3776,7 +3997,14 @@ mod imp {
                     .unwrap_or_else(|| "50".to_string());
                 // v0.3.18（U-5）：预览走单一渲染源，需与托盘同一 DPI 档位
                 // 位图边长（cur_size 随 DPI/配置变化在事件循环中维护）。
-                crate::settings::open_settings(cfg_arc, cfg_path, *cur_dark, *cur_size, &preview);
+                crate::settings::open_settings(
+                    cfg_arc,
+                    cfg_path,
+                    *cur_dark,
+                    *cur_size,
+                    &preview,
+                    cmd_tx.clone(),
+                );
             } else if e.id == ids.diag {
                 export_diag(observer, enum_snap, channel_map_miss, telemetry);
             } else if e.id == ids.stats_export {
@@ -4098,8 +4326,27 @@ mod imp {
         };
         // M11：低电闪烁 = 常态与提亮档各 500ms 交替；点击托盘后本次停闪。
         let bright = state.blink.bright_frame(state.blink_enabled);
-        if let Some(ic) = cache.icon_for(color, &text, bright) {
-            let _ = tray.set_icon(Some(ic));
+        // v0.3.28（耗电分析 P3-② + red-h 复核）：推送走 PushState 三规则——
+        // 钥匙变了推、距上次成功超过心跳也推、失败指数退避。
+        //
+        // 「心跳」是 explorer 重启后的**唯一**自愈通道：tray-icon crate 收到
+        // TaskbarCreated 会自己重注册，但它把 register 的返回值丢掉了
+        // （platform_impl/windows/mod.rs:378-388），重注册失败对上层不可见；
+        // 稳态下电量文本几十分钟不变，没有心跳就会一直缺图标。
+        // 心跳取 60s：比最短轮询档（300s）密，代价是稳态每分钟一次
+        // `set_icon`（key 未变时仍走 icon_for 缓存帧 + 一次 NIM_MODIFY），
+        // 仍比改动前每拍都推低两个数量级。
+        let now_push = Instant::now();
+        let icon_key = (cache.generation(), color, text.clone(), bright);
+        if state
+            .push_icon
+            .should_push(now_push, &icon_key, PUSH_HEARTBEAT)
+        {
+            let sent = match cache.icon_for(color, &text, bright) {
+                Some(ic) => tray.set_icon(Some(ic)).is_ok(),
+                None => false,
+            };
+            state.push_icon.note(sent, now_push, icon_key);
         }
         let tip = match show {
             Some(d) if d.state == "sleeping" => {
@@ -4117,7 +4364,10 @@ mod imp {
             Some(d) => format!("LogiVoltTray — {} {}", d.name, text),
             None => "LogiVoltTray".to_string(),
         };
-        let _ = tray.set_tooltip(Some(&tip));
+        if state.push_tip.should_push(now_push, &tip, PUSH_HEARTBEAT) {
+            let sent = tray.set_tooltip(Some(&tip)).is_ok();
+            state.push_tip.note(sent, now_push, tip);
+        }
     }
 
     #[cfg(test)]

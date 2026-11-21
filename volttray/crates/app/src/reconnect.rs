@@ -37,6 +37,17 @@ pub const ENUM_BACKOFF_STEPS: [Duration; 3] = [
     Duration::from_secs(120),
 ];
 
+/// 「接收器在、但一个槽位都没注册上」态的例行重扫间隔（2026-11-21 耗电
+/// 分析 P2）：该态既不是正常态（无槽位可查），也不该套用无通道退避——
+/// 30/60/120s 那三档是按「连候选通道都没有」设计的，用在这里等于把
+/// 最贵的路径配了最密的节奏。每轮重扫 = `HidApi::new` + 全设备遍历 +
+/// 逐槽 ping，8h 静置下 30s 节奏约 960 轮 × 7 槽的纯主机侧唤醒开销；
+/// 慢档把同窗口降到 ~96 轮。
+///
+/// 用户可见恢复不依赖本门控：0 注册槽位时的鼠标活动会经
+/// `request_wake_enum` 置 force 立即重扫，「立即刷新」同样立即置 force。
+pub const NO_SLOT_RESCAN_INTERVAL: Duration = Duration::from_secs(300);
+
 /// 连续非超时类硬失败（I/O 错误等）达到该次数即判定通道句柄失效：
 /// 作废缓存句柄并强制重新枚举一次（主机侧操作，零射频成本）。
 /// v0.3.10（D-67）起同时作为「整轮零应答静默连击」的判死轮数。
@@ -246,8 +257,10 @@ pub const DEAD_SLOT_COOLDOWN_ROUNDS: u32 = 10;
 ///   是 `NoResponseCause::feeds_dead_slot_cooldown`（device crate）；
 /// - **降频语义**：连续不应答轮数 < [`DEAD_SLOT_COOLDOWN_ROUNDS`] 时
 ///   每轮照扫；达到后每 K 轮放行 1 次（streak 为 K 的整数倍时扫描）。
-///   稳态下新配对设备的自动发现延迟由 ≤30s 放宽到 ≤K 轮（约 5 分钟），
-///   手动刷新 / 动鼠标经 force 枚举 [`Self::clear`] 立即穿透；
+///   稳态下新配对设备的自动发现延迟由 ≤30s 放宽到 ≤K 轮（v0.3.28/D-109
+///   起按轮询周期计：1800s 档 ≈5 小时、300s 档 ≈50 分钟；120s 档时代
+///   写的「约 5 分钟」已不成立），手动刷新 / 动鼠标经 force 枚举
+///   [`Self::clear`] 立即穿透；
 /// - **跳过轮必须推进连击**（BF-1）：生产接线在 `should_scan` 返回
 ///   false 的跳过轮同样调用 `note_handshake(slot, true)`——否则
 ///   streak 冻结、冷却槽永不复扫。本结构的放行节奏以该接线为前提，
@@ -309,8 +322,10 @@ impl DeadSlotScan {
 ///   装填一次探测资格让它随探测轮提前刷新；
 /// - **归因失败回退 arm-all**（`on_channel = None`）：仅 Sleeping——
 ///   无归因证据时不对在线设备发任何额外查询（电池红线保守侧）；
-///   **豁免**：Online-灰显恰为 1 台时一并装填（此时全系统只有它一台
-///   灰显，arm-all 的「误装填他机」代价为零）。
+///   **豁免**（v0.3.28 收紧）：仅当**没有休眠设备可装填**且全系统 Online-
+///   灰显恰为 1 台时，才把这唯一一台一并装填。此前只判「恰为 1 台」，
+///   于是「有休眠设备可装填」的常见场景也会顺带武装在线设备，多付一次
+///   额度门之外的探测（power 分析 P3）。
 ///
 /// 返回 (装填 id 列表, 豁免是否生效)；豁免标记供 IO 线程落日志。
 pub fn wake_arm_set(
@@ -330,7 +345,8 @@ pub fn wake_arm_set(
         ),
         None => {
             let mut ids: Vec<String> = sleeping.to_vec();
-            let exempt = online_gray.len() == 1;
+            // 收紧后的豁免：无休眠候选时才「顺手」装填那唯一一台在线灰显。
+            let exempt = sleeping.is_empty() && online_gray.len() == 1;
             if exempt {
                 ids.extend(online_gray.iter().cloned());
             }
@@ -432,7 +448,9 @@ impl Reconnect {
     /// - 有待消费的强制请求 → 枚举；
     /// - 从未枚举过 → 枚举；
     /// - 无设备且连候选通道都没有 → 按 30s/60s/120s 退避（仅主机侧枚举）；
-    /// - 其余（正常态 / 有通道但无注册槽位）→ 沿用 30s 门控。
+    /// - 无设备但有候选通道（接收器在、槽位全落空）→ 慢档
+    ///   `NO_SLOT_RESCAN_INTERVAL`（300s）；该态恢复靠 force 路径，不靠本门控；
+    /// - 正常态（已有注册槽位）→ 沿用 30s 门控。
     pub fn should_enumerate(&self, now: Instant, has_channels: bool) -> bool {
         if self.force {
             return true;
@@ -443,6 +461,8 @@ impl Reconnect {
         let elapsed = now.saturating_duration_since(t);
         if self.no_device && !has_channels {
             elapsed >= self.current_backoff()
+        } else if self.no_device {
+            elapsed >= NO_SLOT_RESCAN_INTERVAL
         } else {
             elapsed >= REENUM_INTERVAL
         }
@@ -477,7 +497,7 @@ impl Reconnect {
     /// 本轮轮询后的睡眠时长（分片睡眠的总预算）：
     /// - 有待消费的强制重枚举 → 0（立即回到循环头执行枚举）；
     /// - 无设备态 → 距下次退避枚举的剩余时间（无候选通道时 30/60/120s，
-    ///   有通道但无槽位时沿用 30s；不产生任何设备查询）；
+    ///   有通道但无槽位时 300s 慢档；不产生任何设备查询）；
     /// - 正常态 → 轮询间隔（与 v0.3.8 行为一致，重枚举在醒后随 30s 门控发生）。
     pub fn next_wake(&self, now: Instant, has_channels: bool, poll_interval: Duration) -> Duration {
         if self.force {
@@ -488,6 +508,8 @@ impl Reconnect {
         }
         let due = if self.no_device && !has_channels {
             self.current_backoff()
+        } else if self.no_device {
+            NO_SLOT_RESCAN_INTERVAL
         } else {
             REENUM_INTERVAL
         };
@@ -658,25 +680,115 @@ mod tests {
         assert_eq!(HANDLE_INVALIDATE_THRESHOLD, 3);
     }
 
-    /// 接收器通道在、但槽位扫描全落空（驱动未就绪的中间态）：
-    /// 无设备态下沿用 30s 重扫节奏（既有行为），不走 60/120 退避。
+    /// 接收器通道在、但槽位扫描全落空（驱动未就绪 / 鼠标深睡 / 配对丢失
+    /// 的中间态）：v0.3.28 起走 300s 慢档重扫（此前 30s），不升 60/120
+    /// 退避档（那三档是「连候选通道都没有」的语义）。
     #[test]
-    fn no_device_with_channels_keeps_30s_rescan() {
+    fn no_device_with_channels_uses_slow_rescan() {
         let mut r = Reconnect::new();
         let t0 = Instant::now();
         assert_eq!(
             r.record_result(t0, 0),
             Some(EnumTransition::EnteredNoDevice)
         );
-        assert_eq!(r.record_result(t0 + Duration::from_secs(30), 0), None);
-        // 有通道：30s 门控，不升退避档。
-        assert!(!r.should_enumerate(t0 + Duration::from_secs(59), true));
-        assert!(r.should_enumerate(t0 + Duration::from_secs(60), true));
-        // next_wake 给 30s 剩余，而非 60s 退避。
+        // 有通道：300s 慢档，不升退避档、也不按 30s 门控。
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(29), true));
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(299), true));
+        assert!(r.should_enumerate(t0 + Duration::from_secs(300), true));
+        // next_wake 给 300s 剩余，而非 60s 退避。
         assert_eq!(
             r.next_wake(t0 + Duration::from_secs(30), true, Duration::from_secs(600)),
-            Duration::from_secs(30)
+            Duration::from_secs(270)
         );
+        // 慢档不拖累恢复：0 注册槽位时的鼠标活动置 force，立即重扫。
+        assert!(r.request_wake_enum(t0 + Duration::from_secs(31), 0));
+        assert!(r.should_enumerate(t0 + Duration::from_secs(31), true));
+        assert_eq!(
+            r.next_wake(t0 + Duration::from_secs(31), true, Duration::from_secs(600)),
+            Duration::ZERO
+        );
+    }
+
+    /// red-f C4 ①（v0.3.28）：`next_wake` 与 `should_enumerate` 在「接收器在、
+    /// 0 注册槽位」态必须给同一个数（300s 慢档），不能一个 300s 一个 30s——
+    /// 两者若分叉，主循环会按 30s 醒来却因门控不放行而空转。
+    #[test]
+    fn no_device_with_channels_wake_matches_enumerate_gate() {
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        let _ = r.record_result(t0, 0);
+        // 同一个 300s 边界：门控与睡眠预算同时放行/同时到点。
+        for secs in [0u64, 1, 150, 299] {
+            let now = t0 + Duration::from_secs(secs);
+            assert!(
+                !r.should_enumerate(now, true),
+                "慢档未到点不应枚举（{secs}s）"
+            );
+            assert_eq!(
+                r.next_wake(now, true, Duration::from_secs(1800)),
+                NO_SLOT_RESCAN_INTERVAL.saturating_sub(Duration::from_secs(secs)),
+                "睡眠预算应等于慢档剩余（{secs}s）"
+            );
+        }
+        let due = t0 + NO_SLOT_RESCAN_INTERVAL;
+        assert!(r.should_enumerate(due, true));
+        assert_eq!(
+            r.next_wake(due, true, Duration::from_secs(1800)),
+            Duration::ZERO
+        );
+    }
+
+    /// red-f C4 ②（v0.3.28）：`has_channels` 在同一条时间线上翻转（接收器
+    /// 被拔 → 插回）时，两套节奏必须各自成立、互不残留；且回到「无通道」
+    /// 后退避档从当前 streak 起算，不从慢档继承。
+    #[test]
+    fn has_channels_flip_switches_tempo() {
+        let mut r = Reconnect::new();
+        let t0 = Instant::now();
+        let _ = r.record_result(t0, 0);
+        // 接收器在：300s 慢档。
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(31), true));
+        // 接收器被拔（同一条时间线，无新枚举）：退回 30s 首档，已过 31s → 放行。
+        assert!(r.should_enumerate(t0 + Duration::from_secs(31), false));
+        assert_eq!(
+            r.next_wake(
+                t0 + Duration::from_secs(31),
+                false,
+                Duration::from_secs(1800)
+            ),
+            Duration::ZERO,
+            "无通道且首档已过点 → 立即醒"
+        );
+        // 插回接收器：又回到 300s 慢档（31s 未到点）。
+        assert!(!r.should_enumerate(t0 + Duration::from_secs(31), true));
+        assert_eq!(
+            r.next_wake(
+                t0 + Duration::from_secs(31),
+                true,
+                Duration::from_secs(1800)
+            ),
+            Duration::from_secs(269)
+        );
+    }
+
+    /// red-f C4 ③（v0.3.28）：`last_enum == None`（进程刚起、一次都没枚举过）
+    /// 必须在两种 has_channels 下都立即放行，且睡眠预算为 0——否则启动瞬间
+    /// 会先睡满一档才出第一个图标。
+    #[test]
+    fn first_round_always_enumerates_before_any_record() {
+        let r = Reconnect::new();
+        let t0 = Instant::now();
+        for has_channels in [false, true] {
+            assert!(
+                r.should_enumerate(t0, has_channels),
+                "首轮必须立即枚举（has_channels={has_channels}）"
+            );
+            assert_eq!(
+                r.next_wake(t0, has_channels, Duration::from_secs(1800)),
+                Duration::from_secs(1800),
+                "正常态等待一个轮询周期（has_channels={has_channels}）"
+            );
+        }
     }
 
     /// 无设备态的睡眠预算 = 距下次退避枚举的剩余时间（主机侧等待，
@@ -1045,15 +1157,21 @@ mod tests {
         assert!(!exempt);
     }
 
-    /// R-3 矩阵 ④（arm-all，单灰显豁免）：Online-灰显恰为 1 台时
-    /// 一并装填并标记豁免（误装填他机代价为零）。
+    /// R-3 矩阵 ④（arm-all，单灰显豁免；v0.3.28 收紧）：只有「没有休眠
+    /// 候选可装填」且「全系统仅 1 台在线灰显」时才连带装填它；已有休眠
+    /// 候选时不再顺带武装在线设备（省掉一次额度门之外的探测）。
     #[test]
-    fn wake_arm_set_arm_all_single_gray_exempt() {
+    fn wake_arm_set_arm_all_single_gray_exempt_only_without_sleeping() {
+        // ① 无休眠候选 + 单灰显：装填并标豁免。
+        let (ids, exempt) = wake_arm_set(&[], &["g1".to_string()], None);
+        assert_eq!(ids, vec!["g1".to_string()]);
+        assert!(exempt, "无休眠候选时单灰显仍走豁免");
+        // ② 有休眠候选 + 单灰显：只装填休眠设备，不豁免。
         let sleeping = vec!["a".to_string()];
         let gray = vec!["g1".to_string()];
         let (ids, exempt) = wake_arm_set(&sleeping, &gray, None);
-        assert_eq!(ids, vec!["a".to_string(), "g1".to_string()]);
-        assert!(exempt);
+        assert_eq!(ids, vec!["a".to_string()]);
+        assert!(!exempt, "有休眠候选时不再顺带武装在线灰显设备");
     }
 
     // -----------------------------------------------------------------

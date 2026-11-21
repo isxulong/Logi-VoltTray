@@ -73,7 +73,7 @@ The features below have their core logic locked by unit tests and their Windows-
 
 The config file lives at `%APPDATA%\LogiVoltTray\config.toml` — flat key-value pairs, no sections, auto-generated on first run.
 
-- **Hot reload**: manual edits are picked up and applied within ~5 seconds of saving (polling by modification time, no device queries involved); changes from the settings window also write back to this file in real time — consistent both ways.
+- **Hot reload**: manual edits are picked up and applied within ~15 seconds of saving (polling by modification time, no device queries involved; since v0.3.28 the idle poll interval was widened from 5 s to 15 s to cut host-side wakeups); changes from the settings window take effect the moment you save and are written back to this file in real time — consistent both ways.
 - **Fault tolerance**: unknown keys are ignored with a diagnostics warning; out-of-range values are clamped or snapped to the nearest legal tier — startup is never refused because of them.
 - **Two more data files** (under `%LOCALAPPDATA%\LogiVoltTray\`, since v0.3.16, not synced with roaming profiles): `last_known.json` (last known battery, for instant display after restart) and `stats.jsonl` (battery-drain event stream, 10 MB rotating cap).
 
